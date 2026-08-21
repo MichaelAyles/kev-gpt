@@ -245,7 +245,8 @@ module mamba_pipe #(
     reg         g_start;  wire g_done;
     reg  [18:0] g_base;   reg [10:0] g_rows;  reg [6:0] g_wpr;
     reg         g_wrx;    reg [8:0] g_wrx_a;  reg signed [7:0] g_wrx_d;
-    wire [31:0] g_wdbg;   wire [19:0] n_seed_dbg;   // silicon table readback
+    wire [19:0] n_seed_dbg;   // silicon seed-table readback
+    wire [31:0] g_wdbg;       // silicon gemv weight readback (shared port)
     reg  [10:0] g_rda;    wire signed [31:0] g_acc;
     reg  [10:0] g_rdaw;   wire [4*32-1:0] g_accw;
     gemv_i4i8 #(.PE(16), .ROWS(INROWS), .D_IN(DIN), .WMEM(409600), .RDP(4)) u_gemv (
@@ -255,7 +256,8 @@ module mamba_pipe #(
         .wr_x(g_wrx), .wr_x_addr(g_wrx_a), .wr_x_data(g_wrx_d),
         .rd_acc_addr(g_rda), .rd_acc_data(g_acc),
         .rd_accw_base(g_rdaw), .rd_accw_data(g_accw),
-        .rd_w_addr(dbg_addr[18:0]), .rd_w_data(g_wdbg));
+        .dbg_rd_en(dbg_sel == 4'd9), .dbg_rd_addr(dbg_addr[18:0]),
+        .dbg_rd_data(g_wdbg));
 
     // conv+silu (driven only by the CONV worker); NC*LR history banks
     reg         c_start;  wire c_done;  wire c_ready;

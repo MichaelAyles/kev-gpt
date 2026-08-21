@@ -175,6 +175,11 @@ def main(argv=None):
         return 0 if ok else 1
 
     # ---- run one token, full readback ---------------------------------------
+    # release the shared weight-read port before computing: dbg_sel==9 steers
+    # the gemv read pointer to the debug address, so leaving it selected would
+    # feed the multiplier debug reads instead of weights.
+    d.wr(R_DBGSEL, 0)
+
     toks = [int(t) for t in rd16(f"{args.dir}/ms_tok.mem")][:2]
     for i, tk in enumerate(toks):
         d.wr(R_TWADDR, i)

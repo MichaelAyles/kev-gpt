@@ -56,12 +56,16 @@ module gemv_i4i8 #(
     input  wire [$clog2(ROWS)-1:0]  rd_accw_base,
     output wire [RDP*32-1:0]        rd_accw_data,
 
-    // DEBUG weight readback: verifies on SILICON that the AXI-loaded weight
-    // image actually landed in URAM (the sim can't see a load that only fails
-    // on hardware). Two-stage: register the wide word, then part-select from a
-    // PLAIN reg — a variable part-select on an unpacked-array element reads X.
-    input  wire [$clog2(WMEM)-1:0]  rd_w_addr,
-    output wire [31:0]              rd_w_data
+    // DEBUG weight readback — verifies on SILICON that the AXI-loaded weight
+    // image actually landed, which no simulation can check. It SHARES the
+    // existing read port (steering wptr while the core is idle) instead of
+    // adding a second one: a second read port makes wrom 3-ported, which
+    // cannot map to URAM, and the design falls back to 714 BRAMs and stops
+    // fitting. Read wq's sub-word — wq is a plain reg, so the variable
+    // part-select is safe.
+    input  wire                     dbg_rd_en,
+    input  wire [$clog2(WMEM)-1:0]  dbg_rd_addr,
+    output wire [31:0]              dbg_rd_data
 );
     localparam int LP    = $clog2(PE);          // log2 words/cycle
     localparam int WBITS = PE * 32;             // wide weight word width
@@ -79,26 +83,39 @@ module gemv_i4i8 #(
     // contiguous ascending load the sequencer/tb performs).
     (* ram_style = "ultra" *)
     reg [WBITS-1:0] wrom [0:WWW-1];
-    reg [WBITS-1:0] wbuf;                        // wide-word assembly buffer
+    reg [31:0]      wbufw [0:PE-2];              // wide-word assembly slots
     reg [WBITS-1:0] wq;                          // registered wide read
-    reg [WBITS-1:0] wdbg_q;                      // debug readback wide word
-    reg [LP-1:0]    wdbg_sub;                    // debug readback sub-word
+    reg [LP-1:0]    dbg_sub;                     // debug sub-word select
 
     wire [LP-1:0]     wsub  = wr_w_addr[LP-1:0];
     wire [AWW-1:0]    wwide = wr_w_addr[AWM-1:LP];
     reg  [AWW-1:0]    wptr;                       // running wide read pointer
 
+    // Assemble the wide word from a per-slot register ARRAY, never a variable
+    // part-select into one 512-bit reg. The part-select version simulated
+    // correctly but synthesised to a wide word whose low 48 bits were dropped
+    // (proven by RTL-vs-netlist equivalence: word 0 lost entirely, word 1 half
+    // lost, every later word fine) — weights silently wrong on silicon while
+    // every simulation passed. Whole-element array access is the style the
+    // rest of this design already uses for exactly this reason.
+    wire [WBITS-1:0] wcommit;
+    genvar wq_i;
+    generate
+        for (wq_i = 0; wq_i < PE-1; wq_i = wq_i + 1) begin : g_wcommit
+            assign wcommit[wq_i*32 +: 32] = wbufw[wq_i];
+        end
+    endgenerate
+    assign wcommit[(PE-1)*32 +: 32] = wr_w_data;  // the PE-th word arrives now
+
     always @(posedge clk) begin
         if (wr_w) begin
-            wbuf[wsub*32 +: 32] <= wr_w_data;
-            if (wsub == PE-1)
-                wrom[wwide] <= {wr_w_data, wbuf[(PE-1)*32-1:0]};
+            if (wsub != PE-1) wbufw[wsub] <= wr_w_data;
+            else              wrom[wwide] <= wcommit;
         end
-        wq <= wrom[wptr];
-        wdbg_q   <= wrom[rd_w_addr[AWM-1:LP]];
-        wdbg_sub <= rd_w_addr[LP-1:0];
+        wq <= wrom[dbg_rd_en ? dbg_rd_addr[AWM-1:LP] : wptr];
+        dbg_sub <= dbg_rd_addr[LP-1:0];
     end
-    assign rd_w_data = wdbg_q[wdbg_sub*32 +: 32];
+    assign dbg_rd_data = wq[dbg_sub*32 +: 32];
 
     // -------- x: INT8 lanes, 8 per 64-bit word (write path unchanged) ---------
     reg [63:0] xin [0:WPR-1];
@@ -169,7 +186,13 @@ module gemv_i4i8 #(
     always @(posedge clk) begin
         done <= 1'b0;
         if (rst) begin
+            // reset EVERY pipeline register, not just the valid bits: an
+            // FPGA powers these up at 0 while RTL sim starts them X, so any
+            // dependence on their initial value is a sim/silicon divergence
+            // waiting to happen.
             st <= IDLE; v1 <= 0; v2 <= 0;
+            ri <= '0; wi <= '0; wptr <= '0; r1 <= '0; r2 <= '0;
+            last1 <= 1'b0; last2 <= 1'b0; racc <= 32'sd0;
         end else begin
             case (st)
               IDLE: if (start) begin
