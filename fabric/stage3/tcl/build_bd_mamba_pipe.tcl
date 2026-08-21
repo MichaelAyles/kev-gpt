@@ -10,12 +10,14 @@ set nc   [lindex $argv 2]
 set nst  [lindex $argv 3]
 set tmax [lindex $argv 4]
 set qh   [lindex $argv 5]
+set dbg  [lindex $argv 6]
 if {$freq eq ""} { set freq 100 }
 if {$bdir eq ""} { set bdir "/tmp/kevbuild/mamba_pipe_bit" }
 if {$nc   eq ""} { set nc 2 }
 if {$nst  eq ""} { set nst 32 }
 if {$tmax eq ""} { set tmax 2 }
 if {$qh   eq ""} { set qh 16 }
+if {$dbg  eq ""} { set dbg 0 }
 
 set part  "xck26-sfvc784-2LV-c"
 set board "xilinx.com:kv260_som:part0:1.4"
@@ -46,7 +48,7 @@ set_property -dict [list \
 
 set g [create_bd_cell -type module -reference mamba_pipe_axi eng]
 set_property -dict [list CONFIG.C_S_AXI_ADDR_WIDTH {8} \
-    CONFIG.NC $nc CONFIG.NST $nst CONFIG.QH $qh \
+    CONFIG.NC $nc CONFIG.NST $nst CONFIG.QH $qh CONFIG.DBG $dbg \
     CONFIG.TMAX $tmax CONFIG.T_TOKENS $tmax] [get_bd_cells eng]
 
 apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config [list \

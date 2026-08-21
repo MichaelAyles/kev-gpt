@@ -71,6 +71,10 @@ module rmsnorm_gated #(
     input  wire                    wr_seed,
     input  wire [5:0]              wr_seed_addr,
     input  wire [19:0]             wr_seed_data,
+    // DEBUG: read the seed table back (proves on silicon that the AXI load
+    // landed, independent of whether the $readmemh init baked).
+    input  wire [5:0]              rd_seed_addr,
+    output wire [19:0]             rd_seed_data,
 
     input  wire [$clog2(D)-1:0]    rd_o_addr,
     output wire signed [15:0]      rd_o_data,
@@ -117,6 +121,8 @@ module rmsnorm_gated #(
     // truth; the initial is a sim convenience / harmless fallback only.
     (* ram_style = "distributed" *) reg [19:0] seed_rom [0:63];
     initial $readmemh("seed.mem", seed_rom);
+    reg [19:0] seed_dbg_q;
+    assign rd_seed_data = seed_dbg_q;
 
     always @(posedge clk) begin
         if (wr_y)    yin [wr_y_addr]    <= wr_y_data;
@@ -124,6 +130,7 @@ module rmsnorm_gated #(
         if (wr_g)    grom[wr_g_addr]    <= wr_g_data;
         if (wr_lut)  lut [wr_lut_addr]  <= wr_lut_data;
         if (wr_seed) seed_rom[wr_seed_addr] <= wr_seed_data;
+        seed_dbg_q <= seed_rom[rd_seed_addr];
     end
 
     // ---- FSM -------------------------------------------------------------

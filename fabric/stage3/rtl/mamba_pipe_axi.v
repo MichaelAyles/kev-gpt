@@ -25,7 +25,10 @@ module mamba_pipe_axi #(
     parameter integer NST  = 32,
     parameter integer QH   = 16,
     parameter integer TMAX = 2,
-    parameter integer T_TOKENS = 2
+    parameter integer T_TOKENS = 2,
+    // 0 = bitstream fit (compact dump_tok readback only). 1 = DIAGNOSTIC build
+    // (full per-(stream,token) x/logit readback) — only fits at small NC/TMAX.
+    parameter integer DBG  = 0
 ) (
     input  wire                          S_AXI_ACLK,
     input  wire                          S_AXI_ARESETN,
@@ -63,7 +66,7 @@ module mamba_pipe_axi #(
     reg [18:0] t_wa;
     reg [31:0] t_wd;
     reg [3:0]  dbgsel;
-    reg [17:0] dbgaddr;
+    reg [18:0] dbgaddr;
     reg        tw_we;
     reg [TW-1:0] tw_a;
     reg [9:0]  tw_d;
@@ -96,7 +99,7 @@ module mamba_pipe_axi #(
                     6'h6:  begin t_we <= 1'b1; t_wd <= S_AXI_WDATA;
                                  t_wa <= taddr; taddr <= taddr + 1'b1; end
                     6'h8:  dbgsel  <= S_AXI_WDATA[3:0];
-                    6'h9:  dbgaddr <= S_AXI_WDATA[17:0];
+                    6'h9:  dbgaddr <= S_AXI_WDATA[18:0];
                     6'hB:  tw_a <= S_AXI_WDATA[TW-1:0];
                     6'hC:  begin tw_we <= 1'b1; tw_d <= S_AXI_WDATA[9:0]; end
                     default: ;
@@ -147,7 +150,7 @@ module mamba_pipe_axi #(
     end
 
     mamba_pipe #(.NC(NC), .NST(NST), .QH(QH), .TMAX(TMAX), .T_TOKENS(T_TOKENS),
-                 .DBG(0))
+                 .DBG(DBG))
     u_pipe (
         .clk(clk), .rst(~aresetn | soft_reset), .ready(ready),
         .start(go_pulse), .done(done), .cyc_count(cyc_count),

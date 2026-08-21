@@ -29,7 +29,7 @@ module tb_mamba_pipe;
     reg  [$clog2(NC*T)-1:0] tw_addr;
     reg  [9:0] tw_data;
     reg  [3:0] dbg_sel = 0;
-    reg  [17:0] dbg_addr = 0;
+    reg  [18:0] dbg_addr = 0;
     wire signed [31:0] dbg_data;
 
     mamba_pipe #(.NC(NC), .NST(NST), .QH(QH), .TMAX(T), .T_TOKENS(T)) dut (

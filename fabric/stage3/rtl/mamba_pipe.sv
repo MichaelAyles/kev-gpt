@@ -74,7 +74,7 @@ module mamba_pipe #(
 
     // dump reads (combinational): sel 0 = dump_x (32b), 1 = dump_logit (16b)
     input  wire [3:0]  dbg_sel,
-    input  wire [17:0] dbg_addr,
+    input  wire [18:0] dbg_addr,   // 19b: the gemv weight image needs >18b
     output reg  signed [31:0] dbg_data
 );
     localparam int SL   = NC*LR;              // conv history banks
@@ -245,6 +245,7 @@ module mamba_pipe #(
     reg         g_start;  wire g_done;
     reg  [18:0] g_base;   reg [10:0] g_rows;  reg [6:0] g_wpr;
     reg         g_wrx;    reg [8:0] g_wrx_a;  reg signed [7:0] g_wrx_d;
+    wire [31:0] g_wdbg;   wire [19:0] n_seed_dbg;   // silicon table readback
     reg  [10:0] g_rda;    wire signed [31:0] g_acc;
     reg  [10:0] g_rdaw;   wire [4*32-1:0] g_accw;
     gemv_i4i8 #(.PE(16), .ROWS(INROWS), .D_IN(DIN), .WMEM(409600), .RDP(4)) u_gemv (
@@ -253,7 +254,8 @@ module mamba_pipe #(
         .wr_w(wr_en && wr_sel == WSEL_GW), .wr_w_addr(wr_addr), .wr_w_data(wr_data),
         .wr_x(g_wrx), .wr_x_addr(g_wrx_a), .wr_x_data(g_wrx_d),
         .rd_acc_addr(g_rda), .rd_acc_data(g_acc),
-        .rd_accw_base(g_rdaw), .rd_accw_data(g_accw));
+        .rd_accw_base(g_rdaw), .rd_accw_data(g_accw),
+        .rd_w_addr(dbg_addr[18:0]), .rd_w_data(g_wdbg));
 
     // conv+silu (driven only by the CONV worker); NC*LR history banks
     reg         c_start;  wire c_done;  wire c_ready;
@@ -321,6 +323,7 @@ module mamba_pipe #(
         .wr_lut(n_wrl), .wr_lut_addr(n_wrl_a), .wr_lut_data(n_wrd),
         .wr_seed(wr_en && wr_sel == WSEL_SEED),
         .wr_seed_addr(wr_addr[5:0]), .wr_seed_data(wr_data[19:0]),
+        .rd_seed_addr(dbg_addr[5:0]), .rd_seed_data(n_seed_dbg),
         .rd_o_addr(n_rda), .rd_o_data(n_out),
         .rd_ow_base(n_rdaw), .rd_ow_data(n_ow));
 
@@ -1102,6 +1105,10 @@ module mamba_pipe #(
                 4'd0: dbg_data <= dump_x[dbg_addr];
                 4'd1: dbg_data <= {{16{dump_logit[dbg_addr][15]}}, dump_logit[dbg_addr]};
                 4'd2: dbg_data <= {22'b0, dump_tok[dbg_addr]};
+                4'd8: dbg_data <= consts[dbg_addr[6:0]];
+                4'd9: dbg_data <= g_wdbg;
+                4'd10: dbg_data <= {12'b0, n_seed_dbg};
+                4'd11: dbg_data <= {16'b0, esc[dbg_addr[9:0]]};
                 default: dbg_data <= 32'sd0;
             endcase
         end
@@ -1109,6 +1116,10 @@ module mamba_pipe #(
         always @(posedge clk) begin
             case (dbg_sel)
                 4'd2: dbg_data <= {22'b0, dump_tok[dbg_addr]};
+                4'd8: dbg_data <= consts[dbg_addr[6:0]];
+                4'd9: dbg_data <= g_wdbg;
+                4'd10: dbg_data <= {12'b0, n_seed_dbg};
+                4'd11: dbg_data <= {16'b0, esc[dbg_addr[9:0]]};
                 default: dbg_data <= 32'sd0;
             endcase
         end

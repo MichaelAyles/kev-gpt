@@ -54,7 +54,14 @@ module gemv_i4i8 #(
     // (the sequencer dequant streams read accs 0..rows-1 in order, so a P-lane
     // dequant consumes RDP/cycle). Combinational, like the single-lane port.
     input  wire [$clog2(ROWS)-1:0]  rd_accw_base,
-    output wire [RDP*32-1:0]        rd_accw_data
+    output wire [RDP*32-1:0]        rd_accw_data,
+
+    // DEBUG weight readback: verifies on SILICON that the AXI-loaded weight
+    // image actually landed in URAM (the sim can't see a load that only fails
+    // on hardware). Two-stage: register the wide word, then part-select from a
+    // PLAIN reg — a variable part-select on an unpacked-array element reads X.
+    input  wire [$clog2(WMEM)-1:0]  rd_w_addr,
+    output wire [31:0]              rd_w_data
 );
     localparam int LP    = $clog2(PE);          // log2 words/cycle
     localparam int WBITS = PE * 32;             // wide weight word width
@@ -74,6 +81,8 @@ module gemv_i4i8 #(
     reg [WBITS-1:0] wrom [0:WWW-1];
     reg [WBITS-1:0] wbuf;                        // wide-word assembly buffer
     reg [WBITS-1:0] wq;                          // registered wide read
+    reg [WBITS-1:0] wdbg_q;                      // debug readback wide word
+    reg [LP-1:0]    wdbg_sub;                    // debug readback sub-word
 
     wire [LP-1:0]     wsub  = wr_w_addr[LP-1:0];
     wire [AWW-1:0]    wwide = wr_w_addr[AWM-1:LP];
@@ -86,7 +95,10 @@ module gemv_i4i8 #(
                 wrom[wwide] <= {wr_w_data, wbuf[(PE-1)*32-1:0]};
         end
         wq <= wrom[wptr];
+        wdbg_q   <= wrom[rd_w_addr[AWM-1:LP]];
+        wdbg_sub <= rd_w_addr[LP-1:0];
     end
+    assign rd_w_data = wdbg_q[wdbg_sub*32 +: 32];
 
     // -------- x: INT8 lanes, 8 per 64-bit word (write path unchanged) ---------
     reg [63:0] xin [0:WPR-1];
