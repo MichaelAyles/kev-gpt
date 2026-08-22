@@ -186,6 +186,8 @@ module mamba_pipe #(
     reg signed [31:0] sum_q8;     // quantized activations -> q8buf
     reg signed [31:0] sum_emb;    // embedding values written to the residual
     reg signed [31:0] sum_nout;   // rmsnorm outputs consumed by the quantizer
+    reg signed [31:0] sum_ny;     // rmsnorm y input (the vector to normalise)
+    reg signed [31:0] sum_ng;     // rmsnorm g input (the gain table words)
     reg signed [15:0] dump_logit [0:NC*TMAX*V-1];
     reg signed [31:0] dump_x     [0:NC*TMAX*D-1];
 
@@ -469,6 +471,9 @@ module mamba_pipe #(
     reg signed [31:0] e_acc; reg [15:0] e_fp; reg [63:0] e_embq; reg e_embsel;
     reg [9:0]  e_tok;
     wire [14:0] e_emb_wa = e_tok*(D/8) + e_i[11:3];
+    // debug: dbg_sel 0/1 steer the emb read address while the engine is idle
+    wire        emb_dbg_en = (dbg_sel == 4'd1);   // NOT 0: that is the idle default
+    wire [13:0] emb_rd_a   = emb_dbg_en ? dbg_addr[14:1] : e_emb_wa[14:1];
     wire [31:0] e_word = e_embsel ? e_embq[63:32] : e_embq[31:0];
 
     // NORM worker
@@ -595,6 +600,10 @@ module mamba_pipe #(
     reg          q8w_we; reg [15:0] q8w_row; reg [31:0] q8w_word;
     reg [31:0]   q8_stage;                     // final-path byte accumulator
     reg signed [7:0] q8_byte;                  // final-path per-byte (blocking)
+    always @(posedge clk) begin
+        if (n_wry) sum_ny <= sum_ny + $signed(n_wry_d);
+        if (n_wrg) sum_ng <= sum_ng + $signed(n_wrg_d);
+    end
     always @(posedge clk) if (q8w_we) q8buf_w[q8w_row] <= q8w_word;
     always @(posedge clk) if (q8w_we)
         sum_q8 <= sum_q8 + $signed(q8w_word[7:0]) + $signed(q8w_word[15:8]);
@@ -617,6 +626,7 @@ module mamba_pipe #(
             sst <= SC_IDLE; cw_valid <= 1'b0;
             sum_zx <= 32'sd0; sum_xn <= 32'sd0; sum_q8 <= 32'sd0;
             sum_emb <= 32'sd0; sum_nout <= 32'sd0;
+            sum_ny <= 32'sd0; sum_ng <= 32'sd0;
             for (w = 0; w < NC; w = w + 1) begin
                 op_pc[w] <= 0; tokcnt[w] <= 0; active[w] <= 0; busy[w] <= 0;
             end
@@ -624,6 +634,11 @@ module mamba_pipe #(
         end else begin
             // measured cycle counter: from first dispatch to all-done
             if (started && !all_done) cyc_count <= cyc_count + 1;
+
+            // debug: steer the SHARED emb read port while the engine is idle
+            // (dbg_sel 0/1). Same block as the EMB FSM, so emb keeps exactly
+            // one read port and stays in URAM.
+            if (emb_dbg_en) e_embq <= emb[emb_rd_a];
 
             // ---------- init: SiLU LUT into conv + norm, then arm streams -----
             if (ist == 0) begin
@@ -754,7 +769,7 @@ module mamba_pipe #(
                 case (e_sub)
                   0: begin e_acc <= 32'sd0; e_sub <= 1;
                        e_fp <= esc[e_tok];
-                       e_embq   <= emb[e_emb_wa[14:1]];
+                       e_embq   <= emb[emb_rd_a];
                        e_embsel <= e_emb_wa[0];
                   end
                   1: begin
@@ -1218,6 +1233,9 @@ module mamba_pipe #(
                 4'd12: dbg_data <= dump_lsum[dbg_addr];
                 4'd4:  dbg_data <= sum_emb;
                 4'd5:  dbg_data <= sum_nout;
+                4'd0:  dbg_data <= sum_ny;
+                4'd2:  dbg_data <= (dbg_addr[17]) ? sum_ng
+                                    : {22'b0, dump_tok[dbg_addr[9:0]]};
                 4'd6:  dbg_data <= {16'b0, rsin[dbg_addr[12:0]]};
                 4'd7:  dbg_data <= {16'b0, nrmg[dbg_addr[11:0]]};
                 4'd14: dbg_data <= sum_zx;
@@ -1234,10 +1252,14 @@ module mamba_pipe #(
     end else begin : g_nodbg
         always @(posedge clk) begin
             case (dbg_sel)
+                4'd1: dbg_data <= dbg_addr[0] ? e_embq[63:32] : e_embq[31:0];
                 4'd2: dbg_data <= {22'b0, dump_tok[dbg_addr]};
                 4'd12: dbg_data <= dump_lsum[dbg_addr];
                 4'd4:  dbg_data <= sum_emb;
                 4'd5:  dbg_data <= sum_nout;
+                4'd0:  dbg_data <= sum_ny;
+                4'd2:  dbg_data <= (dbg_addr[17]) ? sum_ng
+                                    : {22'b0, dump_tok[dbg_addr[9:0]]};
                 4'd6:  dbg_data <= {16'b0, rsin[dbg_addr[12:0]]};
                 4'd7:  dbg_data <= {16'b0, nrmg[dbg_addr[11:0]]};
                 4'd14: dbg_data <= sum_zx;

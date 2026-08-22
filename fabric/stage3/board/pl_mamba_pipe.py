@@ -42,7 +42,9 @@ IDCODE = 0x4D504950          # "MPIP"
 DBG_TOK = 2                  # dump_tok: per-(stream,token) argmax (DBG=0-safe)
 SEL_LSUM, SEL_BESTV = 12, 13  # per-(stream,token) sum of all V logits / max logit
 SEL_ZX, SEL_XN, SEL_Q8 = 14, 15, 3   # global per-stage datapath checksums
-SEL_EMB, SEL_NOUT = 4, 5             # embedding / rmsnorm-output checksums
+SEL_EMB, SEL_NOUT = 4, 5
+SEL_NY = 0                           # rmsnorm y input (the vector to normalise)             # embedding / rmsnorm-output checksums
+SEL_EMBW = 1                         # embedding table readback (shared port)
 SEL_RSIN, SEL_NRMG = 6, 7            # scale-table readback (in_proj / norm gain)
 
 
@@ -146,10 +148,14 @@ def main(argv=None):
                          "state persists so argmax is checked on run 1 only)")
     ap.add_argument("--skip-load", action="store_true",
                     help="tables already resident (same power cycle)")
+    ap.add_argument("--ref-ny", type=int, default=None,
+                    help="RTL-sim checksum of the rmsnorm y input")
     ap.add_argument("--ref-emb", type=int, default=None,
                     help="RTL-sim checksum of the embedding stage")
     ap.add_argument("--ref-nout", type=int, default=None,
                     help="RTL-sim checksum of the rmsnorm output stage")
+    ap.add_argument("--ref-emb-tbl", default=None,
+                    help="path to ms_t1.mem to verify the embedding table")
     ap.add_argument("--ref-rsin", default=None,
                     help="path to ms_t11.mem to verify the in_proj scale table")
     ap.add_argument("--ref-zx", type=int, default=None,
@@ -220,6 +226,7 @@ def main(argv=None):
         v = d.rd(R_DBGDATA)
         return v - (1 << 32) if v >= 1 << 31 else v
     stages = [("emb (embedding)", SEL_EMB, args.ref_emb),
+              ("ny  (rmsnorm INPUT)", SEL_NY, args.ref_ny),
               ("nout(rmsnorm out)", SEL_NOUT, args.ref_nout),
               ("zx  (in_proj dequant)", SEL_ZX, args.ref_zx),
               ("xn  (conv output)", SEL_XN, args.ref_xn),
@@ -237,6 +244,28 @@ def main(argv=None):
         print(f"STAGE_VERDICT: first divergence at {first_bad}")
     else:
         print("STAGE_VERDICT: all stages match")
+
+    # the embedding table is the ONLY one assembled from two 32-bit writes per
+    # 64-bit word, and the only one never verified on silicon — and silicon
+    # measures the embedding STAGE as the first thing that goes wrong.
+    if args.ref_emb_tbl:
+        want = rd16(args.ref_emb_tbl)
+        n = min(len(want), 4096)
+        d.wr(R_DBGSEL, SEL_EMBW)
+        bad_e = 0
+        first = []
+        for i in range(n):
+            d.wr(R_DBGADDR, i)
+            d.rd(R_DBGDATA)
+            got = d.rd(R_DBGDATA)
+            if got != (want[i] & 0xFFFFFFFF):
+                bad_e += 1
+                if len(first) < 4:
+                    first.append((i, got, want[i]))
+        print(f"EMB_TABLE: {n - bad_e}/{n} words match"
+              f"{' (CORRUPT)' if bad_e else ' (OK)'}")
+        for i, g, w in first:
+            print(f"    [{i}] silicon {g:#010x} expected {w:#010x}")
 
     # the in_proj scale table feeds the first diverging stage and has never
     # been read back from silicon
