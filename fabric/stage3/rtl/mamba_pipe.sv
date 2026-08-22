@@ -176,11 +176,22 @@ module mamba_pipe #(
     // wide-word zxbuf element read: flat index idx = stream*INROWS + offset.
     // INROWS is a multiple of 4, so row = idx>>2, element = idx[1:0] (a plain-reg
     // part-select — the only variable +: form iverilog/Vivado handle safely).
+    // NB: these select the lane with an explicit CASE, not a variable
+    // part-select. A variable part-select on a function-local was proven
+    // constant-0 by synthesis (Synth 8-3333 on c_wrx_d/s_b_d/s_c_d) while
+    // simulating correctly — conv activations and the scan's B/C vectors
+    // arrived as all-zero on silicon. Constant part-selects are unambiguous
+    // for every tool.
     function automatic signed [15:0] zx_rd(input [15:0] idx);
         reg [63:0] row;
         begin
             row   = zxbuf_w[idx[15:2]];
-            zx_rd = row[idx[1:0]*16 +: 16];
+            case (idx[1:0])
+                2'd0: zx_rd = row[15:0];
+                2'd1: zx_rd = row[31:16];
+                2'd2: zx_rd = row[47:32];
+                default: zx_rd = row[63:48];
+            endcase
         end
     endfunction
 
@@ -190,7 +201,12 @@ module mamba_pipe #(
         reg [31:0] row;
         begin
             row   = q8buf_w[idx[15:2]];
-            q8_rd = row[idx[1:0]*8 +: 8];
+            case (idx[1:0])
+                2'd0: q8_rd = row[7:0];
+                2'd1: q8_rd = row[15:8];
+                2'd2: q8_rd = row[23:16];
+                default: q8_rd = row[31:24];
+            endcase
         end
     endfunction
 
@@ -199,7 +215,12 @@ module mamba_pipe #(
         reg [63:0] row;
         begin
             row   = xnbuf_w[idx[15:2]];
-            xn_rd = row[idx[1:0]*16 +: 16];
+            case (idx[1:0])
+                2'd0: xn_rd = row[15:0];
+                2'd1: xn_rd = row[31:16];
+                2'd2: xn_rd = row[47:32];
+                default: xn_rd = row[63:48];
+            endcase
         end
     endfunction
 
@@ -208,7 +229,12 @@ module mamba_pipe #(
         reg [63:0] row;
         begin
             row   = ybuf_w[idx[15:2]];
-            yb_rd = row[idx[1:0]*16 +: 16];
+            case (idx[1:0])
+                2'd0: yb_rd = row[15:0];
+                2'd1: yb_rd = row[31:16];
+                2'd2: yb_rd = row[47:32];
+                default: yb_rd = row[63:48];
+            endcase
         end
     endfunction
 
@@ -498,13 +524,33 @@ module mamba_pipe #(
         assign xrow_norm[xbi] = mem[xr_norm_r];
         assign xrow_gem [xbi] = mem[xr_gem_r];
     end endgenerate
-    // element reads: pick the holding stream's bank row, slice the element (a
-    // plain-reg part-select — the safe variable +: form).
+    // element reads: pick the holding stream's bank row, then slice the element
+    // with an explicit CASE. A variable part-select on a function-local reads
+    // fine in simulation but synthesis proved the equivalent reads constant-0
+    // (see the accessor note above), so every lane select here is constant.
     function automatic signed [31:0] xrd_norm(input [7:0] e);
-        reg [127:0] row; begin row = xrow_norm[n_st_s]; xrd_norm = row[e[1:0]*32 +: 32]; end
+        reg [127:0] row;
+        begin
+            row = xrow_norm[n_st_s];
+            case (e[1:0])
+                2'd0: xrd_norm = row[31:0];
+                2'd1: xrd_norm = row[63:32];
+                2'd2: xrd_norm = row[95:64];
+                default: xrd_norm = row[127:96];
+            endcase
+        end
     endfunction
     function automatic signed [31:0] xrd_gem(input [7:0] e);
-        reg [127:0] row; begin row = xrow_gem[g_st_s]; xrd_gem = row[e[1:0]*32 +: 32]; end
+        reg [127:0] row;
+        begin
+            row = xrow_gem[g_st_s];
+            case (e[1:0])
+                2'd0: xrd_gem = row[31:0];
+                2'd1: xrd_gem = row[63:32];
+                2'd2: xrd_gem = row[95:64];
+                default: xrd_gem = row[127:96];
+            endcase
+        end
     endfunction
 
     // q8buf funnelled write (one wide-word port, muxed between NORM's two sites)
