@@ -24,6 +24,7 @@ BD's PL0_REF FREQMHZ — the known gotcha) and is verified after setting.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import mmap
 import os
 import struct
@@ -45,12 +46,17 @@ class MambaPipe:
     def __init__(self, base=BASE):
         self.fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
         self.m = mmap.mmap(self.fd, 0x1000, offset=base)
+        # ONE 32-bit store per register access: an mmap slice assignment is a
+        # memcpy that may emit several narrower bus writes, and the AXI shell
+        # ignores WSTRB, so each extra beat is counted as another register
+        # write (taddr double-increments and the table lands at 2x stride).
+        self.w32 = (ctypes.c_uint32 * (0x1000 // 4)).from_buffer(self.m)
 
     def wr(self, off, val):
-        self.m[off:off + 4] = struct.pack("<I", val & 0xFFFFFFFF)
+        self.w32[off >> 2] = val & 0xFFFFFFFF
 
     def rd(self, off):
-        return struct.unpack("<I", self.m[off:off + 4])[0]
+        return int(self.w32[off >> 2])
 
     def wait_status(self, bit, timeout=30.0):
         t0 = time.time()
