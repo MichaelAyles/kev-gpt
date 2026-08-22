@@ -41,6 +41,9 @@ R_TWADDR, R_TWDATA, R_IDCODE = 0x2C, 0x30, 0x34
 IDCODE = 0x4D504950          # "MPIP"
 DBG_TOK = 2                  # dump_tok: per-(stream,token) argmax (DBG=0-safe)
 SEL_LSUM, SEL_BESTV = 12, 13  # per-(stream,token) sum of all V logits / max logit
+SEL_ZX, SEL_XN, SEL_Q8 = 14, 15, 3   # global per-stage datapath checksums
+SEL_EMB, SEL_NOUT = 4, 5             # embedding / rmsnorm-output checksums
+SEL_RSIN, SEL_NRMG = 6, 7            # scale-table readback (in_proj / norm gain)
 
 
 class MambaPipe:
@@ -143,6 +146,18 @@ def main(argv=None):
                          "state persists so argmax is checked on run 1 only)")
     ap.add_argument("--skip-load", action="store_true",
                     help="tables already resident (same power cycle)")
+    ap.add_argument("--ref-emb", type=int, default=None,
+                    help="RTL-sim checksum of the embedding stage")
+    ap.add_argument("--ref-nout", type=int, default=None,
+                    help="RTL-sim checksum of the rmsnorm output stage")
+    ap.add_argument("--ref-rsin", default=None,
+                    help="path to ms_t11.mem to verify the in_proj scale table")
+    ap.add_argument("--ref-zx", type=int, default=None,
+                    help="RTL-sim checksum of the in_proj dequant stage")
+    ap.add_argument("--ref-xn", type=int, default=None,
+                    help="RTL-sim checksum of the conv output stage")
+    ap.add_argument("--ref-q8", type=int, default=None,
+                    help="RTL-sim checksum of the quantized activations")
     ap.add_argument("--chars-per-tok", type=float, default=0.0,
                     help="if set, also print chars/s = tok/s * this")
     args = ap.parse_args(argv)
@@ -194,6 +209,49 @@ def main(argv=None):
     verdict = "PASS" if bad == 0 else "FAIL"
     print(f"PL_MAMBA_PIPE_VERDICT: {verdict} ({NC}x{T} argmax on silicon vs "
           f"MambaSeqRef)")
+
+    # STAGE_CHECK: global checksums of each pipeline stage's output, compared
+    # against the values the RTL simulation produced for the same input. The
+    # first stage that disagrees is where the datapath dies on silicon.
+    def rd32(sel):
+        d.wr(R_DBGSEL, sel)
+        d.wr(R_DBGADDR, 0)
+        d.rd(R_DBGDATA)
+        v = d.rd(R_DBGDATA)
+        return v - (1 << 32) if v >= 1 << 31 else v
+    stages = [("emb (embedding)", SEL_EMB, args.ref_emb),
+              ("nout(rmsnorm out)", SEL_NOUT, args.ref_nout),
+              ("zx  (in_proj dequant)", SEL_ZX, args.ref_zx),
+              ("xn  (conv output)", SEL_XN, args.ref_xn),
+              ("q8  (gemv activations)", SEL_Q8, args.ref_q8)]
+    print("\nSTAGE CHECKSUMS (silicon vs RTL sim):")
+    first_bad = None
+    for name, sel, want in stages:
+        got = rd32(sel)
+        ok = (want is not None and got == want)
+        if not ok and first_bad is None:
+            first_bad = name
+        print(f"  {name}: silicon {got}  rtl {want}  "
+              f"{'OK' if ok else 'DIFF'}")
+    if first_bad:
+        print(f"STAGE_VERDICT: first divergence at {first_bad}")
+    else:
+        print("STAGE_VERDICT: all stages match")
+
+    # the in_proj scale table feeds the first diverging stage and has never
+    # been read back from silicon
+    if args.ref_rsin:
+        want = rd16(args.ref_rsin)
+        n = min(len(want), 2048)
+        d.wr(R_DBGSEL, SEL_RSIN)
+        bad_r = 0
+        for i in range(n):
+            d.wr(R_DBGADDR, i)
+            d.rd(R_DBGDATA)
+            if (d.rd(R_DBGDATA) & 0xFFFF) != (want[i] & 0xFFFF):
+                bad_r += 1
+        print(f"RSIN_TABLE: {n - bad_r}/{n} words match"
+              f"{' (CORRUPT)' if bad_r else ' (OK)'}")
 
     # Separate "logits wrong" from "argmax wrong": compare the SUM of all V
     # logits and the winning logit VALUE against the reference. Matching sums

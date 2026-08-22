@@ -178,18 +178,48 @@ module mamba_pipe #(
     reg signed [31:0] dump_lsum  [0:NC*TMAX-1];
     reg signed [15:0] dump_bestv [0:NC*TMAX-1];
     reg signed [31:0] g_lsum;
+    // Stage checksums (global over the whole run): compare the RTL sim's
+    // values against silicon to find the first stage that diverges. Read via
+    // dbg_sel 14 (zx / in_proj), 15 (xn / conv), 3 (q8 activations).
+    reg signed [31:0] sum_zx;     // in_proj dequant -> zxbuf
+    reg signed [31:0] sum_xn;     // conv output -> xnbuf
+    reg signed [31:0] sum_q8;     // quantized activations -> q8buf
+    reg signed [31:0] sum_emb;    // embedding values written to the residual
+    reg signed [31:0] sum_nout;   // rmsnorm outputs consumed by the quantizer
     reg signed [15:0] dump_logit [0:NC*TMAX*V-1];
     reg signed [31:0] dump_x     [0:NC*TMAX*D-1];
 
     // wide-word zxbuf element read: flat index idx = stream*INROWS + offset.
     // INROWS is a multiple of 4, so row = idx>>2, element = idx[1:0] (a plain-reg
-    // part-select — the only variable +: form iverilog/Vivado handle safely).
+    // part-select. NOTE: variable +: part-selects are NOT safe here — see
+    // emb_nib and the buffer accessors; every lane select is a constant slice.
     // NB: these select the lane with an explicit CASE, not a variable
     // part-select. A variable part-select on a function-local was proven
     // constant-0 by synthesis (Synth 8-3333 on c_wrx_d/s_b_d/s_c_d) while
     // simulating correctly — conv activations and the scan's B/C vectors
     // arrived as all-zero on silicon. Constant part-selects are unambiguous
     // for every tool.
+    // INT4 nibble out of a 32-bit embedding word, selected by an explicit
+    // CASE. The variable part-select this replaces is the same construct that
+    // synthesis resolved to a constant elsewhere in this file, and silicon
+    // measured the EMBEDDING stage — the first thing this feeds — as wrong.
+    function automatic signed [31:0] emb_nib(input [31:0] w, input [2:0] sel);
+        reg [3:0] n;
+        begin
+            case (sel)
+                3'd0: n = w[3:0];
+                3'd1: n = w[7:4];
+                3'd2: n = w[11:8];
+                3'd3: n = w[15:12];
+                3'd4: n = w[19:16];
+                3'd5: n = w[23:20];
+                3'd6: n = w[27:24];
+                default: n = w[31:28];
+            endcase
+            emb_nib = $signed({{28{n[3]}}, n});
+        end
+    endfunction
+
     function automatic signed [15:0] zx_rd(input [15:0] idx);
         reg [63:0] row;
         begin
@@ -566,6 +596,8 @@ module mamba_pipe #(
     reg [31:0]   q8_stage;                     // final-path byte accumulator
     reg signed [7:0] q8_byte;                  // final-path per-byte (blocking)
     always @(posedge clk) if (q8w_we) q8buf_w[q8w_row] <= q8w_word;
+    always @(posedge clk) if (q8w_we)
+        sum_q8 <= sum_q8 + $signed(q8w_word[7:0]) + $signed(q8w_word[15:8]);
 
     // ---- per-stream token boundary + dispatch helpers -----------------------
     // (computed in the clocked block below)
@@ -583,6 +615,8 @@ module mamba_pipe #(
             ist <= 0; i_i <= 0; started <= 0; all_done <= 0; cyc_count <= 0;
             est <= E_IDLE; nst <= N_IDLE; gst <= G_IDLE; cst <= C_IDLE;
             sst <= SC_IDLE; cw_valid <= 1'b0;
+            sum_zx <= 32'sd0; sum_xn <= 32'sd0; sum_q8 <= 32'sd0;
+            sum_emb <= 32'sd0; sum_nout <= 32'sd0;
             for (w = 0; w < NC; w = w + 1) begin
                 op_pc[w] <= 0; tokcnt[w] <= 0; active[w] <= 0; busy[w] <= 0;
             end
@@ -724,8 +758,7 @@ module mamba_pipe #(
                        e_embsel <= e_emb_wa[0];
                   end
                   1: begin
-                       e_acc <= $signed({{28{e_word[(e_i[2:0])*4+3]}},
-                                 e_word[(e_i[2:0])*4 +: 4]});
+                       e_acc <= emb_nib(e_word, e_i[2:0]);
                        e_sub <= 2;
                   end
                   2: begin
@@ -733,12 +766,19 @@ module mamba_pipe #(
                        // (D is a multiple of 4, so e_i==D-1 lands on lane 3).
                        e_val = sat32f(rshr(mul_m11(e_acc, e_fp),
                                       8'sd6 - $signed({3'b0, e_fp[14:10]})));
+                       sum_emb <= sum_emb + e_val;   // e_val is blocking: this
+                                                     // cycle's freshly computed
+                                                     // embedding element
                        if (e_i[1:0] == 2'd3) begin
                            xw_emb_we <= 1; xw_emb_s <= e_st_s;
                            xw_emb_r  <= e_i[XRW+1:2];
                            xw_emb_d  <= {e_val, emb_stage[95:0]};
                        end else
-                           emb_stage[e_i[1:0]*32 +: 32] <= e_val;
+                           case (e_i[1:0])
+                               2'd0: emb_stage[31:0]   <= e_val;
+                               2'd1: emb_stage[63:32]  <= e_val;
+                               default: emb_stage[95:64] <= e_val;
+                           endcase
                        e_sub <= 0;
                        if (e_i == D-1) begin
                            est <= E_IDLE;
@@ -797,7 +837,11 @@ module mamba_pipe #(
                              q8w_we <= 1; q8w_row <= (n_st_s*DIN + n_i[8:0]) >> 2;
                              q8w_word <= {q8_byte, q8_stage[23:0]};
                          end else
-                             q8_stage[n_i[1:0]*8 +: 8] <= q8_byte;
+                             case (n_i[1:0])
+                                 2'd0: q8_stage[7:0]   <= q8_byte;
+                                 2'd1: q8_stage[15:8]  <= q8_byte;
+                                 default: q8_stage[23:16] <= q8_byte;
+                             endcase
                          n_sub <= 0;
                          if (n_i == D-1) begin
                              nst <= N_IDLE; op_pc[n_st_s] <= op_pc[n_st_s] + 1;
@@ -809,6 +853,8 @@ module mamba_pipe #(
                   case (n_sub)
                     0: begin n_rdaw <= n_i[8:0]; n_sub <= 1; end
                     1: begin
+                         sum_nout <= sum_nout + $signed(n_ow[15:0])
+                                                + $signed(n_ow[31:16]);
                          n_t14[0] <= rshr($signed(n_ow[15:0])  * $signed({1'b0, n_qrecip[15:0]}), $signed({1'b0, n_qrecip[23:16]}) + 8'sd12);
                          n_t14[1] <= rshr($signed(n_ow[31:16]) * $signed({1'b0, n_qrecip[15:0]}), $signed({1'b0, n_qrecip[23:16]}) + 8'sd12);
                          n_t14[2] <= rshr($signed(n_ow[47:32]) * $signed({1'b0, n_qrecip[15:0]}), $signed({1'b0, n_qrecip[23:16]}) + 8'sd12);
@@ -883,6 +929,9 @@ module mamba_pipe #(
                     3: begin
                          // wide-word: pack the 4 dequant lanes into one row write
                          // (g_i is a multiple of 4, so this covers g_i..g_i+3).
+                         sum_zx <= sum_zx
+                             + $signed(sat16f(rshr(g_t14[0] * $signed({1'b0, g_c_ins[15:0]}), $signed({1'b0, g_c_ins[23:16]}) + 8'sd15 - 8'sd9)))
+                             + $signed(sat16f(rshr(g_t14[1] * $signed({1'b0, g_c_ins[15:0]}), $signed({1'b0, g_c_ins[23:16]}) + 8'sd15 - 8'sd9)));
                          zxbuf_w[(g_st_s*INROWS + g_i[10:0]) >> 2] <= {
                              sat16f(rshr(g_t14[3] * $signed({1'b0, g_c_ins[15:0]}), $signed({1'b0, g_c_ins[23:16]}) + 8'sd15 - 8'sd9)),
                              sat16f(rshr(g_t14[2] * $signed({1'b0, g_c_ins[15:0]}), $signed({1'b0, g_c_ins[23:16]}) + 8'sd15 - 8'sd9)),
@@ -1018,6 +1067,7 @@ module mamba_pipe #(
                   0: begin c_rdaw <= c_i[9:0]; c_sub <= 1; end
                   1: begin
                        xnbuf_w[(c_st_s*CONVD + c_i[9:0]) >> 2] <= c_yw;
+                       sum_xn <= sum_xn + $signed(c_yw[15:0]) + $signed(c_yw[31:16]);
                        c_sub <= 0;
                        if (c_i >= CONVD-4) begin
                            cst <= C_IDLE; op_pc[c_st_s] <= op_pc[c_st_s] + 1;
@@ -1166,6 +1216,13 @@ module mamba_pipe #(
                 4'd1: dbg_data <= {{16{dump_logit[dbg_addr][15]}}, dump_logit[dbg_addr]};
                 4'd2: dbg_data <= {22'b0, dump_tok[dbg_addr]};
                 4'd12: dbg_data <= dump_lsum[dbg_addr];
+                4'd4:  dbg_data <= sum_emb;
+                4'd5:  dbg_data <= sum_nout;
+                4'd6:  dbg_data <= {16'b0, rsin[dbg_addr[12:0]]};
+                4'd7:  dbg_data <= {16'b0, nrmg[dbg_addr[11:0]]};
+                4'd14: dbg_data <= sum_zx;
+                4'd15: dbg_data <= sum_xn;
+                4'd3:  dbg_data <= sum_q8;
                 4'd13: dbg_data <= {{16{dump_bestv[dbg_addr][15]}}, dump_bestv[dbg_addr]};
                 4'd8: dbg_data <= consts[dbg_addr[6:0]];
                 4'd9: dbg_data <= g_wdbg;
@@ -1179,6 +1236,13 @@ module mamba_pipe #(
             case (dbg_sel)
                 4'd2: dbg_data <= {22'b0, dump_tok[dbg_addr]};
                 4'd12: dbg_data <= dump_lsum[dbg_addr];
+                4'd4:  dbg_data <= sum_emb;
+                4'd5:  dbg_data <= sum_nout;
+                4'd6:  dbg_data <= {16'b0, rsin[dbg_addr[12:0]]};
+                4'd7:  dbg_data <= {16'b0, nrmg[dbg_addr[11:0]]};
+                4'd14: dbg_data <= sum_zx;
+                4'd15: dbg_data <= sum_xn;
+                4'd3:  dbg_data <= sum_q8;
                 4'd13: dbg_data <= {{16{dump_bestv[dbg_addr][15]}}, dump_bestv[dbg_addr]};
                 4'd8: dbg_data <= consts[dbg_addr[6:0]];
                 4'd9: dbg_data <= g_wdbg;
