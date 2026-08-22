@@ -170,6 +170,14 @@ module mamba_pipe #(
     // it anchors the whole compute chain so DBG=0 can't optimise the datapath
     // away). dump_logit/dump_x are the wide bit-exact-gate readbacks.
     reg        [9:0]  dump_tok   [0:NC*TMAX-1];
+    // Cheap always-kept observability: per-(stream,token) SUM of all V logits
+    // and the winning logit VALUE. With DBG=0 the only readback is the argmax
+    // index, so a broken argmax and broken logits look identical on silicon.
+    // These two separate them for ~2.4 kbit, where the wide dump_logit
+    // readback costs a congested (unroutable) design.
+    reg signed [31:0] dump_lsum  [0:NC*TMAX-1];
+    reg signed [15:0] dump_bestv [0:NC*TMAX-1];
+    reg signed [31:0] g_lsum;
     reg signed [15:0] dump_logit [0:NC*TMAX*V-1];
     reg signed [31:0] dump_x     [0:NC*TMAX*D-1];
 
@@ -848,7 +856,7 @@ module mamba_pipe #(
               end
               G_RUN: if (g_done) begin
                   gst <= G_RD; g_i <= 0; g_sub <= 0;
-                  g_best <= -16'sd32768; g_besti <= 0;
+                  g_best <= -16'sd32768; g_besti <= 0; g_lsum <= 32'sd0;
               end
               G_RD: begin
                 if (g_op == 2'd0) begin        // in_proj dequant -> zxbuf
@@ -962,6 +970,7 @@ module mamba_pipe #(
                          dump_logit[(g_st_s*TMAX+g_tok)*V + g_i[9:0] + 1] <= g_lv1;
                          dump_logit[(g_st_s*TMAX+g_tok)*V + g_i[9:0] + 2] <= g_lv2;
                          dump_logit[(g_st_s*TMAX+g_tok)*V + g_i[9:0] + 3] <= g_lv3;
+                         g_lsum <= g_lsum + g_lv0 + g_lv1 + g_lv2 + g_lv3;
                          g_nb = g_best; g_ni = g_besti;
                          if (g_lv0 > g_nb) begin g_nb = g_lv0; g_ni = g_i[9:0];     end
                          if (g_lv1 > g_nb) begin g_nb = g_lv1; g_ni = g_i[9:0] + 1; end
@@ -974,6 +983,9 @@ module mamba_pipe #(
                              busy[g_st_s] <= 0;
                              // latch the final argmax token (compact, always kept)
                              dump_tok[g_st_s*TMAX + g_tok] <= g_ni;
+                             dump_lsum[g_st_s*TMAX + g_tok] <=
+                                 g_lsum + g_lv0 + g_lv1 + g_lv2 + g_lv3;
+                             dump_bestv[g_st_s*TMAX + g_tok] <= g_nb;
                          end else g_i <= g_i + 4;
                     end
                   endcase
@@ -1153,6 +1165,8 @@ module mamba_pipe #(
                 4'd0: dbg_data <= dump_x[dbg_addr];
                 4'd1: dbg_data <= {{16{dump_logit[dbg_addr][15]}}, dump_logit[dbg_addr]};
                 4'd2: dbg_data <= {22'b0, dump_tok[dbg_addr]};
+                4'd12: dbg_data <= dump_lsum[dbg_addr];
+                4'd13: dbg_data <= {{16{dump_bestv[dbg_addr][15]}}, dump_bestv[dbg_addr]};
                 4'd8: dbg_data <= consts[dbg_addr[6:0]];
                 4'd9: dbg_data <= g_wdbg;
                 4'd10: dbg_data <= {12'b0, n_seed_dbg};
@@ -1164,6 +1178,8 @@ module mamba_pipe #(
         always @(posedge clk) begin
             case (dbg_sel)
                 4'd2: dbg_data <= {22'b0, dump_tok[dbg_addr]};
+                4'd12: dbg_data <= dump_lsum[dbg_addr];
+                4'd13: dbg_data <= {{16{dump_bestv[dbg_addr][15]}}, dump_bestv[dbg_addr]};
                 4'd8: dbg_data <= consts[dbg_addr[6:0]];
                 4'd9: dbg_data <= g_wdbg;
                 4'd10: dbg_data <= {12'b0, n_seed_dbg};

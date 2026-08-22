@@ -40,6 +40,7 @@ R_DBGSEL, R_DBGADDR, R_DBGDATA = 0x20, 0x24, 0x28
 R_TWADDR, R_TWDATA, R_IDCODE = 0x2C, 0x30, 0x34
 IDCODE = 0x4D504950          # "MPIP"
 DBG_TOK = 2                  # dump_tok: per-(stream,token) argmax (DBG=0-safe)
+SEL_LSUM, SEL_BESTV = 12, 13  # per-(stream,token) sum of all V logits / max logit
 
 
 class MambaPipe:
@@ -85,6 +86,20 @@ class MambaPipe:
         self.wr(R_CTRL, 0b01)
         self.wait_status(0)                 # done_l
         return self.rd(R_CYCLES)
+
+    def read_sel(self, sel, nc, t, tmax, signed=True):
+        """Per-(stream,token) readback of one debug selector."""
+        self.wr(R_DBGSEL, sel)
+        out = np.zeros((nc, t), dtype=np.int64)
+        for s in range(nc):
+            for i in range(t):
+                self.wr(R_DBGADDR, s * tmax + i)
+                self.rd(R_DBGDATA)
+                v = self.rd(R_DBGDATA)
+                if signed and v >= 1 << 31:
+                    v -= 1 << 32
+                out[s, i] = v
+        return out
 
     def read_toks(self, nc, t, tmax):
         self.wr(R_DBGSEL, DBG_TOK)
@@ -179,6 +194,34 @@ def main(argv=None):
     verdict = "PASS" if bad == 0 else "FAIL"
     print(f"PL_MAMBA_PIPE_VERDICT: {verdict} ({NC}x{T} argmax on silicon vs "
           f"MambaSeqRef)")
+
+    # Separate "logits wrong" from "argmax wrong": compare the SUM of all V
+    # logits and the winning logit VALUE against the reference. Matching sums
+    # with a wrong index means the head is fine and only the argmax is broken.
+    if "ref_logits" in ref:
+        rl = ref["ref_logits"]
+        lsum = d.read_sel(SEL_LSUM, NC, T, TMAX)
+        bestv = d.read_sel(SEL_BESTV, NC, T, TMAX)
+        ok_s = ok_b = 0
+        for s in range(NC):
+            for t in range(T):
+                want_sum = int(np.sum(rl[s][t]))
+                want_best = int(np.max(rl[s][t]))
+                ms = lsum[s, t] == want_sum
+                mb = bestv[s, t] == want_best
+                ok_s += ms; ok_b += mb
+                if s == 0 and t < 4:
+                    print(f"    s{s} tok#{t}: logit-sum silicon {lsum[s,t]} "
+                          f"ref {want_sum} {'OK' if ms else 'DIFF'} | "
+                          f"max-logit silicon {bestv[s,t]} ref {want_best} "
+                          f"{'OK' if mb else 'DIFF'}")
+        n = NC * T
+        print(f"PL_LOGIT_CHECK: logit-sum {ok_s}/{n} match, "
+              f"max-logit {ok_b}/{n} match")
+        if ok_s == n and bad:
+            print("  => logits are CORRECT on silicon; the argmax is the bug")
+        elif ok_s == 0:
+            print("  => logits themselves are wrong; the head/datapath is the bug")
 
     # ---- bench: cycles are deterministic; extra runs confirm + time the loop --
     cycs = [cyc]
