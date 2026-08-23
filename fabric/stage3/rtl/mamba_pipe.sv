@@ -188,6 +188,7 @@ module mamba_pipe #(
     reg signed [31:0] sum_nout;   // rmsnorm outputs consumed by the quantizer
     reg signed [31:0] sum_ny;     // rmsnorm y input (the vector to normalise)
     reg signed [31:0] sum_ng;     // rmsnorm g input (the gain table words)
+    reg signed [31:0] sum_xw;     // residual-bank WRITE data (embedding init)
     reg signed [15:0] dump_logit [0:NC*TMAX*V-1];
     reg signed [31:0] dump_x     [0:NC*TMAX*D-1];
 
@@ -548,13 +549,17 @@ module mamba_pipe #(
     localparam int XRW = (XW <= 1) ? 1 : $clog2(XW);
     reg              xw_emb_we; reg [SW-1:0] xw_emb_s; reg [XRW-1:0] xw_emb_r; reg [127:0] xw_emb_d;
     reg              xw_gem_we; reg [SW-1:0] xw_gem_s; reg [XRW-1:0] xw_gem_r; reg [127:0] xw_gem_d;
-    reg [127:0]      emb_stage;                // EMB row accumulator (lanes 0..2)
+    reg [31:0]       emb_s0, emb_s1, emb_s2;   // EMB row accumulator lanes 0..2
+                                               // (three separate registers: a
+                                               // case-indexed single reg was
+                                               // inferred as a ROM and read 0)
     reg signed [31:0] e_val;                   // EMB per-element value (blocking)
     reg signed [31:0] n_xv;                    // NORM xbuf read (blocking)
     reg signed [31:0] g_xo0, g_xo1, g_xo2, g_xo3; // GEMV RMW old residual lanes
     wire [XRW-1:0]   xr_norm_r = n_i[XRW+1:2]; // NORM element row  (n_i>>2)
     wire [XRW-1:0]   xr_gem_r  = g_i[XRW+1:2]; // GEMV element row  (g_i>>2)
     wire [127:0]     xrow_norm [0:NC-1];
+    wire [127:0]     xrow_dbg  [0:NC-1];   // debug: bank contents, constant index
     wire [127:0]     xrow_gem  [0:NC-1];
     genvar xbi;
     generate for (xbi = 0; xbi < NC; xbi = xbi + 1) begin : xbk
@@ -564,17 +569,39 @@ module mamba_pipe #(
             if      (xw_emb_we && xw_emb_s == xbi[SW-1:0]) mem[xw_emb_r] <= xw_emb_d;
             else if (xw_gem_we && xw_gem_s == xbi[SW-1:0]) mem[xw_gem_r] <= xw_gem_d;
         end
+        assign xrow_dbg[xbi]  = mem[dbg_addr[XRW-1:0]];
         assign xrow_norm[xbi] = mem[xr_norm_r];
         assign xrow_gem [xbi] = mem[xr_gem_r];
     end endgenerate
-    // element reads: pick the holding stream's bank row, then slice the element
-    // with an explicit CASE. A variable part-select on a function-local reads
-    // fine in simulation but synthesis proved the equivalent reads constant-0
-    // (see the accessor note above), so every lane select here is constant.
+
+    // Select the holding stream's bank row with an explicit ONE-HOT mux built
+    // from CONSTANT array indices. Reading xrow_norm[n_st_s] directly — a
+    // variable index into an unpacked array of wires — simulates correctly but
+    // synthesis resolved it to zero: silicon measured the rmsnorm's y input as
+    // EXACTLY 0 while the embedding feeding it was bit-exact, which starves the
+    // whole pipeline and rails the logits.
+    wire [127:0] xrow_norm_sel;
+    wire [127:0] xrow_gem_sel;
+    wire [127:0] xsel_n [0:NC];
+    wire [127:0] xsel_g [0:NC];
+    assign xsel_n[0] = 128'b0;
+    assign xsel_g[0] = 128'b0;
+    genvar xsi;
+    generate for (xsi = 0; xsi < NC; xsi = xsi + 1) begin : g_xsel
+        assign xsel_n[xsi+1] = xsel_n[xsi]
+            | ({128{(n_st_s == xsi[SW-1:0])}} & xrow_norm[xsi]);
+        assign xsel_g[xsi+1] = xsel_g[xsi]
+            | ({128{(g_st_s == xsi[SW-1:0])}} & xrow_gem[xsi]);
+    end endgenerate
+    assign xrow_norm_sel = xsel_n[NC];
+    assign xrow_gem_sel  = xsel_g[NC];
+
+    // element reads: slice the selected row with an explicit CASE (constant
+    // lane selects, for the same reason).
     function automatic signed [31:0] xrd_norm(input [7:0] e);
         reg [127:0] row;
         begin
-            row = xrow_norm[n_st_s];
+            row = xrow_norm_sel;
             case (e[1:0])
                 2'd0: xrd_norm = row[31:0];
                 2'd1: xrd_norm = row[63:32];
@@ -586,7 +613,7 @@ module mamba_pipe #(
     function automatic signed [31:0] xrd_gem(input [7:0] e);
         reg [127:0] row;
         begin
-            row = xrow_gem[g_st_s];
+            row = xrow_gem_sel;
             case (e[1:0])
                 2'd0: xrd_gem = row[31:0];
                 2'd1: xrd_gem = row[63:32];
@@ -598,15 +625,10 @@ module mamba_pipe #(
 
     // q8buf funnelled write (one wide-word port, muxed between NORM's two sites)
     reg          q8w_we; reg [15:0] q8w_row; reg [31:0] q8w_word;
-    reg [31:0]   q8_stage;                     // final-path byte accumulator
+    reg [7:0]    q8_s0, q8_s1, q8_s2;          // final-path byte accumulator
+                                               // (separate regs, same reason)
     reg signed [7:0] q8_byte;                  // final-path per-byte (blocking)
-    always @(posedge clk) begin
-        if (n_wry) sum_ny <= sum_ny + $signed(n_wry_d);
-        if (n_wrg) sum_ng <= sum_ng + $signed(n_wrg_d);
-    end
     always @(posedge clk) if (q8w_we) q8buf_w[q8w_row] <= q8w_word;
-    always @(posedge clk) if (q8w_we)
-        sum_q8 <= sum_q8 + $signed(q8w_word[7:0]) + $signed(q8w_word[15:8]);
 
     // ---- per-stream token boundary + dispatch helpers -----------------------
     // (computed in the clocked block below)
@@ -626,7 +648,7 @@ module mamba_pipe #(
             sst <= SC_IDLE; cw_valid <= 1'b0;
             sum_zx <= 32'sd0; sum_xn <= 32'sd0; sum_q8 <= 32'sd0;
             sum_emb <= 32'sd0; sum_nout <= 32'sd0;
-            sum_ny <= 32'sd0; sum_ng <= 32'sd0;
+            sum_ny <= 32'sd0; sum_ng <= 32'sd0; sum_xw <= 32'sd0;
             for (w = 0; w < NC; w = w + 1) begin
                 op_pc[w] <= 0; tokcnt[w] <= 0; active[w] <= 0; busy[w] <= 0;
             end
@@ -634,6 +656,15 @@ module mamba_pipe #(
         end else begin
             // measured cycle counter: from first dispatch to all-done
             if (started && !all_done) cyc_count <= cyc_count + 1;
+
+            // stage checksums — accumulated in THIS block, the same one that
+            // resets them, so each is single-driven.
+            if (n_wry)     sum_ny <= sum_ny + $signed(n_wry_d);
+            if (n_wrg)     sum_ng <= sum_ng + $signed(n_wrg_d);
+            if (xw_emb_we) sum_xw <= sum_xw + $signed(xw_emb_d[31:0])
+                                            + $signed(xw_emb_d[63:32]);
+            if (q8w_we)    sum_q8 <= sum_q8 + $signed(q8w_word[7:0])
+                                            + $signed(q8w_word[15:8]);
 
             // debug: steer the SHARED emb read port while the engine is idle
             // (dbg_sel 0/1). Same block as the EMB FSM, so emb keeps exactly
@@ -787,12 +818,12 @@ module mamba_pipe #(
                        if (e_i[1:0] == 2'd3) begin
                            xw_emb_we <= 1; xw_emb_s <= e_st_s;
                            xw_emb_r  <= e_i[XRW+1:2];
-                           xw_emb_d  <= {e_val, emb_stage[95:0]};
+                           xw_emb_d  <= {e_val, emb_s2, emb_s1, emb_s0};
                        end else
                            case (e_i[1:0])
-                               2'd0: emb_stage[31:0]   <= e_val;
-                               2'd1: emb_stage[63:32]  <= e_val;
-                               default: emb_stage[95:64] <= e_val;
+                               2'd0: emb_s0 <= e_val;
+                               2'd1: emb_s1 <= e_val;
+                               default: emb_s2 <= e_val;
                            endcase
                        e_sub <= 0;
                        if (e_i == D-1) begin
@@ -850,12 +881,12 @@ module mamba_pipe #(
                                    (n_t14[0] < -48'sd128) ? -8'sd128 : n_t14[0][7:0];
                          if (n_i[1:0] == 2'd3) begin
                              q8w_we <= 1; q8w_row <= (n_st_s*DIN + n_i[8:0]) >> 2;
-                             q8w_word <= {q8_byte, q8_stage[23:0]};
+                             q8w_word <= {q8_byte, q8_s2, q8_s1, q8_s0};
                          end else
                              case (n_i[1:0])
-                                 2'd0: q8_stage[7:0]   <= q8_byte;
-                                 2'd1: q8_stage[15:8]  <= q8_byte;
-                                 default: q8_stage[23:16] <= q8_byte;
+                                 2'd0: q8_s0 <= q8_byte;
+                                 2'd1: q8_s1 <= q8_byte;
+                                 default: q8_s2 <= q8_byte;
                              endcase
                          n_sub <= 0;
                          if (n_i == D-1) begin
@@ -1229,15 +1260,15 @@ module mamba_pipe #(
             case (dbg_sel)
                 4'd0: dbg_data <= dump_x[dbg_addr];
                 4'd1: dbg_data <= {{16{dump_logit[dbg_addr][15]}}, dump_logit[dbg_addr]};
-                4'd2: dbg_data <= {22'b0, dump_tok[dbg_addr]};
+                4'd2: dbg_data <= dbg_addr[17] ? sum_ng
+                                  : {22'b0, dump_tok[dbg_addr[9:0]]};
                 4'd12: dbg_data <= dump_lsum[dbg_addr];
                 4'd4:  dbg_data <= sum_emb;
                 4'd5:  dbg_data <= sum_nout;
                 4'd0:  dbg_data <= sum_ny;
-                4'd2:  dbg_data <= (dbg_addr[17]) ? sum_ng
-                                    : {22'b0, dump_tok[dbg_addr[9:0]]};
-                4'd6:  dbg_data <= {16'b0, rsin[dbg_addr[12:0]]};
-                4'd7:  dbg_data <= {16'b0, nrmg[dbg_addr[11:0]]};
+                4'd7:  dbg_data <= sum_xw;
+                4'd6:  dbg_data <= dbg_addr[17] ? xrow_dbg[0][31:0]
+                                                : {16'b0, rsin[dbg_addr[12:0]]};
                 4'd14: dbg_data <= sum_zx;
                 4'd15: dbg_data <= sum_xn;
                 4'd3:  dbg_data <= sum_q8;
@@ -1253,15 +1284,15 @@ module mamba_pipe #(
         always @(posedge clk) begin
             case (dbg_sel)
                 4'd1: dbg_data <= dbg_addr[0] ? e_embq[63:32] : e_embq[31:0];
-                4'd2: dbg_data <= {22'b0, dump_tok[dbg_addr]};
+                4'd2: dbg_data <= dbg_addr[17] ? sum_ng
+                                  : {22'b0, dump_tok[dbg_addr[9:0]]};
                 4'd12: dbg_data <= dump_lsum[dbg_addr];
                 4'd4:  dbg_data <= sum_emb;
                 4'd5:  dbg_data <= sum_nout;
                 4'd0:  dbg_data <= sum_ny;
-                4'd2:  dbg_data <= (dbg_addr[17]) ? sum_ng
-                                    : {22'b0, dump_tok[dbg_addr[9:0]]};
-                4'd6:  dbg_data <= {16'b0, rsin[dbg_addr[12:0]]};
-                4'd7:  dbg_data <= {16'b0, nrmg[dbg_addr[11:0]]};
+                4'd7:  dbg_data <= sum_xw;
+                4'd6:  dbg_data <= dbg_addr[17] ? xrow_dbg[0][31:0]
+                                                : {16'b0, rsin[dbg_addr[12:0]]};
                 4'd14: dbg_data <= sum_zx;
                 4'd15: dbg_data <= sum_xn;
                 4'd3:  dbg_data <= sum_q8;
