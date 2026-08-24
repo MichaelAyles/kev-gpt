@@ -134,6 +134,10 @@ module tb_mamba_pipe;
                 $fdisplay(fdx, "%08x", dbg_data);
             end
         $fclose(fd); $fclose(fdx);
+        dbg_sel <= 12; dbg_addr <= (1<<17); @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM first_xn=%0d", $signed(dbg_data));
+        dbg_sel <= 13; dbg_addr <= (1<<17); @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM first_yb=%0d", $signed(dbg_data));
         dbg_sel <= 14; dbg_addr <= (1<<17); @(posedge clk); @(posedge clk);
         $display("STAGE_SUM first_zx=%0d", $signed(dbg_data));
         dbg_sel <= 15; dbg_addr <= (1<<17); @(posedge clk); @(posedge clk);

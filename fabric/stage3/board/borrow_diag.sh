@@ -3,7 +3,7 @@
 # Restore runs via trap, so an abort mid-run still puts prod back.
 set -u
 KRIA=${KRIA:?set KRIA=user@host for the Kria, e.g. export KRIA=ubuntu@kria.local}
-BIT=/tmp/kevbuild/nc3_first/mamba_pipe.bin
+BIT=/tmp/kevbuild/nc3_fc/mamba_pipe.bin
 PACK=/tmp/kevbuild/diag_nc1
 
 BORROWED=0          # only restore if we actually took the board
@@ -34,7 +34,7 @@ ssh precision 'systemctl --user stop kevin-rotation; \
   grep -c "borrow FPGA" client.html'
 
 echo "--- ship diag bitstream + NC=1 pack ---"
-scp -q $BIT $KRIA:~/kevbit/mamba_pipe_first.bin || exit 1
+scp -q $BIT $KRIA:~/kevbit/mamba_pipe_fc.bin || exit 1
 scp -q /home/mikeayles/Desktop/Projects/kev-gpt/fabric/stage3/board/pl_mamba_pipe.py \
        /home/mikeayles/Desktop/Projects/kev-gpt/fabric/stage3/board/pl_mamba_diag.py \
        /home/mikeayles/Desktop/Projects/kev-gpt/fabric/stage3/board/pl_axi_probe.py \
@@ -46,7 +46,7 @@ echo "--- borrow: kill daemon by socket pid, flash diag ---"
 BORROWED=1
 ssh $KRIA 'PID=$(sudo -n ss -tlnp | grep :9099 | grep -oP "pid=\K[0-9]+" | head -1); \
   [ -n "$PID" ] && sudo -n kill $PID; sleep 2; \
-  sudo -n fpgautil -b ~/kevbit/mamba_pipe_first.bin'
+  sudo -n fpgautil -b ~/kevbit/mamba_pipe_fc.bin'
 
 echo "--- DIAGNOSTIC RUN ---"
 ssh $KRIA 'cd ~/kevmem && sudo -n python3 - <<PY 2>&1
@@ -80,7 +80,9 @@ wr(0x20,0); wr(0x00,1)
 while not rd(0x04)&1: pass
 def dbg(sel,addr=0):
     wr(0x20,sel); wr(0x24,addr); rd(0x28); return s32(rd(0x28))
-print("FIRST-NORM ISOLATION (layer 0 only):")
+print("FIRST-OP ISOLATION (layer 0):")
+print("  first_q8 (quantizer)  : silicon %d  rtl -1054" % dbg(15,1<<17))
+print("  first_zx (in_proj deq): silicon %d  rtl -27" % dbg(14,1<<17))
 print("  first_ny  (its INPUT) : silicon %d  rtl 637" % dbg(10,1<<17))
 print("  first_nout(its OUTPUT): silicon %d  rtl -56779" % dbg(11,1<<17))
 print("run-wide:")

@@ -193,6 +193,9 @@ module mamba_pipe #(
     reg               first_seen;            // dispatch = layer 0's pre-norm
     reg signed [31:0] first_q8, first_zx;    // latched at the FIRST conv
     reg               firstc_seen;           // dispatch = one in_proj done
+    reg signed [31:0] sum_yb;                // scan output -> ybuf
+    reg signed [31:0] first_xn, first_yb;    // latched at first SCAN / first
+    reg               firsts_seen, firstg_seen;  // GATED norm dispatch
     reg signed [15:0] dump_logit [0:NC*TMAX*V-1];
     reg signed [31:0] dump_x     [0:NC*TMAX*D-1];
 
@@ -655,6 +658,8 @@ module mamba_pipe #(
             sum_ny <= 32'sd0; sum_ng <= 32'sd0; sum_xw <= 32'sd0;
             first_ny <= 32'sd0; first_nout <= 32'sd0; first_seen <= 1'b0;
             first_q8 <= 32'sd0; first_zx <= 32'sd0; firstc_seen <= 1'b0;
+            sum_yb <= 32'sd0; first_xn <= 32'sd0; first_yb <= 32'sd0;
+            firsts_seen <= 1'b0; firstg_seen <= 1'b0;
             for (w = 0; w < NC; w = w + 1) begin
                 op_pc[w] <= 0; tokcnt[w] <= 0; active[w] <= 0; busy[w] <= 0;
             end
@@ -662,6 +667,13 @@ module mamba_pipe #(
         end else begin
             // measured cycle counter: from first dispatch to all-done
             if (started && !all_done) cyc_count <= cyc_count + 1;
+
+            if (s_start && !firsts_seen) begin       // one conv complete
+                firsts_seen <= 1'b1; first_xn <= sum_xn;
+            end
+            if (n_start && n_gated && !firstg_seen) begin  // one scan complete
+                firstg_seen <= 1'b1; first_yb <= sum_yb;
+            end
 
             if (c_start && !firstc_seen) begin
                 firstc_seen <= 1'b1;
@@ -1227,6 +1239,8 @@ module mamba_pipe #(
                   2: begin                         // 4 ybuf lanes -> one row write
                        // the 4 D-skip xnbuf channels are one aligned row: read once.
                        sc_xrow = xnbuf_w[(s_st_s*CONVD + s_hi[2:0]*64 + sc_i[5:0]) >> 2];
+                       sum_yb <= sum_yb + $signed(sc_yacc[0][15:0])
+                                        + $signed(sc_yacc[1][15:0]);
                        ybuf_w[(s_st_s*DIN + s_hi[2:0]*64 + sc_i[5:0]) >> 2] <= {
                          sat16f(rshr({{32{sc_yacc[3][15]}}, sc_yacc[3][15:0]}, 8'sd2)
                           + rshr($signed(sc_dsk) * $signed(sc_xrow[48 +: 16]), 8'sd13)),
@@ -1280,7 +1294,9 @@ module mamba_pipe #(
                 4'd1: dbg_data <= {{16{dump_logit[dbg_addr][15]}}, dump_logit[dbg_addr]};
                 4'd2: dbg_data <= dbg_addr[17] ? sum_ng
                                   : {22'b0, dump_tok[dbg_addr[9:0]]};
-                4'd12: dbg_data <= dump_lsum[dbg_addr];
+                4'd12: dbg_data <= dbg_addr[17] ? first_xn : dump_lsum[dbg_addr];
+                4'd13: dbg_data <= dbg_addr[17] ? first_yb
+                       : {{16{dump_bestv[dbg_addr][15]}}, dump_bestv[dbg_addr]};
                 4'd4:  dbg_data <= sum_emb;
                 4'd5:  dbg_data <= sum_nout;
                 4'd0:  dbg_data <= sum_ny;
@@ -1290,7 +1306,6 @@ module mamba_pipe #(
                 4'd14: dbg_data <= dbg_addr[17] ? first_zx : sum_zx;
                 4'd15: dbg_data <= dbg_addr[17] ? first_q8 : sum_xn;
                 4'd3:  dbg_data <= sum_q8;
-                4'd13: dbg_data <= {{16{dump_bestv[dbg_addr][15]}}, dump_bestv[dbg_addr]};
                 4'd8: dbg_data <= consts[dbg_addr[6:0]];
                 4'd9: dbg_data <= g_wdbg;
                 4'd10: dbg_data <= dbg_addr[17] ? first_ny
@@ -1306,7 +1321,9 @@ module mamba_pipe #(
                 4'd1: dbg_data <= dbg_addr[0] ? e_embq[63:32] : e_embq[31:0];
                 4'd2: dbg_data <= dbg_addr[17] ? sum_ng
                                   : {22'b0, dump_tok[dbg_addr[9:0]]};
-                4'd12: dbg_data <= dump_lsum[dbg_addr];
+                4'd12: dbg_data <= dbg_addr[17] ? first_xn : dump_lsum[dbg_addr];
+                4'd13: dbg_data <= dbg_addr[17] ? first_yb
+                       : {{16{dump_bestv[dbg_addr][15]}}, dump_bestv[dbg_addr]};
                 4'd4:  dbg_data <= sum_emb;
                 4'd5:  dbg_data <= sum_nout;
                 4'd0:  dbg_data <= sum_ny;
@@ -1316,7 +1333,6 @@ module mamba_pipe #(
                 4'd14: dbg_data <= dbg_addr[17] ? first_zx : sum_zx;
                 4'd15: dbg_data <= dbg_addr[17] ? first_q8 : sum_xn;
                 4'd3:  dbg_data <= sum_q8;
-                4'd13: dbg_data <= {{16{dump_bestv[dbg_addr][15]}}, dump_bestv[dbg_addr]};
                 4'd8: dbg_data <= consts[dbg_addr[6:0]];
                 4'd9: dbg_data <= g_wdbg;
                 4'd10: dbg_data <= dbg_addr[17] ? first_ny
