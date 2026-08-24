@@ -445,9 +445,20 @@ module mamba_pipe #(
     reg signed [31:0] snap_xw   [0:SNAPN-1];
     reg        [3:0]  snap_kind [0:SNAPN-1];
 
+    // Does the WRITE reach the buffer, or is the READ broken? Counters cost
+    // nothing (no port); the dump port lets the board read any row back and
+    // compare against sim directly.
+    reg [31:0] zxw_cnt, zxw_asum, xnw_cnt, xnw_asum;
+    wire [63:0] zx_dbg_row = zxbuf_w[dbg_addr[9:0]];
+    wire [63:0] xn_dbg_row = xnbuf_w[dbg_addr[9:0]];
+    wire [63:0] dbg_row    = dbg_addr[15] ? xn_dbg_row : zx_dbg_row;
+
     // conv/scan probe read mux (dbg_sel 6, dbg_addr[18]=1, selector in [3:0])
     reg signed [31:0] conv_dbg_rd;
     always @* begin
+      if (dbg_addr[16]) begin           // raw buffer row: [15]=0 zx / 1 xn,
+        conv_dbg_rd = dbg_addr[14] ? dbg_row[63:32] : dbg_row[31:0];
+      end else
         case (dbg_addr[3:0])
             4'd0: conv_dbg_rd = sum_xna;    // conv y, as read back (wide port)
             4'd1: conv_dbg_rd = c_ysum;     // conv y, at the write
@@ -461,6 +472,10 @@ module mamba_pipe #(
             4'd9: conv_dbg_rd = s_dsum;     // scan dtx AS RECEIVED
             4'd10: conv_dbg_rd = s_bsum;    // scan B   AS RECEIVED
             4'd11: conv_dbg_rd = s_csum;    // scan C   AS RECEIVED
+            4'd12: conv_dbg_rd = zxw_cnt;   // zxbuf writes that actually fired
+            4'd13: conv_dbg_rd = zxw_asum;  // ...and the sum of their addresses
+            4'd14: conv_dbg_rd = xnw_cnt;
+            4'd15: conv_dbg_rd = xnw_asum;
             default: conv_dbg_rd = 32'sd0;
         endcase
     end
@@ -738,6 +753,7 @@ module mamba_pipe #(
             sum_yb <= 32'sd0; first_xn <= 32'sd0; first_yb <= 32'sd0;
             firsts_seen <= 1'b0; firstg_seen <= 1'b0;
             sum_xna <= 32'sd0; first_xna <= 32'sd0; first_ysum <= 32'sd0;
+            zxw_cnt <= 0; zxw_asum <= 0; xnw_cnt <= 0; xnw_asum <= 0;
             ev_cnt <= 4'd0;
             for (w = 0; w < SNAPN; w = w + 1) begin
                 snap_nout[w] <= 32'sd0; snap_q8[w] <= 32'sd0;
@@ -1110,6 +1126,8 @@ module mamba_pipe #(
                              sat16f(rshr(g_t14[2] * $signed({1'b0, g_c_ins[15:0]}), $signed({1'b0, g_c_ins[23:16]}) + 8'sd15 - 8'sd9)),
                              sat16f(rshr(g_t14[1] * $signed({1'b0, g_c_ins[15:0]}), $signed({1'b0, g_c_ins[23:16]}) + 8'sd15 - 8'sd9)),
                              sat16f(rshr(g_t14[0] * $signed({1'b0, g_c_ins[15:0]}), $signed({1'b0, g_c_ins[23:16]}) + 8'sd15 - 8'sd9))};
+                         zxw_cnt  <= zxw_cnt + 1;
+                         zxw_asum <= zxw_asum + ((g_st_s*INROWS + g_i[10:0]) >> 2);
                          g_sub <= 0;
                          if (g_i >= INROWS-4) begin
                              gst <= G_IDLE; op_pc[g_st_s] <= op_pc[g_st_s] + 1;
@@ -1240,6 +1258,8 @@ module mamba_pipe #(
                   0: begin c_rdaw <= c_i[9:0]; c_sub <= 1; end
                   1: begin
                        xnbuf_w[(c_st_s*CONVD + c_i[9:0]) >> 2] <= c_yw;
+                       xnw_cnt  <= xnw_cnt + 1;
+                       xnw_asum <= xnw_asum + ((c_st_s*CONVD + c_i[9:0]) >> 2);
                        sum_xn <= sum_xn + $signed(c_yw[15:0]) + $signed(c_yw[31:16]);
                        sum_xna <= sum_xna + $signed(c_yw[15:0]) + $signed(c_yw[31:16])
                                           + $signed(c_yw[47:32]) + $signed(c_yw[63:48]);
