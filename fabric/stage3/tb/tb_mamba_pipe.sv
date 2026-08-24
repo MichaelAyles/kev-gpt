@@ -156,6 +156,22 @@ module tb_mamba_pipe;
         $display("STAGE_SUM first_xna=%0d", $signed(dbg_data));
         dbg_sel <= 6; dbg_addr <= (1<<18)|3; @(posedge clk); @(posedge clk);
         $display("STAGE_SUM first_ysum=%0d", $signed(dbg_data));
+        dbg_sel <= 6; dbg_addr <= (1<<18)|4; @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM conv_recv_w=%0d", $signed(dbg_data));
+        dbg_sel <= 6; dbg_addr <= (1<<18)|5; @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM conv_recv_b=%0d", $signed(dbg_data));
+        dbg_sel <= 6; dbg_addr <= (1<<18)|6; @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM conv_recv_x=%0d", $signed(dbg_data));
+        dbg_sel <= 6; dbg_addr <= (1<<18)|7; @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM conv_recv_lut=%0d", $signed(dbg_data));
+        dbg_sel <= 6; dbg_addr <= (1<<18)|8; @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM conv_hist=%0d", $signed(dbg_data));
+        dbg_sel <= 6; dbg_addr <= (1<<18)|9; @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM scan_recv_dtx=%0d", $signed(dbg_data));
+        dbg_sel <= 6; dbg_addr <= (1<<18)|10; @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM scan_recv_B=%0d", $signed(dbg_data));
+        dbg_sel <= 6; dbg_addr <= (1<<18)|11; @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM scan_recv_C=%0d", $signed(dbg_data));
         // op-boundary snapshots: the whole layer-0 walk in one sweep.
         // sig 0=nout 1=q8 2=zx 3=xn 4=yb 5=xw 6=kind{n,s,c,g} 7=ev_cnt
         for (i = 0; i < 8; i = i + 1)

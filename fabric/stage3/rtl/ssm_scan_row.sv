@@ -59,6 +59,10 @@ module ssm_scan_row #(
     // array -> free combinational fan-out (same values as rd_y). Combinational.
     input  wire [$clog2(P)-1:0] rd_yw_base,
     output wire [RDP*16-1:0]    rd_yw_data
+,
+    // Same question for the scan, whose output reads EXACTLY ZERO on silicon:
+    // what does it actually receive?
+    output reg signed [31:0]    dbg_dsum, dbg_bsum, dbg_csum
 );
     localparam int PW = $clog2(P);
     localparam int AW = (CTX > 1) ? $clog2(CTX*P) : PW;
@@ -109,9 +113,16 @@ module ssm_scan_row #(
     end endgenerate
 
     always @(posedge clk) begin
-        if (wr_dtx) dtx [wr_dtx_addr] <= wr_dtx_data;
-        if (wr_b)   bvec[wr_b_addr]   <= wr_b_data;
-        if (wr_c)   cvec[wr_c_addr]   <= wr_c_data;
+        if (rst) begin
+            dbg_dsum <= 32'sd0; dbg_bsum <= 32'sd0; dbg_csum <= 32'sd0;
+        end else begin
+            if (wr_dtx) begin dtx [wr_dtx_addr] <= wr_dtx_data;
+                              dbg_dsum <= dbg_dsum + $signed(wr_dtx_data); end
+            if (wr_b)   begin bvec[wr_b_addr]   <= wr_b_data;
+                              dbg_bsum <= dbg_bsum + $signed(wr_b_data); end
+            if (wr_c)   begin cvec[wr_c_addr]   <= wr_c_data;
+                              dbg_csum <= dbg_csum + $signed(wr_c_data); end
+        end
 `ifdef ROW_TRACE
         if (wr_b && wr_b_addr < 2) $display("RTW B[%0d]=%0d", wr_b_addr, wr_b_data);
         if (wr_c && wr_c_addr < 2) $display("RTW C[%0d]=%0d", wr_c_addr, wr_c_data);

@@ -70,6 +70,13 @@ module conv_silu #(
     // the right value and the read port returned something else'. Costs one
     // adder; adds no read port, so memory inference is untouched.
     output reg signed [31:0]     dbg_ysum
+,
+    // What the core actually RECEIVES. sum_wr proves the AXI->convw/convb load;
+    // the engine then RE-STREAMS those into wrom/brom per layer, which is a
+    // separate path and has never been verified on silicon. Also dbg_hsum: the
+    // history state, which is neither loaded nor read back anywhere else.
+    output reg signed [31:0]     dbg_wsum, dbg_bsum, dbg_xsum, dbg_lsum,
+    output reg signed [31:0]     dbg_hsum
 );
     localparam int CW  = $clog2(CH);
     localparam int LCH = L*CH;               // total history rows across banks
@@ -100,10 +107,19 @@ module conv_silu #(
     end endgenerate
 
     always @(posedge clk) begin
-        if (wr_w)   wrom[wr_w_addr] <= wr_w_data;
-        if (wr_b)   brom[wr_b_addr] <= wr_b_data;
-        if (wr_x)   xin [wr_x_addr] <= wr_x_data;
-        if (wr_lut) lut [wr_lut_addr] <= wr_lut_data;
+        if (rst) begin
+            dbg_wsum <= 32'sd0; dbg_bsum <= 32'sd0;
+            dbg_xsum <= 32'sd0; dbg_lsum <= 32'sd0;
+        end else begin
+            if (wr_w)   begin wrom[wr_w_addr] <= wr_w_data;
+                              dbg_wsum <= dbg_wsum + $signed(wr_w_data); end
+            if (wr_b)   begin brom[wr_b_addr] <= wr_b_data;
+                              dbg_bsum <= dbg_bsum + $signed(wr_b_data); end
+            if (wr_x)   begin xin [wr_x_addr] <= wr_x_data;
+                              dbg_xsum <= dbg_xsum + $signed(wr_x_data); end
+            if (wr_lut) begin lut [wr_lut_addr] <= wr_lut_data;
+                              dbg_lsum <= dbg_lsum + $signed(wr_lut_data); end
+        end
     end
 
     localparam [1:0] IDLE = 2'd0, RUN = 2'd1, DRAIN = 2'd2;
@@ -161,13 +177,17 @@ module conv_silu #(
             st <= IDLE; v1 <= 0; v2 <= 0; clearing <= 1'b1; clr <= '0;
             ready <= 1'b0;
             dbg_ysum <= 32'sd0;
+            dbg_hsum <= 32'sd0;
         end else begin
             if (clearing) begin
                 if (clr == LCH-1) begin clearing <= 1'b0; ready <= 1'b1; end
                 clr <= clr + 1'b1;
             end
             // hist SDP write port (muxed clear-sweep / deferred-shift)
-            if (hist_we) hist[hist_waddr] <= hist_wdata;
+            if (hist_we) begin
+                hist[hist_waddr] <= hist_wdata;
+                dbg_hsum <= dbg_hsum + $signed(hist_wdata[15:0]);
+            end
             case (st)
               IDLE: if (start && !clearing) begin st <= RUN; ci <= '0; end
               RUN:  begin

@@ -358,6 +358,8 @@ module mamba_pipe #(
     wire signed [15:0] c_y;
     reg  [9:0]  c_rdaw;   wire [4*16-1:0] c_yw;   // CONV_RD wide read (P=4)
     wire signed [31:0] c_ysum;               // conv y checksum AT THE WRITE
+    // what conv_silu RECEIVES (engine re-stream) + its history state
+    wire signed [31:0] c_wsum, c_bsum, c_xsum, c_lsum, c_hsum;
     // ...and the same values as the engine READS THEM BACK (all 4 wide lanes).
     // Every computed channel is read back exactly once, so on a correct design
     // sum_xna == c_ysum. That equality is checkable on silicon with NO
@@ -373,7 +375,8 @@ module mamba_pipe #(
         .wr_lut(c_wrl), .wr_lut_addr(c_wrl_a), .wr_lut_data(c_wrd),
         .rd_y_addr(c_rda), .rd_y_data(c_y),
         .rd_yw_base(c_rdaw), .rd_yw_data(c_yw),
-        .dbg_ysum(c_ysum));
+        .dbg_ysum(c_ysum), .dbg_wsum(c_wsum), .dbg_bsum(c_bsum),
+        .dbg_xsum(c_xsum), .dbg_lsum(c_lsum), .dbg_hsum(c_hsum));
 
     // scan row (driven only by the SCAN worker); NC*LR*H state contexts
     reg         s_start;  wire s_done, s_ready;
@@ -387,6 +390,7 @@ module mamba_pipe #(
     reg signed [7:0]  s_b_d, s_c_d;
     wire signed [15:0] s_y;
     reg  [5:0]  s_rdaw;   wire [4*16-1:0] s_yw;   // SCAN_RD wide read (P=4)
+    wire signed [31:0] s_dsum, s_bsum, s_csum;  // what the scan RECEIVES
     ssm_scan_row #(.P(64), .N(NST), .QH(QH), .CTX(SCTX), .RDP(4)) u_scan (
         .clk(clk), .rst(rst), .ready(s_ready), .start(s_start), .done(s_done),
         .pbase(s_pbase), .a_q(s_aq), .sh_i(s_shi), .sh_y(s_shy),
@@ -394,7 +398,8 @@ module mamba_pipe #(
         .wr_b(s_wrb), .wr_b_addr(s_wrb_a), .wr_b_data(s_b_d),
         .wr_c(s_wrc), .wr_c_addr(s_wrc_a), .wr_c_data(s_c_d),
         .rd_y_addr(s_rda), .rd_y_data(s_y),
-        .rd_yw_base(s_rdaw), .rd_yw_data(s_yw));
+        .rd_yw_base(s_rdaw), .rd_yw_data(s_yw),
+        .dbg_dsum(s_dsum), .dbg_bsum(s_bsum), .dbg_csum(s_csum));
     assign ready = s_ready & c_ready;
 
     // gated rmsnorm (driven only by the NORM worker)
@@ -439,6 +444,26 @@ module mamba_pipe #(
     reg signed [31:0] snap_yb   [0:SNAPN-1];
     reg signed [31:0] snap_xw   [0:SNAPN-1];
     reg        [3:0]  snap_kind [0:SNAPN-1];
+
+    // conv/scan probe read mux (dbg_sel 6, dbg_addr[18]=1, selector in [3:0])
+    reg signed [31:0] conv_dbg_rd;
+    always @* begin
+        case (dbg_addr[3:0])
+            4'd0: conv_dbg_rd = sum_xna;    // conv y, as read back (wide port)
+            4'd1: conv_dbg_rd = c_ysum;     // conv y, at the write
+            4'd2: conv_dbg_rd = first_xna;
+            4'd3: conv_dbg_rd = first_ysum;
+            4'd4: conv_dbg_rd = c_wsum;     // weights AS RECEIVED by the core
+            4'd5: conv_dbg_rd = c_bsum;     // bias    AS RECEIVED
+            4'd6: conv_dbg_rd = c_xsum;     // x       AS RECEIVED
+            4'd7: conv_dbg_rd = c_lsum;     // SiLU LUT AS RECEIVED
+            4'd8: conv_dbg_rd = c_hsum;     // conv history state writes
+            4'd9: conv_dbg_rd = s_dsum;     // scan dtx AS RECEIVED
+            4'd10: conv_dbg_rd = s_bsum;    // scan B   AS RECEIVED
+            4'd11: conv_dbg_rd = s_csum;    // scan C   AS RECEIVED
+            default: conv_dbg_rd = 32'sd0;
+        endcase
+    end
 
     // snapshot read mux: dbg_addr[5:3] = which checksum, [2:0] = which event
     reg signed [31:0] snap_rd;
@@ -1375,9 +1400,7 @@ module mamba_pipe #(
                 4'd5:  dbg_data <= sum_nout;
                 4'd0:  dbg_data <= sum_ny;
                 4'd7:  dbg_data <= sum_xw;
-                4'd6:  dbg_data <= dbg_addr[18]
-                       ? (dbg_addr[1] ? (dbg_addr[0] ? first_ysum : first_xna)
-                                      : (dbg_addr[0] ? c_ysum     : sum_xna))
+                4'd6:  dbg_data <= dbg_addr[18] ? conv_dbg_rd
                        : (dbg_addr[17] ? xrow_dbg[0][31:0]
                                        : {16'b0, rsin[dbg_addr[12:0]]});
                 4'd14: dbg_data <= dbg_addr[17] ? first_zx : sum_zx;
@@ -1406,9 +1429,7 @@ module mamba_pipe #(
                 4'd5:  dbg_data <= sum_nout;
                 4'd0:  dbg_data <= sum_ny;
                 4'd7:  dbg_data <= sum_xw;
-                4'd6:  dbg_data <= dbg_addr[18]
-                       ? (dbg_addr[1] ? (dbg_addr[0] ? first_ysum : first_xna)
-                                      : (dbg_addr[0] ? c_ysum     : sum_xna))
+                4'd6:  dbg_data <= dbg_addr[18] ? conv_dbg_rd
                        : (dbg_addr[17] ? xrow_dbg[0][31:0]
                                        : {16'b0, rsin[dbg_addr[12:0]]});
                 4'd14: dbg_data <= dbg_addr[17] ? first_zx : sum_zx;
