@@ -180,20 +180,6 @@ module tb_mamba_pipe;
         $display("STAGE_SUM xnw_cnt=%0d", $signed(dbg_data));
         dbg_sel <= 6; dbg_addr <= (1<<18)|15; @(posedge clk); @(posedge clk);
         $display("STAGE_SUM xnw_asum=%0d", $signed(dbg_data));
-        // raw buffer rows covering the offsets whose reads came back ZERO
-        for (i = 0; i < 8; i = i + 1) begin
-            dbg_sel <= 6; dbg_addr <= (1<<18)|(1<<16)|((512/4)+i);
-            @(posedge clk); @(posedge clk);
-            $display("STAGE_ROW zx[%0d]lo=%0d", (512/4)+i, $signed(dbg_data));
-            dbg_sel <= 6; dbg_addr <= (1<<18)|(1<<16)|(1<<14)|((512/4)+i);
-            @(posedge clk); @(posedge clk);
-            $display("STAGE_ROW zx[%0d]hi=%0d", (512/4)+i, $signed(dbg_data));
-        end
-        for (i = 0; i < 8; i = i + 1) begin
-            dbg_sel <= 6; dbg_addr <= (1<<18)|(1<<16)|(1<<15)|((512/4)+i);
-            @(posedge clk); @(posedge clk);
-            $display("STAGE_ROW xn[%0d]lo=%0d", (512/4)+i, $signed(dbg_data));
-        end
         // op-boundary snapshots: the whole layer-0 walk in one sweep.
         // sig 0=nout 1=q8 2=zx 3=xn 4=yb 5=xw 6=kind{n,s,c,g} 7=ev_cnt
         for (i = 0; i < 8; i = i + 1)

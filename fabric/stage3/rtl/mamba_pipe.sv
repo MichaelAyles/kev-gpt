@@ -242,6 +242,26 @@ module mamba_pipe #(
         end
     endfunction
 
+    // ONE READ PORT PER CONCURRENT CONSUMER. The accessors below read the same
+    // buffer from several workers; Vivado merged those call sites onto a SINGLE
+    // physical read port (zxbuf_w synthesised to RAM64M8 x130 = exactly one copy
+    // for three readers), while behavioural sim gives every call its own
+    // independent read. The wave engine runs those workers CONCURRENTLY, so on
+    // silicon they collide and the conv's x and the scan's B/C arrived as zero.
+    // Proof that the tool replicates when the reads are structurally distinct:
+    // adding one debug read port took zxbuf_w 130 -> 260. So give each consumer
+    // its own read expression and let it replicate.
+    function automatic signed [15:0] lane16(input [63:0] row, input [1:0] l);
+        begin
+            case (l)
+                2'd0: lane16 = row[15:0];
+                2'd1: lane16 = row[31:16];
+                2'd2: lane16 = row[47:32];
+                default: lane16 = row[63:48];
+            endcase
+        end
+    endfunction
+
     function automatic signed [15:0] zx_rd(input [15:0] idx);
         reg [63:0] row;
         begin
@@ -449,16 +469,10 @@ module mamba_pipe #(
     // nothing (no port); the dump port lets the board read any row back and
     // compare against sim directly.
     reg [31:0] zxw_cnt, zxw_asum, xnw_cnt, xnw_asum;
-    wire [63:0] zx_dbg_row = zxbuf_w[dbg_addr[9:0]];
-    wire [63:0] xn_dbg_row = xnbuf_w[dbg_addr[9:0]];
-    wire [63:0] dbg_row    = dbg_addr[15] ? xn_dbg_row : zx_dbg_row;
 
     // conv/scan probe read mux (dbg_sel 6, dbg_addr[18]=1, selector in [3:0])
     reg signed [31:0] conv_dbg_rd;
     always @* begin
-      if (dbg_addr[16]) begin           // raw buffer row: [15]=0 zx / 1 xn,
-        conv_dbg_rd = dbg_addr[14] ? dbg_row[63:32] : dbg_row[31:0];
-      end else
         case (dbg_addr[3:0])
             4'd0: conv_dbg_rd = sum_xna;    // conv y, as read back (wide port)
             4'd1: conv_dbg_rd = c_ysum;     // conv y, at the write
@@ -620,6 +634,14 @@ module mamba_pipe #(
     localparam [3:0] SC_IDLE=0, SC_PREP=1, SC_H=2, SC_HWAIT=3, SC_RD=4;
     reg [3:0]  sst; reg [SW-1:0] s_st_s; reg [3:0] s_li; reg [3:0] s_hi;
     reg [11:0] sc_i; reg [3:0] sc_sub;
+
+    // one dedicated read port per concurrent consumer (see lane16 above)
+    wire [63:0] zx_row_n = zxbuf_w[(n_st_s*INROWS + n_i[8:0]) >> 2];
+    wire [63:0] zx_row_c = zxbuf_w[(c_st_s*INROWS + DIN + c_i[9:0]) >> 2];
+    wire [63:0] zx_row_s = zxbuf_w[(s_st_s*INROWS + 2*DIN + 2*NST + s_hi[2:0]) >> 2];
+    wire [63:0] xn_row_b = xnbuf_w[(s_st_s*CONVD + DIN + sc_i[6:0]) >> 2];
+    wire [63:0] xn_row_c = xnbuf_w[(s_st_s*CONVD + DIN + NST + sc_i[6:0]) >> 2];
+    wire [63:0] xn_row_t = xnbuf_w[(s_st_s*CONVD + s_hi[2:0]*64 + sc_i[5:0]) >> 2];
     reg [15:0] sc_dtq; reg [4:0] sc_eh;
     reg signed [31:0] sc_acc; reg signed [47:0] sc_t1; reg [15:0] sc_fp;
     reg signed [15:0] sc_dtq3;
@@ -989,7 +1011,7 @@ module mamba_pipe #(
                   n_wry <= 1; n_wry_a <= n_i[9:0];
                   n_wry_d <= yb_rd(n_st_s*DIN + n_i[8:0]);
                   n_wrz <= 1; n_wrz_a <= n_i[9:0];
-                  n_wrz_d <= zx_rd(n_st_s*INROWS + n_i[8:0]);
+                  n_wrz_d <= lane16(zx_row_n, n_i[1:0]);
                   n_wrg <= 1; n_wrg_a <= n_i[9:0];
                   n_wrg_d <= nrmg[n_li*DIN + n_i[8:0]];
                   if (n_i == DIN-1) begin n_i <= 0; nst <= N_RUN; n_start <= 1; end
@@ -1248,7 +1270,7 @@ module mamba_pipe #(
                 c_wrb <= 1; c_wrb_a <= c_i[9:0];
                 c_wrb_d <= convb[c_li*CONVD + c_i[9:0]];
                 c_wrx <= 1; c_wrx_a <= c_i[9:0];
-                c_wrx_d <= zx_rd(c_st_s*INROWS + DIN + c_i[9:0]);
+                c_wrx_d <= lane16(zx_row_c, c_i[1:0]);
                 if (c_i == CONVD-1) begin c_i <= 0; cst <= C_RUN; c_start <= 1; end
                 else c_i <= c_i + 1;
               end
@@ -1279,9 +1301,9 @@ module mamba_pipe #(
               SC_PREP: begin
                 // COLLAPSED: B and C prep in ONE cycle (independent ports, both
                 // reads + shifts combinational). NST cycles instead of 4*NST.
-                sc_b1 = rshr($signed(xn_rd(s_st_s*CONVD + DIN + sc_i[6:0])),
+                sc_b1 = rshr($signed(lane16(xn_row_b, sc_i[1:0])),
                              $signed(8'sd11) - $signed({4'b0, s_bB}));
-                sc_c1 = rshr($signed(xn_rd(s_st_s*CONVD + DIN + NST + sc_i[6:0])),
+                sc_c1 = rshr($signed(lane16(xn_row_c, sc_i[1:0])),
                              $signed(8'sd11) - $signed({4'b0, s_bC}));
                 s_wrb <= 1; s_wrb_a <= sc_i[5:0];
                 s_b_d <= (sc_b1 > 48'sd127) ? 8'sd127 :
@@ -1295,7 +1317,7 @@ module mamba_pipe #(
               SC_H: begin
                 case (sc_sub)
                   0: begin
-                       s_dtraw = zx_rd(s_st_s*INROWS + 2*DIN + 2*NST + s_hi[2:0]);
+                       s_dtraw = lane16(zx_row_s, s_hi[1:0]);
                        sc_dtq3 = sat16f($signed({{32{s_dtraw[15]}}, s_dtraw}) <<< 3);
                        sc_fp <= {8'b0, ~sc_dtq3[15], sc_dtq3[14:8]};
                        sc_sub <= 1;
@@ -1312,7 +1334,7 @@ module mamba_pipe #(
                        sc_sub <= 3;
                   end
                   3: begin
-                       sc_t1 <= rshr($signed(xn_rd(s_st_s*CONVD + s_hi[2:0]*64 + sc_i[5:0])),
+                       sc_t1 <= rshr($signed(lane16(xn_row_t, sc_i[1:0])),
                                   $signed(8'sd11) - $signed({4'b0, s_bX}));
                        sc_sub <= 4;
                   end
@@ -1357,7 +1379,7 @@ module mamba_pipe #(
                   end
                   2: begin                         // 4 ybuf lanes -> one row write
                        // the 4 D-skip xnbuf channels are one aligned row: read once.
-                       sc_xrow = xnbuf_w[(s_st_s*CONVD + s_hi[2:0]*64 + sc_i[5:0]) >> 2];
+                       sc_xrow = xn_row_t;   // same address as sc_t1: shares its port
                        sum_yb <= sum_yb + $signed(sc_yacc[0][15:0])
                                         + $signed(sc_yacc[1][15:0]);
                        ybuf_w[(s_st_s*DIN + s_hi[2:0]*64 + sc_i[5:0]) >> 2] <= {
