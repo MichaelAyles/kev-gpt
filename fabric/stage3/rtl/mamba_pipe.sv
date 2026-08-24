@@ -189,6 +189,10 @@ module mamba_pipe #(
     reg signed [31:0] sum_ny;     // rmsnorm y input (the vector to normalise)
     reg signed [31:0] sum_ng;     // rmsnorm g input (the gain table words)
     reg signed [31:0] sum_xw;     // residual-bank WRITE data (embedding init)
+    reg signed [31:0] first_ny, first_nout;  // sums latched at the FIRST gemv
+    reg               first_seen;            // dispatch = layer 0's pre-norm
+    reg signed [31:0] first_q8, first_zx;    // latched at the FIRST conv
+    reg               firstc_seen;           // dispatch = one in_proj done
     reg signed [15:0] dump_logit [0:NC*TMAX*V-1];
     reg signed [31:0] dump_x     [0:NC*TMAX*D-1];
 
@@ -649,6 +653,8 @@ module mamba_pipe #(
             sum_zx <= 32'sd0; sum_xn <= 32'sd0; sum_q8 <= 32'sd0;
             sum_emb <= 32'sd0; sum_nout <= 32'sd0;
             sum_ny <= 32'sd0; sum_ng <= 32'sd0; sum_xw <= 32'sd0;
+            first_ny <= 32'sd0; first_nout <= 32'sd0; first_seen <= 1'b0;
+            first_q8 <= 32'sd0; first_zx <= 32'sd0; firstc_seen <= 1'b0;
             for (w = 0; w < NC; w = w + 1) begin
                 op_pc[w] <= 0; tokcnt[w] <= 0; active[w] <= 0; busy[w] <= 0;
             end
@@ -656,6 +662,18 @@ module mamba_pipe #(
         end else begin
             // measured cycle counter: from first dispatch to all-done
             if (started && !all_done) cyc_count <= cyc_count + 1;
+
+            if (c_start && !firstc_seen) begin
+                firstc_seen <= 1'b1;
+                first_q8   <= sum_q8;
+                first_zx   <= sum_zx;
+            end
+
+            if (g_start && !first_seen) begin
+                first_seen <= 1'b1;
+                first_ny   <= sum_ny;
+                first_nout <= sum_nout;
+            end
 
             // stage checksums — accumulated in THIS block, the same one that
             // resets them, so each is single-driven.
@@ -1269,14 +1287,16 @@ module mamba_pipe #(
                 4'd7:  dbg_data <= sum_xw;
                 4'd6:  dbg_data <= dbg_addr[17] ? xrow_dbg[0][31:0]
                                                 : {16'b0, rsin[dbg_addr[12:0]]};
-                4'd14: dbg_data <= sum_zx;
-                4'd15: dbg_data <= sum_xn;
+                4'd14: dbg_data <= dbg_addr[17] ? first_zx : sum_zx;
+                4'd15: dbg_data <= dbg_addr[17] ? first_q8 : sum_xn;
                 4'd3:  dbg_data <= sum_q8;
                 4'd13: dbg_data <= {{16{dump_bestv[dbg_addr][15]}}, dump_bestv[dbg_addr]};
                 4'd8: dbg_data <= consts[dbg_addr[6:0]];
                 4'd9: dbg_data <= g_wdbg;
-                4'd10: dbg_data <= {12'b0, n_seed_dbg};
-                4'd11: dbg_data <= {16'b0, esc[dbg_addr[9:0]]};
+                4'd10: dbg_data <= dbg_addr[17] ? first_ny
+                                                : {12'b0, n_seed_dbg};
+                4'd11: dbg_data <= dbg_addr[17] ? first_nout
+                                    : {16'b0, esc[dbg_addr[9:0]]};
                 default: dbg_data <= 32'sd0;
             endcase
         end
@@ -1293,14 +1313,16 @@ module mamba_pipe #(
                 4'd7:  dbg_data <= sum_xw;
                 4'd6:  dbg_data <= dbg_addr[17] ? xrow_dbg[0][31:0]
                                                 : {16'b0, rsin[dbg_addr[12:0]]};
-                4'd14: dbg_data <= sum_zx;
-                4'd15: dbg_data <= sum_xn;
+                4'd14: dbg_data <= dbg_addr[17] ? first_zx : sum_zx;
+                4'd15: dbg_data <= dbg_addr[17] ? first_q8 : sum_xn;
                 4'd3:  dbg_data <= sum_q8;
                 4'd13: dbg_data <= {{16{dump_bestv[dbg_addr][15]}}, dump_bestv[dbg_addr]};
                 4'd8: dbg_data <= consts[dbg_addr[6:0]];
                 4'd9: dbg_data <= g_wdbg;
-                4'd10: dbg_data <= {12'b0, n_seed_dbg};
-                4'd11: dbg_data <= {16'b0, esc[dbg_addr[9:0]]};
+                4'd10: dbg_data <= dbg_addr[17] ? first_ny
+                                                : {12'b0, n_seed_dbg};
+                4'd11: dbg_data <= dbg_addr[17] ? first_nout
+                                    : {16'b0, esc[dbg_addr[9:0]]};
                 default: dbg_data <= 32'sd0;
             endcase
         end
