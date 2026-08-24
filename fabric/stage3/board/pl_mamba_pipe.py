@@ -7,7 +7,8 @@ from run_mamba_pipe's sim dir) over AXI-Lite — including the rsqrt seed table
 per-(stream,token) tokens, pulses go once, and after done compares every
 stream's per-token argmax (dump_tok readback, DBGSEL=2) against the
 laptop-computed reference (mp_ref.npz) — the bit-honest step. The fabric
-CYCLES counter gives the MEASURED cyc/token/stream and aggregate tok/s.
+CYCLES counter gives the MEASURED cyc/token (aggregate over the NC
+interleaved streams) and the aggregate tok/s.
 
 Laptop prep (after a green run_mamba_pipe):
   scp <simdir>/ms_t*.mem <simdir>/ms_cfg.mem <simdir>/mp_ref.npz kria:~/kevmem/
@@ -314,15 +315,21 @@ def main(argv=None):
     cycs = [cyc]
     for _ in range(max(0, args.runs - 1)):
         cycs.append(d.go())
-    per = float(np.mean(cycs)) / (NC * T)
-    toks_s = args.fclk / per * NC
-    print(f"PL_MAMBA_PIPE_BENCH: {per:,.0f} cyc/token/stream @ "
-          f"{args.fclk/1e6:.0f} MHz = {args.fclk/per:,.1f} tok/s/stream x{NC} "
-          f"= {toks_s:,.0f} tok/s aggregate "
-          f"({NC*T/wall:,.0f} tok/s incl AXI wall, runs={len(cycs)}, "
+    # `per` is total cycles divided by ALL tokens produced (NC streams x T each,
+    # in ONE go()), so it is cycles per token AGGREGATE and fclk/per is already
+    # the aggregate rate. This used to multiply by NC again, inflating every
+    # published tok/s and chars/s figure by exactly NC (3x). The driver's own
+    # wall-clock number below disagreed with it all along; trust that one.
+    per = float(np.mean(cycs)) / (NC * T)      # cycles/token, aggregate
+    toks_s = args.fclk / per                   # aggregate tok/s
+    print(f"PL_MAMBA_PIPE_BENCH: {per:,.0f} cyc/token aggregate "
+          f"({NC} streams interleaved, {per*NC:,.0f} cyc/token/stream) @ "
+          f"{args.fclk/1e6:.0f} MHz = {toks_s:,.1f} tok/s aggregate "
+          f"({toks_s/NC:,.1f} per stream) "
+          f"({NC*T/wall:,.0f} tok/s measured incl AXI wall, runs={len(cycs)}, "
           f"cyc={[int(c) for c in cycs[:4]]}{'...' if len(cycs) > 4 else ''})")
     if args.chars_per_tok:
-        print(f"  => {toks_s*args.chars_per_tok:,.0f} chars/s "
+        print(f"  => {toks_s*args.chars_per_tok:,.0f} chars/s aggregate "
               f"(at {args.chars_per_tok} chars/tok)")
     return 0 if bad == 0 else 1
 
