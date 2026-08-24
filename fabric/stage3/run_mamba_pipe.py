@@ -244,7 +244,7 @@ def main(argv=None):
                    cwd=sim, check=True)
     out = subprocess.run([tool("vvp"), "mp.vvp"], cwd=sim, check=True,
                          capture_output=True, text=True, timeout=21600)
-    tail = out.stdout[-1500:]
+    tail = out.stdout[-9000:]   # must hold the whole STAGE_* block (was 1500: silently ate it)
     if "TB_MS_DONE" not in out.stdout:
         sys.exit(f"sim incomplete:\n{tail}")
 
