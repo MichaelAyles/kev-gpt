@@ -44,6 +44,7 @@ module tb_mamba_pipe;
     reg [31:0] cfg [0:31];
     reg [15:0] toks [0:1023];
     integer i, s, t, fd, fdx;
+    integer j;
 
     task load_sel(input integer sel, input integer count, input [1023:0] fname);
         begin
@@ -146,6 +147,29 @@ module tb_mamba_pipe;
         $display("STAGE_SUM first_ny=%0d", $signed(dbg_data));
         dbg_sel <= 11; dbg_addr <= (1<<17); @(posedge clk); @(posedge clk);
         $display("STAGE_SUM first_nout=%0d", $signed(dbg_data));
+        // conv compute-vs-readback pair: sum_xna must equal c_ysum
+        dbg_sel <= 6; dbg_addr <= (1<<18)|0; @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM conv_readback_all=%0d", $signed(dbg_data));
+        dbg_sel <= 6; dbg_addr <= (1<<18)|1; @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM conv_written_all=%0d", $signed(dbg_data));
+        dbg_sel <= 6; dbg_addr <= (1<<18)|2; @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM first_xna=%0d", $signed(dbg_data));
+        dbg_sel <= 6; dbg_addr <= (1<<18)|3; @(posedge clk); @(posedge clk);
+        $display("STAGE_SUM first_ysum=%0d", $signed(dbg_data));
+        // op-boundary snapshots: the whole layer-0 walk in one sweep.
+        // sig 0=nout 1=q8 2=zx 3=xn 4=yb 5=xw 6=kind{n,s,c,g} 7=ev_cnt
+        for (i = 0; i < 8; i = i + 1)
+          for (j = 0; j < 8; j = j + 1) begin
+            dbg_sel <= 3; dbg_addr <= (1<<18) | (j<<3) | i;
+            @(posedge clk); @(posedge clk);
+            $display("STAGE_SNAP ev=%0d sig=%0d val=%0d", i, j, $signed(dbg_data));
+          end
+        // per-table AXI load checksums
+        for (i = 0; i < 16; i = i + 1) begin
+            dbg_sel <= 8; dbg_addr <= (1<<18) | i;
+            @(posedge clk); @(posedge clk);
+            $display("STAGE_WSUM sel=%0d val=%0d", i, $signed(dbg_data));
+        end
         dbg_addr <= 0;
         dbg_sel <= 7;  dbg_addr <= 0; @(posedge clk); @(posedge clk);
         $display("STAGE_SUM xw=%0d", $signed(dbg_data));

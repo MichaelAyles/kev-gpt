@@ -62,6 +62,14 @@ module conv_silu #(
     // is a free combinational fan-out — same values as rd_y). Combinational.
     input  wire [$clog2(CH)-1:0] rd_yw_base,
     output wire [RDP*16-1:0]     rd_yw_data
+,
+
+    // doc-9c instrument: checksum of every y value at the moment it is
+    // WRITTEN into yout. Compared against the engine's read-back sum, it
+    // separates 'the conv computed the wrong value' from 'the conv computed
+    // the right value and the read port returned something else'. Costs one
+    // adder; adds no read port, so memory inference is untouched.
+    output reg signed [31:0]     dbg_ysum
 );
     localparam int CW  = $clog2(CH);
     localparam int LCH = L*CH;               // total history rows across banks
@@ -152,6 +160,7 @@ module conv_silu #(
         if (rst) begin
             st <= IDLE; v1 <= 0; v2 <= 0; clearing <= 1'b1; clr <= '0;
             ready <= 1'b0;
+            dbg_ysum <= 32'sd0;
         end else begin
             if (clearing) begin
                 if (clr == LCH-1) begin clearing <= 1'b0; ready <= 1'b1; end
@@ -185,7 +194,10 @@ module conv_silu #(
                   + (b1 <<< 9);        // bias Q1.14 -> frac 23 (products Q6.9 x Q1.14)
 
             // S2: LUT + write
-            if (v2) yout[c2] <= ylut;
+            if (v2) begin
+                yout[c2] <= ylut;
+                dbg_ysum <= dbg_ysum + $signed(ylut);
+            end
         end
     end
 

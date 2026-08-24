@@ -128,6 +128,18 @@ module mamba_pipe #(
         endcase
     end
 
+    // per-wsel AXI LOAD checksum: the instrument that would have caught the
+    // double-write in one read. Reset+accumulate in ONE block (single-driven).
+    reg signed [31:0] sum_wr [0:15];
+    integer kwr;
+    always @(posedge clk) begin
+        if (rst) begin
+            for (kwr = 0; kwr < 16; kwr = kwr + 1) sum_wr[kwr] <= 32'sd0;
+        end else if (wr_en) begin
+            sum_wr[wr_sel] <= sum_wr[wr_sel] + $signed(wr_data);
+        end
+    end
+
     // token sequences (per stream, teacher-forced)
     reg [9:0] tok_seq [0:NC*TMAX-1];
     always @(posedge clk) if (tw_en) tok_seq[tw_addr] <= tw_data;
@@ -345,6 +357,13 @@ module mamba_pipe #(
     reg signed [15:0] c_wrb_d, c_wrx_d;
     wire signed [15:0] c_y;
     reg  [9:0]  c_rdaw;   wire [4*16-1:0] c_yw;   // CONV_RD wide read (P=4)
+    wire signed [31:0] c_ysum;               // conv y checksum AT THE WRITE
+    // ...and the same values as the engine READS THEM BACK (all 4 wide lanes).
+    // Every computed channel is read back exactly once, so on a correct design
+    // sum_xna == c_ysum. That equality is checkable on silicon with NO
+    // reference, and splits conv-compute faults from conv-read-port faults.
+    reg signed [31:0] sum_xna;
+    reg signed [31:0] first_xna, first_ysum;
     conv_silu #(.CH(CONVD), .K(4), .L(SL), .RDP(4)) u_conv (
         .clk(clk), .rst(rst), .start(c_start), .done(c_done), .ready(c_ready),
         .layer(c_layer),
@@ -353,7 +372,8 @@ module mamba_pipe #(
         .wr_x(c_wrx), .wr_x_addr(c_wrx_a), .wr_x_data(c_wrx_d),
         .wr_lut(c_wrl), .wr_lut_addr(c_wrl_a), .wr_lut_data(c_wrd),
         .rd_y_addr(c_rda), .rd_y_data(c_y),
-        .rd_yw_base(c_rdaw), .rd_yw_data(c_yw));
+        .rd_yw_base(c_rdaw), .rd_yw_data(c_yw),
+        .dbg_ysum(c_ysum));
 
     // scan row (driven only by the SCAN worker); NC*LR*H state contexts
     reg         s_start;  wire s_done, s_ready;
@@ -402,6 +422,38 @@ module mamba_pipe #(
         .rd_seed_addr(dbg_addr[5:0]), .rd_seed_data(n_seed_dbg),
         .rd_o_addr(n_rda), .rd_o_data(n_out),
         .rd_ow_base(n_rdaw), .rd_ow_data(n_ow));
+
+    // ---- op-boundary SNAPSHOT instrument (doc 9c) -------------------------
+    // On each of the first SNAPN op dispatches, freeze every running stage
+    // checksum. One silicon read then yields the WHOLE layer-0 walk, instead
+    // of one bisect probe per 65-minute build cycle.
+    // Single-driven: reset AND capture both live in the main always block.
+    localparam int SNAPN = 8;
+    wire       ev_pulse = g_start | c_start | s_start | (n_start & n_gated);
+    wire [3:0] ev_kind  = {n_start & n_gated, s_start, c_start, g_start};
+    reg  [3:0] ev_cnt;
+    reg signed [31:0] snap_nout [0:SNAPN-1];
+    reg signed [31:0] snap_q8   [0:SNAPN-1];
+    reg signed [31:0] snap_zx   [0:SNAPN-1];
+    reg signed [31:0] snap_xn   [0:SNAPN-1];
+    reg signed [31:0] snap_yb   [0:SNAPN-1];
+    reg signed [31:0] snap_xw   [0:SNAPN-1];
+    reg        [3:0]  snap_kind [0:SNAPN-1];
+
+    // snapshot read mux: dbg_addr[5:3] = which checksum, [2:0] = which event
+    reg signed [31:0] snap_rd;
+    always @* begin
+        case (dbg_addr[5:3])
+            3'd0: snap_rd = snap_nout[dbg_addr[2:0]];
+            3'd1: snap_rd = snap_q8  [dbg_addr[2:0]];
+            3'd2: snap_rd = snap_zx  [dbg_addr[2:0]];
+            3'd3: snap_rd = snap_xn  [dbg_addr[2:0]];
+            3'd4: snap_rd = snap_yb  [dbg_addr[2:0]];
+            3'd5: snap_rd = snap_xw  [dbg_addr[2:0]];
+            3'd6: snap_rd = {28'b0, snap_kind[dbg_addr[2:0]]};
+            default: snap_rd = {28'b0, ev_cnt};
+        endcase
+    end
 
     // ============================================================ scheduler ==
     // op-chain: pc 0 = EMB; pc 1..42 = 7 x [NPRE,GIN,CONV,SCAN,NGATE,GOUT];
@@ -660,6 +712,14 @@ module mamba_pipe #(
             first_q8 <= 32'sd0; first_zx <= 32'sd0; firstc_seen <= 1'b0;
             sum_yb <= 32'sd0; first_xn <= 32'sd0; first_yb <= 32'sd0;
             firsts_seen <= 1'b0; firstg_seen <= 1'b0;
+            sum_xna <= 32'sd0; first_xna <= 32'sd0; first_ysum <= 32'sd0;
+            ev_cnt <= 4'd0;
+            for (w = 0; w < SNAPN; w = w + 1) begin
+                snap_nout[w] <= 32'sd0; snap_q8[w] <= 32'sd0;
+                snap_zx[w]   <= 32'sd0; snap_xn[w] <= 32'sd0;
+                snap_yb[w]   <= 32'sd0; snap_xw[w] <= 32'sd0;
+                snap_kind[w] <= 4'd0;
+            end
             for (w = 0; w < NC; w = w + 1) begin
                 op_pc[w] <= 0; tokcnt[w] <= 0; active[w] <= 0; busy[w] <= 0;
             end
@@ -668,8 +728,20 @@ module mamba_pipe #(
             // measured cycle counter: from first dispatch to all-done
             if (started && !all_done) cyc_count <= cyc_count + 1;
 
+            if (ev_pulse && ev_cnt < SNAPN) begin
+                ev_cnt <= ev_cnt + 4'd1;
+                snap_nout[ev_cnt[2:0]] <= sum_nout;
+                snap_q8  [ev_cnt[2:0]] <= sum_q8;
+                snap_zx  [ev_cnt[2:0]] <= sum_zx;
+                snap_xn  [ev_cnt[2:0]] <= sum_xn;
+                snap_yb  [ev_cnt[2:0]] <= sum_yb;
+                snap_xw  [ev_cnt[2:0]] <= sum_xw;
+                snap_kind[ev_cnt[2:0]] <= ev_kind;
+            end
+
             if (s_start && !firsts_seen) begin       // one conv complete
                 firsts_seen <= 1'b1; first_xn <= sum_xn;
+                first_xna <= sum_xna; first_ysum <= c_ysum;
             end
             if (n_start && n_gated && !firstg_seen) begin  // one scan complete
                 firstg_seen <= 1'b1; first_yb <= sum_yb;
@@ -1144,6 +1216,8 @@ module mamba_pipe #(
                   1: begin
                        xnbuf_w[(c_st_s*CONVD + c_i[9:0]) >> 2] <= c_yw;
                        sum_xn <= sum_xn + $signed(c_yw[15:0]) + $signed(c_yw[31:16]);
+                       sum_xna <= sum_xna + $signed(c_yw[15:0]) + $signed(c_yw[31:16])
+                                          + $signed(c_yw[47:32]) + $signed(c_yw[63:48]);
                        c_sub <= 0;
                        if (c_i >= CONVD-4) begin
                            cst <= C_IDLE; op_pc[c_st_s] <= op_pc[c_st_s] + 1;
@@ -1301,12 +1375,16 @@ module mamba_pipe #(
                 4'd5:  dbg_data <= sum_nout;
                 4'd0:  dbg_data <= sum_ny;
                 4'd7:  dbg_data <= sum_xw;
-                4'd6:  dbg_data <= dbg_addr[17] ? xrow_dbg[0][31:0]
-                                                : {16'b0, rsin[dbg_addr[12:0]]};
+                4'd6:  dbg_data <= dbg_addr[18]
+                       ? (dbg_addr[1] ? (dbg_addr[0] ? first_ysum : first_xna)
+                                      : (dbg_addr[0] ? c_ysum     : sum_xna))
+                       : (dbg_addr[17] ? xrow_dbg[0][31:0]
+                                       : {16'b0, rsin[dbg_addr[12:0]]});
                 4'd14: dbg_data <= dbg_addr[17] ? first_zx : sum_zx;
                 4'd15: dbg_data <= dbg_addr[17] ? first_q8 : sum_xn;
-                4'd3:  dbg_data <= sum_q8;
-                4'd8: dbg_data <= consts[dbg_addr[6:0]];
+                4'd3:  dbg_data <= dbg_addr[18] ? snap_rd : sum_q8;
+                4'd8: dbg_data <= dbg_addr[18] ? sum_wr[dbg_addr[3:0]]
+                                              : consts[dbg_addr[6:0]];
                 4'd9: dbg_data <= g_wdbg;
                 4'd10: dbg_data <= dbg_addr[17] ? first_ny
                                                 : {12'b0, n_seed_dbg};
@@ -1328,12 +1406,16 @@ module mamba_pipe #(
                 4'd5:  dbg_data <= sum_nout;
                 4'd0:  dbg_data <= sum_ny;
                 4'd7:  dbg_data <= sum_xw;
-                4'd6:  dbg_data <= dbg_addr[17] ? xrow_dbg[0][31:0]
-                                                : {16'b0, rsin[dbg_addr[12:0]]};
+                4'd6:  dbg_data <= dbg_addr[18]
+                       ? (dbg_addr[1] ? (dbg_addr[0] ? first_ysum : first_xna)
+                                      : (dbg_addr[0] ? c_ysum     : sum_xna))
+                       : (dbg_addr[17] ? xrow_dbg[0][31:0]
+                                       : {16'b0, rsin[dbg_addr[12:0]]});
                 4'd14: dbg_data <= dbg_addr[17] ? first_zx : sum_zx;
                 4'd15: dbg_data <= dbg_addr[17] ? first_q8 : sum_xn;
-                4'd3:  dbg_data <= sum_q8;
-                4'd8: dbg_data <= consts[dbg_addr[6:0]];
+                4'd3:  dbg_data <= dbg_addr[18] ? snap_rd : sum_q8;
+                4'd8: dbg_data <= dbg_addr[18] ? sum_wr[dbg_addr[3:0]]
+                                              : consts[dbg_addr[6:0]];
                 4'd9: dbg_data <= g_wdbg;
                 4'd10: dbg_data <= dbg_addr[17] ? first_ny
                                                 : {12'b0, n_seed_dbg};
