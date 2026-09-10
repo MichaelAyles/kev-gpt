@@ -3282,3 +3282,62 @@ not closed.
   full measurement chain) — this is a real, permanent, committed source
   change, requiring a bitstream rebuild to take effect (already done and
   reflected in the real board's current state as of this log entry).
+
+## Verifying the "Closing quality check" claim with a fresh seeded sweep
+
+The Phase 2 closing quality check's "equal coherence" conclusion rested
+on numbers recorded at the time, not on anything reproducible from a
+checked-in script (Sweep 1/2's own scripts were noted as scratch,
+`/tmp/claude-*/scratchpad/sweep_three_models*.py`, long gone). This
+entry reruns that comparison from scratch — checkpoint C
+(`data/ckpt_stepC_d384_v16384_fp.pt`, iter 15000, D=384/n_layer=12/
+n_head=6, the ten-step ablation walk's payoff checkpoint) vs
+`SauravP97/tiny-stories-19M` — with the same methodology (same
+detector, same sweep shapes) and, this time, both the sweep script and
+its full sample-by-sample output committed rather than left as scratch.
+
+One incidental finding along the way: `data/ckpt_stepC_d384_v16384_fp.pt`
+is NOT a `model/train.py`-format checkpoint (`{"model", "cfg", "meta",
+"iter", "val"}`) — it only carries `{"model", "iter"}`, since it was
+produced and later re-saved by the standalone
+`ablation_step10_lr1e3.py` script, not `model/train.py`'s own save path.
+Loading it for generation requires reconstructing `GPTConfig` (`block_size=128,
+n_layer=12, n_head=6, n_embd=384`, vocab from `data/word_v16384/meta.json`)
+by hand rather than trusting `ck["cfg"]`/`ck["meta"]` — `model/sample.py`'s
+own loader would `KeyError` on this file directly.
+
+**Sweep 1** (5 seeds x 5 prompts, `max_new_tokens=60`, each model at its
+own established sampling convention — C: temp=0.8/top_k=40;
+reference: temp=0.7/top_k=50): **C 6/25 flagged (24%), reference 7/25
+(28%)** — within noise of the original run's numbers, same conclusion.
+**Sweep 2** (3 seeds x 4 prompts, `max_new_tokens=250`): **C 12/12,
+reference 12/12** — both saturate the detector identically, again
+matching the original finding.
+
+Quantifying what the original investigation only described
+qualitatively: at the 250-token horizon, the reference stacks
+`"The end."` **4.4x more often** than C (0.75 vs 0.17 occurrences/
+sample) — a real, distinct repetition signature the reference model
+carries independent of anything this investigation controls — while C's
+own long-horizon failure mode is concatenating fresh, unrelated stories
+(`"once upon a time"` reappearing mid-continuation, 1.50 vs 0.25
+occurrences/sample) rather than looping a single one. Neither pattern
+is a clear quality win for either side; the objective detector scores
+both within a few points of each other at both horizons. **The "equal
+coherence" claim holds** on a fresh, independently-generated sample set.
+
+```bash
+python model/tinystories_hf_repro/quality_sweep_C_vs_reference.py
+python model/tinystories_hf_repro/build_repetition_audit_report.py
+```
+Adds (all committed, not scratch, at the user's request):
+`model/tinystories_hf_repro/quality_sweep_C_vs_reference.py` (the sweep,
+run under this repo's own `.venv` — it already carries `transformers`,
+so this one doesn't need the separate `~/tiny-stories-hf/venv` the
+earlier Phase 2 scripts required); `quality_sweep_results.json` (all 74
+generated samples + detector verdicts, the committed snapshot from
+today's run); `build_repetition_audit_report.py` (renders the JSON into
+an HTML report); `repetition_audit_report.html` (every sample from both
+sweeps, paired by matching seed/prompt-theme across the two models,
+flagged span highlighted inline in the story text — the full
+sample-by-sample evidence behind the two flagged/N numbers above).
