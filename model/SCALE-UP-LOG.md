@@ -3341,3 +3341,105 @@ an HTML report); `repetition_audit_report.html` (every sample from both
 sweeps, paired by matching seed/prompt-theme across the two models,
 flagged span highlighted inline in the story text — the full
 sample-by-sample evidence behind the two flagged/N numbers above).
+
+## Real Genesys2 board vs. software: a fixation-word pattern the detector can't see
+
+The checkpoint C comparison above used `data/ckpt_stepC_d384_v16384_fp.pt`
+— **D=384, never deployed** (hard BRAM overflow, Phase 3's own finding).
+The board runs a separately-trained D=128 retarget
+(`data/ckpt_stepC_d128_v16384.pt`/`.qat.pt`), so the "equal coherence"
+result above was never actually verified for the checkpoint that's
+really on real hardware. Two follow-ups closed that gap.
+
+**Real hardware vs. software, same weights.** Captured 25 real-board
+samples (5 draws × 5 prompts, `fabric.genesys2.chat_over_uart`, no
+controllable seed — on-chip free-running counter) against checkpoint
+C's actual deployed weights, and a matched-config software rerun
+(`data/ckpt_stepC_d128_v16384.pt`, the pre-QAT FP proxy — the plain
+`GPT` class can't load the QAT checkpoint's Brevitas `QuantLinear`
+state dict — at the board's calibrated `temp=0.45, top_k=None`).
+**Real board: 3/25 flagged. Software: 11/25 flagged** — the raw
+detector score makes hardware look *cleaner*. Reading the samples shows
+why that's backwards: the board substitutes non-sequitur words as story
+subjects — **"cardinal" (10×), "buster's"/"buster" (12×), "bustled"
+(3×), "cube" (4×), "contains" (3×), "spidey's" (1×)** — 33 occurrences
+across 25 hardware samples, **zero** across 25 software samples. Single-
+word insertions don't trip a bigram-recurrence detector, so the flagged-
+rate numbers alone tell a backwards story. This independently
+reproduces and sharpens Phase 3's own "buster's" fixation-token finding
+with five more specific terms. Full sample-by-sample evidence,
+including a fixation-term occurrence count per model, committed as
+`model/tinystories_hf_repro/hw_vs_sw_sweep_results.json` /
+`hw_vs_sw_report.html` (built by an inline, not-yet-modularized script;
+regenerate via the same `chat_over_uart`/`send_weights` real-hardware
+sequence documented in `fabric/genesys2/PORT-NOTES.md`'s runbook).
+
+**Root-cause investigation, in progress.** Looked up the fixation
+words' actual vocab IDs in `data/word_v16384/meta.json`: `buster`=2048,
+`buster's`=2049, `bustled`=2051 — tightly clustered right at 2048=2^11,
+an immediately suspicious power-of-two boundary matching this exact
+codebase's own repeated bug class (register widths silently floored at
+11 bits across several past VOCAB-scale-up fixes, e.g. `cb39b8a`'s "two
+more hardcoded 1024s", and the sibling `hf19m-genesys2` branch's
+`gv_rdaddr` `reg[10:0]` bug). Checked and **ruled out**, with evidence:
+- **The checkpoint/weights**: golden-reference `IntKVQSequencer` (same
+  INT4/INT8-quantized `fabric/export_stepC_d128_v16384/goformer.npz`
+  weights the board runs) ranks all 8 suspicious token IDs at
+  logit-rank ~3,000-16,000/16,384 across 5 test prompts — nowhere near
+  competitive. The trained weights are fine.
+- **The Gumbel-max argmax comparison tree** in `sequencer_vec.sv`
+  (`best_idx`/`wm_idx`/`pi0-3`, all `[VIDXW-1:0]` = 14 bits) — correctly
+  parameterized for VOCAB=16384, no truncation found on static read.
+- **The embedding-feedback addressing** (`tok_id` port, `EMBROWW`,
+  `emb_row_w`) — also correctly `$clog2(VOCAB)`-parameterized throughout.
+- **The argmax row-counter pipeline** (`ar`/`ard`/`amd`/`ad1`, all
+  `$clog2(ARROWS+1)` = 12 bits) — correctly sized for the ARROWS=2048
+  sentinel, doesn't wrap.
+
+**Strongest remaining lead — a real verification gap, not yet a
+confirmed bug.** Phase 3's "5/5 bit-exact" claim used
+`fabric.stage3.run_vec_kv`, which only ever exercises the
+**fully-resident** weight configuration (no `WEIGHT_STREAM_PER_LAYER`
+define anywhere in that script). The real board almost certainly runs
+**per-layer DDR3 streaming** (`WEIGHT_STREAM_PER_LAYER=1` — the whole
+reason that feature exists is that this model doesn't fit fully
+resident on-chip). A testbench for that exact path exists
+(`fabric/stage3/tb/tb_seq_vec_kv_stream.sv`), but its own header says
+outright: *"no run_*.py harness yet"* — it has never been wrapped into
+this project's reusable gate tooling, and there's no evidence it was
+ever run against the actual deployed checkpoint at VOCAB=16384. This is
+the same gap-shaped pattern behind the last two real-hardware-only bugs
+in this project's history (DDR3 address collision, Gumbel-precompute
+hang) — both invisible to the faster fully-resident gate.
+
+Tried and **abandoned as a dead end**: a wider fully-resident-mode seed
+sweep (8 fresh seeds, 40-token generation each, via `run_vec_kv.py`) to
+check whether the pattern reproduces without streaming at all. Every
+single seed hit a 200s per-seed timeout with zero completions —
+`iverilog`/`vvp` simulation at this VOCAB/NLAYER size is too slow for
+this approach to produce a signal in a reasonable window, independent
+of whether the underlying hypothesis is right or wrong.
+
+**Not yet done**: building `run_vec_kv_stream.py` (wrapping
+`tb_seq_vec_kv_stream.sv`, pulling in `weight_loader_ddr.sv`/
+`mig_behav_model.sv`/`mig_read_engine.sv`/`sync_fifo.sv`) and running it
+against the real deployed checkpoint across many seeds to hunt for a
+streaming-vs-fully-resident divergence. Next step.
+
+**Incidental finding along the way**: confirmed
+`data/ckpt_stepC_d128_v16384.pt` is a genuinely separate, fresh
+training run at D=128 (not D=384 weights misapplied) — its own saved
+`cfg` says `n_embd=128`, and `tok_emb.weight` is shaped `(16384, 128)`;
+a D=384 checkpoint loaded into a D=128-configured model would raise a
+hard shape-mismatch error in `load_state_dict`, not silently run. Also
+reran the "equal coherence" quality check specifically at D=128 (same
+methodology, same reference samples reused): **D=128 6/25 flagged (60
+tok) / 12/12 (250 tok) — statistically indistinguishable from D=384's
+own 6/25 / 12/12**, closing the gap noted above. Software-side samples
+of this exact checkpoint, across both quality sweeps (50 samples
+total), never produced any of the fixation words — reinforcing that the
+board-only pattern isn't inherited from a weaker checkpoint. Committed
+as `model/tinystories_hf_repro/quality_sweep_d128_results.json` +
+`build_retarget_audit_report.py` + `retarget_audit_report.html` (same
+paired story-by-story format as `repetition_audit_report.html`, D=128
+vs. reference this time).

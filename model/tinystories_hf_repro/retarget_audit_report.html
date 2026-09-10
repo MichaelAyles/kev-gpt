@@ -1,0 +1,409 @@
+<title>Retarget Audit</title>
+<style>
+:root{
+  --bg:#F5F6F8; --surface:#FFFFFF; --surface-2:#EEF0F3;
+  --ink:#1C2129; --ink-muted:#5B6472; --ink-faint:#88909B;
+  --border:#DDE1E7; --border-soft:#E8EAED;
+  --accent-c:#1E7F72; --accent-c-bg:rgba(30,127,114,0.10); --accent-c-bg-strong:rgba(30,127,114,0.16);
+  --accent-r:#5B4B8A; --accent-r-bg:rgba(91,75,138,0.09); --accent-r-bg-strong:rgba(91,75,138,0.15);
+  --flag:#9A6B0C; --flag-mark-bg:rgba(201,138,31,0.28); --flag-mark-fg:#5C3F06;
+  --clean:#2E7D4F;
+  --shadow: 0 1px 2px rgba(28,33,41,0.05), 0 4px 14px rgba(28,33,41,0.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#14171C; --surface:#1B1F26; --surface-2:#20252D;
+    --ink:#E7EAEF; --ink-muted:#9AA3B2; --ink-faint:#6C7684;
+    --border:#2A2F38; --border-soft:#242932;
+    --accent-c:#4FD1C0; --accent-c-bg:rgba(79,209,192,0.12); --accent-c-bg-strong:rgba(79,209,192,0.20);
+    --accent-r:#B7A3EC; --accent-r-bg:rgba(183,163,236,0.12); --accent-r-bg-strong:rgba(183,163,236,0.20);
+    --flag:#F0B429; --flag-mark-bg:rgba(240,180,41,0.30); --flag-mark-fg:#FCE3A6;
+    --clean:#5FBE86;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 20px rgba(0,0,0,0.35);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#14171C; --surface:#1B1F26; --surface-2:#20252D;
+  --ink:#E7EAEF; --ink-muted:#9AA3B2; --ink-faint:#6C7684;
+  --border:#2A2F38; --border-soft:#242932;
+  --accent-c:#4FD1C0; --accent-c-bg:rgba(79,209,192,0.12); --accent-c-bg-strong:rgba(79,209,192,0.20);
+  --accent-r:#B7A3EC; --accent-r-bg:rgba(183,163,236,0.12); --accent-r-bg-strong:rgba(183,163,236,0.20);
+  --flag:#F0B429; --flag-mark-bg:rgba(240,180,41,0.30); --flag-mark-fg:#FCE3A6;
+  --clean:#5FBE86;
+  --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 20px rgba(0,0,0,0.35);
+}
+
+*{box-sizing:border-box;}
+body{
+  background:var(--bg); color:var(--ink);
+  font-family:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  line-height:1.5;
+}
+::selection{ background:var(--flag-mark-bg); }
+
+.wrap{ max-width:1180px; margin:0 auto; padding:56px 28px 80px; }
+
+/* ---------- Header ---------- */
+header.top{ margin-bottom:40px; }
+.eyebrow{
+  font-family:'IBM Plex Mono',monospace; font-size:12px; letter-spacing:0.12em;
+  text-transform:uppercase; color:var(--ink-faint); margin:0 0 10px;
+}
+h1{
+  font-family:'Fraunces',Georgia,serif; font-weight:600; font-size:clamp(32px,4.2vw,46px);
+  margin:0 0 14px; letter-spacing:-0.01em; text-wrap:balance; color:var(--ink);
+}
+.dek{
+  font-size:16px; color:var(--ink-muted); max-width:66ch; margin:0 0 18px;
+}
+.provenance{
+  font-family:'IBM Plex Mono',monospace; font-size:12.5px; color:var(--ink-faint);
+  display:flex; flex-wrap:wrap; gap:6px 18px; border-top:1px solid var(--border-soft); padding-top:16px;
+}
+.provenance b{ color:var(--ink-muted); font-weight:500; }
+
+/* ---------- Legend chips (models) ---------- */
+.modeltag{
+  display:inline-flex; align-items:center; gap:6px;
+  font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:600;
+  padding:3px 9px; border-radius:5px; letter-spacing:0.01em;
+}
+.modeltag.c{ background:var(--accent-c-bg); color:var(--accent-c); }
+.modeltag.r{ background:var(--accent-r-bg); color:var(--accent-r); }
+.dot{ width:7px; height:7px; border-radius:50%; display:inline-block; }
+.dot.c{ background:var(--accent-c); }
+.dot.r{ background:var(--accent-r); }
+
+/* ---------- Stat dashboard ---------- */
+.stats-grid{
+  display:grid; grid-template-columns:repeat(4,1fr); gap:1px;
+  background:var(--border); border:1px solid var(--border); border-radius:12px;
+  overflow:hidden; margin-bottom:18px; box-shadow:var(--shadow);
+}
+.stat-tile{ background:var(--surface); padding:22px 20px; }
+.stat-tile .sweep-label{
+  font-family:'IBM Plex Mono',monospace; font-size:11px; text-transform:uppercase;
+  letter-spacing:0.1em; color:var(--ink-faint); margin-bottom:10px;
+}
+.stat-tile .num{
+  font-family:'Fraunces',serif; font-size:34px; font-weight:600; line-height:1;
+  font-variant-numeric:tabular-nums; margin-bottom:6px;
+}
+.stat-tile .num small{ font-size:16px; font-weight:500; color:var(--ink-faint); }
+.stat-tile.c .num{ color:var(--accent-c); }
+.stat-tile.r .num{ color:var(--accent-r); }
+.stat-tile .pct{ font-size:13px; color:var(--ink-muted); font-family:'IBM Plex Mono',monospace; }
+
+.metrics-row{
+  display:grid; grid-template-columns:repeat(3,1fr); gap:1px;
+  background:var(--border); border:1px solid var(--border); border-radius:12px;
+  overflow:hidden; margin-bottom:44px;
+}
+.metric-cell{ background:var(--surface-2); padding:16px 20px; }
+.metric-cell .mlabel{ font-size:12.5px; color:var(--ink-muted); margin-bottom:8px; }
+.metric-cell table{ width:100%; border-collapse:collapse; font-family:'IBM Plex Mono',monospace; font-size:12.5px; }
+.metric-cell td{ padding:2px 0; }
+.metric-cell td.k{ color:var(--ink-faint); }
+.metric-cell td.v{ text-align:right; font-variant-numeric:tabular-nums; color:var(--ink); }
+
+/* ---------- Controls ---------- */
+.controls{
+  display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:14px;
+  margin-bottom:22px; position:sticky; top:0; background:var(--bg); padding:14px 0;
+  border-bottom:1px solid var(--border-soft); z-index:5;
+}
+.seg{ display:inline-flex; border:1px solid var(--border); border-radius:8px; overflow:hidden; background:var(--surface); }
+.seg button{
+  font-family:'IBM Plex Sans',sans-serif; font-size:13.5px; font-weight:500; color:var(--ink-muted);
+  background:transparent; border:none; padding:8px 16px; cursor:pointer; border-right:1px solid var(--border);
+}
+.seg button:last-child{ border-right:none; }
+.seg button.active{ background:var(--surface-2); color:var(--ink); }
+.seg button:focus-visible{ outline:2px solid var(--accent-c); outline-offset:-2px; }
+
+.toggle{
+  display:inline-flex; align-items:center; gap:8px; font-size:13.5px; color:var(--ink-muted); cursor:pointer;
+  user-select:none;
+}
+.toggle input{ accent-color:var(--flag); width:15px; height:15px; }
+
+.legend-strip{
+  display:flex; gap:16px; align-items:center; font-size:12.5px; color:var(--ink-faint); flex-wrap:wrap;
+}
+.legend-strip mark{ background:var(--flag-mark-bg); color:var(--flag-mark-fg); padding:0 2px; border-radius:2px; }
+
+/* ---------- Rows / comparison grid ---------- */
+.rowgroup{ margin-bottom:14px; }
+.rowmeta{
+  font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--ink-faint);
+  margin:22px 0 8px; display:flex; gap:14px; align-items:baseline;
+}
+.rowmeta .seedno{ color:var(--ink-muted); font-weight:600; }
+
+.pair{
+  display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--border-soft);
+  border:1px solid var(--border-soft); border-radius:10px; overflow:hidden;
+}
+@media (max-width:760px){ .pair{ grid-template-columns:1fr; } }
+
+.panel{ background:var(--surface); padding:18px 20px 20px; display:flex; flex-direction:column; }
+.panel.hidden{ display:none; }
+.panel-head{
+  display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; gap:10px;
+}
+.flagpill{
+  font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:600; letter-spacing:0.02em;
+  padding:3px 8px; border-radius:20px; white-space:nowrap;
+}
+.flagpill.clean{ background:rgba(46,125,79,0.12); color:var(--clean); }
+.flagpill.flagged{ background:var(--flag-mark-bg); color:var(--flag-mark-fg); }
+.reason{
+  font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:var(--flag); margin-bottom:10px;
+  line-height:1.4;
+}
+.story{
+  font-family:'Literata',Georgia,serif; font-size:14.5px; line-height:1.68; color:var(--ink);
+  flex:1;
+}
+.story mark{
+  background:var(--flag-mark-bg); color:var(--flag-mark-fg); padding:0 1px; border-radius:2px;
+  box-shadow:0 0 0 1px rgba(0,0,0,0.02) inset;
+}
+.panel-foot{
+  margin-top:12px; padding-top:10px; border-top:1px solid var(--border-soft);
+  font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--ink-faint);
+  display:flex; justify-content:space-between;
+}
+
+footer.endnote{
+  margin-top:56px; padding-top:20px; border-top:1px solid var(--border-soft);
+  font-size:12.5px; color:var(--ink-faint); max-width:70ch;
+}
+
+#empty-state{ display:none; padding:60px 0; text-align:center; color:var(--ink-faint); font-size:14px; }
+</style>
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=Literata:opsz,wght@6..72,400;6..72,500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<div class="wrap">
+
+  <header class="top">
+    <p class="eyebrow">Repetition detector &middot; seeded sweep</p>
+    <h1>Retarget Audit</h1>
+    <p class="dek">Every generated story from a two-sweep, multi-seed comparison of
+      <span class="modeltag c"><span class="dot c"></span>checkpoint C, D=128</span> (kev-gpt,
+      the actual retrained-fresh-at-D=128 shape flashed on Genesys2 &mdash; NOT the D=384
+      checkpoint the ten-step ablation walk originally evaluated) against the published
+      <span class="modeltag r"><span class="dot r"></span>reference</span>
+      (SauravP97/tiny-stories-19M), run through the project's own bigram/doubling
+      detector. Flagged spans are marked inline in the text below &mdash; this is
+      every sample, not a curated subset.</p>
+    <div class="provenance">
+      <span><b>Detector</b> model.filter_synth_corpus.is_degenerate, min_bigram_recurrence=3</span>
+      <span><b>Sweep 1</b> 5 seeds &times; 5 prompts, 60 new tokens</span>
+      <span><b>Sweep 2</b> 3 seeds &times; 4 prompts, 250 new tokens</span>
+      <span><b>D=128 sampling</b> temp=0.8, top_k=40</span>
+      <span><b>Reference sampling</b> temp=0.7, top_k=50</span>
+    </div>
+  </header>
+
+  <div class="stats-grid" id="stats-grid"></div>
+  <div class="metrics-row" id="metrics-row"></div>
+
+  <div class="controls">
+    <div class="seg" id="sweep-seg">
+      <button data-sweep="sweep1" class="active">Sweep 1 &middot; 60 tok</button>
+      <button data-sweep="sweep2">Sweep 2 &middot; 250 tok</button>
+    </div>
+    <label class="toggle"><input type="checkbox" id="flagged-only"> flagged only</label>
+    <div class="legend-strip">
+      <span><mark>highlight</mark> = the exact span that tripped the detector</span>
+      <span><span class="flagpill clean" style="margin-right:4px">clean</span>no repeated bigram &ge;3&times;, no doubling</span>
+    </div>
+  </div>
+
+  <div id="rows"></div>
+  <div id="empty-state">No samples match this filter.</div>
+
+  <footer class="endnote">
+    Generated fresh via <code>data/ckpt_stepC_d128_v16384.pt</code> (iter 8000,
+    D=128/n_layer=12/n_head=2 &mdash; a separate, fresh training run at D=128 with Model C's
+    exact recipe; its weights share no relationship with the D=384 checkpoint, confirmed by
+    the saved checkpoint's own cfg and tensor shapes) vs <code>SauravP97/tiny-stories-19M</code>,
+    same objective detector, same sampling convention as the original D=384 comparison. Rows
+    pair identical (seed, prompt-theme) conditions across models for direct comparison.
+  </footer>
+
+</div>
+
+<script id="report-data" type="application/json">{"sweep1": {"D128": [{"seed": 1, "prompt": "once upon a time", "text": "once upon a time, there was a little bird named lucy. lucy was very restless and wanted to explore the world outside her own. one day, lucy wanted to take a walk in the park. she went to her friend, lucy, and said,\" lucy, it's time to go and find an even bigger thing", "reason": null}, {"seed": 1, "prompt": "the sun was", "text": "the sun was shining brightly in the bright blue sky. as they watched the birds fly together, lily noticed a purple star floating above her in a yellow field. she watched the star as she kept practicing and soon found the tiny star outside the field. lily was amazed by the beautiful colours and continued to pray.", "reason": null}, {"seed": 1, "prompt": "the dog ran", "text": "the dog ran away. lily and ben were sad. they cried. they wanted their ball back. they wished they had played with the ball. they wished they had not played with the ball. they wished they had not played with the ball. they wished they had played where they had played. lily and ben", "reason": "bigram recurred 5x: ('they', 'had')"}, {"seed": 1, "prompt": "a little girl", "text": "a little girl. she was only three years old, but she was already taking her time. one day, when she was playing in the park, she spotted something sparkly in the corner. it was big and shiny. she put it on her foot and tried to find out what it could be into. the little", "reason": "bigram recurred 3x: ('she', 'was')"}, {"seed": 1, "prompt": "she found a", "text": "she found a shiny rock that she didn't know and thought it was lost forever. lily was so sad and missed again. she knew she had to help and find a way to find her way back to the park. she found a big tree and told many more things to find. lily realized her promise was not easy", "reason": null}, {"seed": 2, "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play with her dolls and teddy bears. one day, lily's mom asked her to help with the laundry. but lily didn't want to help, so her mom said they were going to the store to buy a new, red store has a red", "reason": null}, {"seed": 2, "prompt": "the sun was", "text": "the sun was shining brightly and the air was the air. suddenly, he felt a fire suddenly disappeared! timmy was so surprised he was so relieved. he waved goodbye to the big sun and then ran back home. once there was a little girl. she had a red coat in her room. it was her", "reason": null}, {"seed": 2, "prompt": "the dog ran", "text": "the dog ran away with the truck. tim and sue were sad, but they learned that they should always be careful and help their friends when they are angry. once upon a time, there was a little girl named sue. sue had a toy box full of toys, a box, a box of toys,", "reason": null}, {"seed": 2, "prompt": "a little girl", "text": "a little girl named lily. she loved to play outside and explore, but today was different. one day, lily and tom went to the park. they saw a big slide and a slide and a slide. lily wanted to go down the slide, but tom said no. lily was sad and cried. tom didn't", "reason": null}, {"seed": 2, "prompt": "she found a", "text": "she found a key on the shelf. she picked it up and looked at it. she heard a crying voice outside the door.\" why are you crying?\" she asked. the lady smiled and hugged her eyes.\" i made you a special necklace with a penny,\" she said.\" it was the", "reason": null}, {"seed": 3, "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play outside and run around in the grass. one day, she found a big, colorful ball on the ground. she picked it up and started to bounce it up and down. suddenly, her little brother came into the park. he showed", "reason": null}, {"seed": 3, "prompt": "the sun was", "text": "the sun was shining brightly. he was so happy to be outside with his new friends.\" let's go outside and make a new day!\" the two friends agreed. they were so excited to find the perfect place to play. so, they went home and had a great time playing together. once upon a", "reason": null}, {"seed": 3, "prompt": "the dog ran", "text": "the dog ran away with the ball. anna and ben were sad. they cried and cried. they lost their ball and their ball. they wished they had not gone. they hoped they could not find their ball. they wished they could play with the ball again. lily and tom were playing in the park.", "reason": "bigram recurred 3x: ('their', 'ball')"}, {"seed": 3, "prompt": "a little girl", "text": "a little girl named lily. lily loved to play outside and swing on the swings and slides. one day, lily's friend came over to play. they played on the swings and the slide all day. they were having so much fun watching a big and pretty tree. when it was time to go home, lily's friend", "reason": null}, {"seed": 3, "prompt": "she found a", "text": "she found a shiny rock. it was so pretty and pretty. she picked it up and showed it to her friends. they were all very impressed with their special penny. the little girl was so proud of her penny and they all laughed and played together. they promised to take care of their toys and play together.", "reason": null}, {"seed": 4, "prompt": "once upon a time", "text": "once upon a time, there was a dog, who lived in a small house. the dog loved to play with his friends in the park. one day, the dog saw a little girl looking for food. she said,\" hi, dog! can you please eat my food?\" the dog replied,\" sure", "reason": "bigram recurred 3x: ('the', 'dog')"}, {"seed": 4, "prompt": "the sun was", "text": "the sun was shining brightly and the birds were smiling. it was the perfect spot for being in the summer day. once upon a time there was a little girl who wanted to do something special to do. she saw a big tree and decided to climb it. she reached up high and she began climbing. she", "reason": null}, {"seed": 4, "prompt": "the dog ran", "text": "the dog ran to the fence and grabbed the stick. it reached the monkey and chased it. it ran fast and chased ben and caught it. it was not a giraffe. it was a lion. it was a baby. ben had an idea. he ran to the zoo and grabbed the stick. he grabbed the", "reason": "bigram recurred 3x: ('grabbed', 'the')"}, {"seed": 4, "prompt": "a little girl", "text": "a little girl and a bird who walked by. lily was excited to meet the bird and said,\" hello, bird! can i come with you?\" the bird nodded and said,\" yes, i would love to have a great time at the forest.\" lily was so happy she and her mom said", "reason": null}, {"seed": 4, "prompt": "she found a", "text": "she found a coin on it. it was very cheap. lily couldn't believe her about the coin. she asked her mother,\" what is this coin?\" her mother smiled and said,\" it is called a coin. when it is found, you can tell me you a secret.\" lily was so happy", "reason": null}, {"seed": 5, "prompt": "once upon a time", "text": "once upon a time, there was a little boy who lived in a small house. the old man lived near a big house near a big house. the little boy had a ball and he loved it very much. one day, the old man went to the old man. the little boy said,\" hi, i", "reason": "bigram recurred 3x: ('little', 'boy')"}, {"seed": 5, "prompt": "the sun was", "text": "the sun was shining and it was time to go home. one day, a little boy named tom found a big, tough ball. he had no ball, no ball to play with. tom said,\" i want to play with this ball, i don't want to share.\" tom thought not fair thing", "reason": null}, {"seed": 5, "prompt": "the dog ran", "text": "the dog ran away and never came to the yard. the moral of the story is to be careful and to listen to your friends. once upon a time, there was a little girl named lily. she loved to play in the park with her friends. one day, they decided to go on an adventure together", "reason": null}, {"seed": 5, "prompt": "a little girl", "text": "a little girl named lucy. she was a very good girl. one day, lucy found a red apple on the ground. she picked it up and started to enjoy it. as she watched the apple, the grape started to laugh. lucy saw something shiny on the ground. she knew it was wrong to be bad", "reason": null}, {"seed": 5, "prompt": "she found a", "text": "she found a big stick and decided to use it to attach it to the tree. the little girl was so happy with the knot. she put the stick back on the tree and went to show her friends. they all played together for a while, and the little birds sang a happy song for her. it was", "reason": null}], "reference": [{"seed": 1, "prompt": "Once upon a time", "text": "Once upon a time, there was a little girl named Lily who loved her grandma. She loved her very much and always talked to her. One day, Lily's grandma took her to a big building called a hospital. It was a big building with lots of people inside.\n\nLily's grandma told her to", "reason": null}, {"seed": 1, "prompt": "The sun was", "text": "The sun was shining and the birds were singing. It was a beautiful day. Mommy and Daddy were in the house and they were in the kitchen.\n\nMommy was doing something very special. She was making a cake! It was so delicious.\n\nMommy and Daddy came to the kitchen.", "reason": null}, {"seed": 1, "prompt": "The dog ran", "text": "The dog ran into the yard, looking around. He saw a big, round thing and wanted to explore it. He ran after it, but it was too fast for him. He ran and ran until he got home.\n\nThe dog was so excited that he started to run around the yard. He ran", "reason": "bigram recurred 3x: ('e', 'ran')"}, {"seed": 1, "prompt": "A little girl", "text": "A little girl was playing in her room. She felt very special. Suddenly, she heard a noise. She looked around and saw a giant. He was standing on the wall, looking very serious. The little girl said, \"Hi giant!\" But the giant did not say anything.\n\nThe little girl said", "reason": "bigram recurred 3x: ('little', 'girl')"}, {"seed": 1, "prompt": "She found a", "text": "She found a big and ugly puddle near the garden. She had never seen it before, but she was excited. She wanted to see what would happen if she put it in her bucket.\n\nShe started to pull the bucket and started to walk. She was so excited.\n\nSuddenly, the bucket", "reason": null}, {"seed": 2, "prompt": "Once upon a time", "text": "Once upon a time, there was a little boy named Timmy. Timmy loved to play with his toys and eat ice cream. One day, Timmy's mom made him a big ice cream cone. Timmy was so happy and he said, \"Thank you, Mommy! This ice cream is delicious!\"", "reason": "bigram recurred 3x: ('ice', 'cream')"}, {"seed": 2, "prompt": "The sun was", "text": "The sun was shining and the birds were singing. It was a beautiful day, and the sun was shining.\n\nTom and his mom went for a walk. They came to a lake and saw a lot of ducks swimming in the lake. Tom's mom said, \"Let's take a look!\"\n\n", "reason": null}, {"seed": 2, "prompt": "The dog ran", "text": "The dog ran through the woods. The dog was so excited to explore. She had heard about a fox who was trying to steal something. The dog knew she had to be careful, so she quickly ran back to him.\n\nThe fox had a big, furry tail and it was very friendly. He sniff", "reason": "bigram recurred 3x: ('he', 'dog')"}, {"seed": 2, "prompt": "A little girl", "text": "A little girl named Lucy was walking through the woods. She saw a mushroom and she thought it was so pretty. She wanted to pick it and take it home.\n\nJust then, she heard a voice. It was coming from a bush. Lucy looked up and saw a rabbit.\n\n\"Hello,", "reason": null}, {"seed": 2, "prompt": "She found a", "text": "She found a white bag in her house. She was so excited because she had never seen a bag before. She held it up to her chest and opened it. Inside was a shiny golden coin. She was so happy that she couldn't contain herself.\n\nShe took out the coin and held it tight.", "reason": null}, {"seed": 3, "prompt": "Once upon a time", "text": "Once upon a time, there was a little girl. She was three years old. She loved to play in the park.\n\nOne day, she saw something shiny in the grass. She walked closer and saw it was a coin. She was so happy and excited.\n\nShe picked up the coin and began", "reason": null}, {"seed": 3, "prompt": "The sun was", "text": "The sun was shining brightly as Tommy the little girl went outside to play. She loved to run and laugh in the sunshine. But today, she was feeling frustrated. She was about to take a nap when she heard a noise. She saw a strange noise coming from the grass. It was a bird! Tommy was", "reason": null}, {"seed": 3, "prompt": "The dog ran", "text": "The dog ran along the street, looking for something to do when it saw a shop down the street. It was so excited and ran straight to it. It had never seen a shop before, and it ran up to the door. The shopkeeper saw the dog, and he knew that the dog was going to", "reason": null}, {"seed": 3, "prompt": "A little girl", "text": "A little girl named Jane went to the park. She saw the big swing and wanted to try it. She went up to it and pushed herself as hard as she could. She felt like she was floating in the air. She was so excited that she started to swing back and forth, higher and higher. Every", "reason": null}, {"seed": 3, "prompt": "She found a", "text": "She found a big, shiny thing. It was a trophy. She wanted to show her mom. She put it on her foot and ran to find her mom.\n\nWhen she got home, she showed her mom the trophy. Her mom was very happy and said, \"This is a very special trophy.", "reason": "bigram recurred 3x: ('her', 'mom')"}, {"seed": 4, "prompt": "Once upon a time", "text": "Once upon a time, there was a little boy named Timmy. Timmy loved to play with his toys all day long. One day, Timmy's mom took him to the store to buy a new toy. Timmy was so happy and couldn't wait to get home and play with his new toy.\n", "reason": null}, {"seed": 4, "prompt": "The sun was", "text": "The sun was shining and it was a beautiful day. The little girl was very happy. She ran around and saw a big tree. She hugged it and smiled.\n\nSuddenly, the little girl heard a loud noise. She looked up and saw a big bird. It was carrying a big stick. The bird", "reason": "bigram recurred 3x: ('a', 'big')"}, {"seed": 4, "prompt": "The dog ran", "text": "The dog ran through the forest. He saw a bright light. He wanted to get closer but he was scared. He started to run faster. He ran and ran until he reached the light. He was so happy! He quickly ran towards it and saw that it was a firefly. He was so excited!", "reason": null}, {"seed": 4, "prompt": "A little girl", "text": "A little girl named Lucy was playing in the garden with her doll. She was having such a lot of fun. Suddenly, her doll started shaking!\n\n\"Oh no!\" cried Lucy.\n\n\"What happened?\" asked her mom.\n\n\"A baby,\" said her mom, \"We need to", "reason": null}, {"seed": 4, "prompt": "She found a", "text": "She found a package in the garden. It was bright and colourful. She opened it and saw some yummy treats inside. She was so excited, she couldn't wait to try them.\n\nShe opened the package and quickly started to eat the delicious treats. But then she forgot to close the package. The", "reason": null}, {"seed": 5, "prompt": "Once upon a time", "text": "Once upon a time, there was a boy named Bob. Bob was three years old and he loved to play. One day, Bob was playing in his backyard when he saw something strange. It was a big blackboard! He wondered what it was. \n\nBob ran over to the blackboard and touched it", "reason": null}, {"seed": 5, "prompt": "The sun was", "text": "The sun was shining, and the sky was blue. It was a perfect day for the day.\n\nBut then something strange happened. A man came and he was being very selfish. He didn't share his things.\n\nThe man started to complain. He didn't want to share his things. He", "reason": null}, {"seed": 5, "prompt": "The dog ran", "text": "The dog ran through the park, barking happily. He was excited and ready to explore the world. Suddenly, a big dog came running up and stopped. The dog was scared and started to bark loudly. He wanted to run away, but the big dog started to bark even louder.\n\nThe dog was feeling", "reason": "bigram recurred 3x: ('he', 'dog')"}, {"seed": 5, "prompt": "A little girl", "text": "A little girl named Sarah was very excited to go to the park. She put on her shoes and grabbed her bag. When she arrived, she ran outside and explored all the different things she could find.\n\nSarah saw a big tree and ran to it. She sat down under the tree and looked around.", "reason": null}, {"seed": 5, "prompt": "She found a", "text": "She found a small, white sheet in the garden. She decided she would give it a try. She put a blanket on it and put it over her head. Then she started to fold it up.\n\nJust then, her friend Tom came over. He saw the sheet and smiled. \"What are you", "reason": null}]}, "sweep2": {"D128": [{"seed": 1, "prompt": "once upon a time", "text": "once upon a time, there was a little bird named lucy. lucy was very restless and wanted to explore the world outside her own. one day, lucy wanted to take a walk in the park. she went to her friend, lucy, and said,\" lucy, it's time to go and find an even bigger thing to take.\" lucy was curious and asked,\" what's a minute?\" lucy replied,\" my name is lucy.\" lucy smiled and said,\" it sure you can get one.\" lucy was so glad. she said,\" i want to go back to the park every week!\" lucy was so happy and thanked lucy for helping her. the moral of the story is that if you are kind, you can always be nice to all the wonderful things. once upon a time, there was a little girl named sue. sue was always in a long, sunny park near her house. one day, sue went to the park to play. she saw a big, empty hill in the park. sue went down the hill and saw that the hill was full of many things. she saw animals, cars, dogs, and flowers. sue was very happy to explore. sue went down the hill as fast as she could. as", "reason": "bigram recurred 4x: ('lucy', 'was')"}, {"seed": 1, "prompt": "the sun was", "text": "the sun was shining brightly in the bright blue sky. as they watched the birds fly together, lily noticed a purple star floating above her in a yellow field. she watched the star as she kept practicing and soon found the tiny star outside the field. lily was amazed by the beautiful colours and continued to pray. jane was feeling very sad. every day, she did something very wrong. she was so sad. but today, she was very tired. she didn't know why it was important to do it. jane's mom saw her crying. she said:\" don't worry, sweetheart. i'll help you find it.\" jane told her mom about her idea. mum and jane looked for the big box to search and found it was very useful. jane was very happy, and quickly found the big box in the corner. jane was excited and thanked her mom for the chance. every day she knew exactly how to give out her lesson and now she could find special things to play with. once upon a time, there was a little boy. he was very bored and wanted to do something fun. one day, he saw a big, big, scary, scary bear. the bear knew he had to be very angry. he knew he had to come to an", "reason": "bigram recurred 4x: ('was', 'very')"}, {"seed": 1, "prompt": "the dog ran", "text": "the dog ran away. lily and ben were sad. they cried. they wanted their ball back. they wished they had played with the ball. they wished they had not played with the ball. they wished they had not played with the ball. they wished they had played where they had played. lily and ben are friends. they like to play with blocks and books. one day, they find a big red block in the attic. it is red and red and has a hole in it. they are very happy.\" wow, look at this tower!\" lily says.\" it is so pretty!\"\" can i touch it?\"\" no, lily!\" ben says.\" you are too small. i can't touch it.\" lily has an idea. she thinks the red block is a big color. she goes to the garden and opens the door. she sees a small thing. it is a yellow and shiny head. she wonders what it is for. she points it again.\" anna, i don't know. maybe there are more things to see. maybe there is a number or something you can see. maybe there is something in the garden,\" anna says.\" maybe, honey. maybe. let's find some leaves,", "reason": "exact doubling: '\"' '\"'"}, {"seed": 1, "prompt": "a little girl", "text": "a little girl. she was only three years old, but she was already taking her time. one day, when she was playing in the park, she spotted something sparkly in the corner. it was big and shiny. she put it on her foot and tried to find out what it could be into. the little girl was so frightened that she started to cry. she thought of a way to get the sparkly light but she still couldn't find it. suddenly, she heard a voice behind her. the little girl went over to her. she was surprised by the dark noise. she saw a big, green light! there was a big yellow light. she was so surprised. the little girl thanked her, and went back to her house, ready to be seen. once upon a time there was a little girl called jane. she was three years old and very curious. every day she would go to the park and see all the different places she could do. one day, jane and her mom went to the park. jane saw a big, dark, dark and knew that the dark was outside. she thought,\" i want to go inside and get an idea.\" she asked her mom,\" can i find some light in the dark street?\"", "reason": "bigram recurred 6x: ('she', 'was')"}, {"seed": 2, "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play with her dolls and teddy bears. one day, lily's mom asked her to help with the laundry. but lily didn't want to help, so her mom said they were going to the store to buy a new, red store has a red car that was important to her about. lily was excited to help, and the store was available to get the blue car. when they got home, lily and her mom went to the store. lily saw a blue car that she really wanted. she asked her mom if she could play with it, but her mom said no. lily was sad and started to cry. later that day, lily's mom came home and saw the blue car. she said that lily would be sorry and that she wouldn't be angry. she said that lily's hair was her favorite toy. lily was happy and hugged her mom. they went home together to have a picnic with her dad. from that day on, lily made sure to always be careful with her toys. once upon a time, there was a little girl named lily. she loved to play outside with her friends. one day, they went for a walk to the park to play. lily saw a big slide", "reason": "bigram recurred 5x: ('her', 'mom')"}, {"seed": 2, "prompt": "the sun was", "text": "the sun was shining brightly and the air was the air. suddenly, he felt a fire suddenly disappeared! timmy was so surprised he was so relieved. he waved goodbye to the big sun and then ran back home. once there was a little girl. she had a red coat in her room. it was her favorite luggage. one day, the little girl wanted to show her friend, the little one,. she asked the mum to get something in the coat, but she said they didn't have long necks. the little girl was sad. she felt sad and quickly ran outside. but she kept her worry. suddenly, she heard a noise and saw a big, bright, furry kitten. she ran over to it and said,\" hello! what are you doing?\" the kitten said,\" i'm looking for a lost puppy from the store. would you like to help me find it?\" the little girl was so happy to have a puppy with her. they became best friends and had lots of fun together. once upon a time, there was a little girl named lily. she loved to play outside with her friends. one day, they saw a big, scary monster. it was very scary and lily was scared. her friends didn't want to", "reason": "bigram recurred 5x: ('little', 'girl')"}, {"seed": 2, "prompt": "the dog ran", "text": "the dog ran away with the truck. tim and sue were sad, but they learned that they should always be careful and help their friends when they are angry. once upon a time, there was a little girl named sue. sue had a toy box full of toys, a box, a box of toys, and a toy. sue was very happy and played with the toy all day. the time, the box was broken. sue saw that the box had a picture of a flower, a picture of a flower, and a toy. sue wanted to play with the toys, but she didn't want to. sue said,\" no, i want to play with the toys first.\" sue was sad and started to cry. she wanted her to be nice and give the toys at home. sue went home and told all about the fun they wanted to play with. sue was happy and played with the toys all day. they had fun and laughed with joy. sue learned that it's good to be kind to others, even if they are not mean to break things that are not for you. one day, a little dog named max went to the park to play. max saw a big tree and wanted to play on it. max wanted to play with", "reason": "bigram recurred 6x: ('to', 'play')"}, {"seed": 2, "prompt": "a little girl", "text": "a little girl named lily. she loved to play outside and explore, but today was different. one day, lily and tom went to the park. they saw a big slide and a slide and a slide. lily wanted to go down the slide, but tom said no. lily was sad and cried. tom didn't mean to be sad because he did not want to be scared of the slide. lily's mom said,\" don't worry, we'll get you a new slide.\" so, they went to the slide and sat on it to slide. lily felt sad and quickly climbed the steps down the slide. tom was sad to see the slide, but lily said,\" don't worry, we'll go get some ice cream for our ride.\" tom and lily went to the park bench, but when they got there, they saw lost. the slide was wet and lily was sad. they had to go to the hospital, because her mom told her that they would get back. from that day on, lily made sure to always be careful with her things she don't know. once upon a time, there was an elderly woman who lived in a big house. one day, the woman had an ancient journey to go for a walk on her home. it was all", "reason": "bigram recurred 6x: ('the', 'slide')"}, {"seed": 3, "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play outside and run around in the grass. one day, she found a big, colorful ball on the ground. she picked it up and started to bounce it up and down. suddenly, her little brother came into the park. he showed his toys and told lily that he had a toy gun to play with. lily was very happy and they played together all day. lily's mommy started to feel happy and proud of her clever idea. they played together happily and had lots of fun. once upon a time, there was a little girl named lily. she loved to play outside, but today it was raining outside and she was very sad. her mommy saw her crying and said,\" what's wrong, sweetie?\" lily replied,\" i lost her favorite toy, so i can't find it.\" her mommy and daddy searched all over the backyard. finally, they went to the park to look for the toy to find. lily was happy to find the toy and said,\" thank you, mommy! we did the right thing wrong to do.\" they looked around and finally saw the toy car under a bush. they searched and searched and searched, but they couldn't find it.", "reason": "bigram recurred 3x: ('to', 'play')"}, {"seed": 3, "prompt": "the sun was", "text": "the sun was shining brightly. he was so happy to be outside with his new friends.\" let's go outside and make a new day!\" the two friends agreed. they were so excited to find the perfect place to play. so, they went home and had a great time playing together. once upon a time, there was a little boy who was very curious. he liked to explore and find new things to do. one day, he found a big sign that said\" do not know what\" meant. he tried it out and it got stuck in the trap. this made him scared and he started to cry. his eyes got very upset, but he listened. he waited and waited but something happened. he thought,\" i don't like to do this,\" suddenly he heard a voice from behind it. it was an old man. he was angry at the poor man's house and said,\" don't worry about anyone who can help you.\" the old man was pleased to see the old man. the old man was happy too. he thanked the old man and continued to look, feeling happy and safe and sound. once upon a time, there was a little girl named lucy. she had a present that she loved very much. it", "reason": "bigram recurred 5x: ('old', 'man')"}, {"seed": 3, "prompt": "the dog ran", "text": "the dog ran away with the ball. anna and ben were sad. they cried and cried. they lost their ball and their ball. they wished they had not gone. they hoped they could not find their ball. they wished they could play with the ball again. lily and tom were playing in the park. they liked to slide, swing and run. but they did not like the big dog. the big dog saw the big dog and wanted to play with the dog.\" come on, tom!\" lily said.\" it is his owner.\" tom did not listen. he followed tom and reached the big dog to the big dog. it was a dog. the dog sniffed max and licked their faces. it licked their faces and made their faces. the big dog barked and barked. it wagged its tail and licked their faces. they decided to play at the park instead of the big dog. tom and sam are friends. they like to play in the park. one day, they see a big slide. the slide is green and the wind is on the slide.\" let's go, tom!\" tom says.\" let's go!\" sam says. they run to the slide and look up. they hold hands and start to climb", "reason": "bigram recurred 7x: ('the', 'big')"}, {"seed": 3, "prompt": "a little girl", "text": "a little girl named lily. lily loved to play outside and swing on the swings and slides. one day, lily's friend came over to play. they played on the swings and the slide all day. they were having so much fun watching a big and pretty tree. when it was time to go home, lily's friend showed her how to swing another. they had so much fun together that they forgot all about pushing each other while the big tree fell in time. they learned that sometimes you can be very good at it when you work out. once upon a time, there was a little girl named lily. she loved to climb up a big tree in the woods. one day, her mom told her it was too high for her to reach the top. lily asked her mom,\" can we go up the difficult hill, please?\" her mom said,\" no, we don't want to climb the big hill.\" lily started to weep. she couldn't reach the top of the land. her mom told her,\" lily, you must be careful with things that are not for you.\" lily nodded and walked up to the big boy. that way, she found a big hole near the top. she climbed up the hole and turned down. the", "reason": "bigram recurred 4x: ('her', 'mom')"}], "reference": [{"seed": 1, "prompt": "Once upon a time", "text": "Once upon a time, there was a little girl named Lily who loved her grandma. She loved her very much and always talked to her. One day, Lily's grandma took her to a big building called a hospital. It was a big building with lots of people inside.\n\nLily's grandma told her to hold her hand and walk in the stroller. \"Are you ready to go?\" she asked. Lily nodded her head.\n\nAs they walked, Lily saw a man who looked sad. \"What's wrong?\" she asked the man. \"I lost my job,\" he said. Lily's grandma gave her a little hug and said, \"Don't worry, we'll go and find your job.\"\n\nAs they walked, they saw a man who looked very sad. \"Excuse me, sir. My job is broken,\" he said. \"Don't worry, I'll help you find your job.\"\n\nLily and her grandma helped the man find his job. When they returned it to him, the man thanked them and said, \"You are very kind. I'm happy to have a good husband who helps people.\" Lily smiled and felt happy that she could help someone in need. From that day on, Lily", "reason": "bigram recurred 3x: (\"ily's\", 'grandma')"}, {"seed": 1, "prompt": "The sun was", "text": "The sun was shining and the birds were singing. It was a beautiful day. Mommy and Daddy were in the house and they were in the kitchen.\n\nMommy was doing something very special. She was making a cake! It was so delicious.\n\nMommy and Daddy came to the kitchen. They were preparing for the surprise.\n\nMommy and Daddy started to put up the cake batter. It was a great idea!\n\nThey cut the cake into small pieces and put it in the oven. When it was done, Mommy and Daddy took it out of the oven.\n\nIt was a little bit smelly.\n\nMommy laughed and said, \"Maybe we can make another one!\"\n\nMommy and Daddy smiled. They all enjoyed the cake together. It was a great day! \n\nThe end. The cake was a perfect match! Mommy and Daddy were happy. \n\nThe end. Mommy and Daddy were so proud of their delicious cake. They all enjoyed it together. \n\nThe end. \n\nThe end. Mommy and Daddy were happy. They had a wonderful day! But they still remembered the smelly cake. It had made their very special", "reason": "bigram recurred 8x: ('ommy', 'and')"}, {"seed": 1, "prompt": "The dog ran", "text": "The dog ran into the yard, looking around. He saw a big, round thing and wanted to explore it. He ran after it, but it was too fast for him. He ran and ran until he got home.\n\nThe dog was so excited that he started to run around the yard. He ran and ran, until he got home. When he got there, he saw a big, round thing. It was a red ball! He grabbed it and started to play with it.\n\nHe ran around the yard with the ball, and it was so much fun! He chased the ball for a long time and it was the best day ever.\n\nThe dog never forgot the fun he had when he played with the ball. He had found such a wonderful thing and he was very proud of himself for keeping it close. He would never forget how much fun he had with his red ball.\n\nThe end. The dog was so happy that he had found such a fun ball. He had seen how many times it had come from the yard, and he was glad that he had been so clever. He was sure that this was the best day ever! \n\nThe dog was very happy that he had a good day and", "reason": "bigram recurred 5x: ('he', 'dog')"}, {"seed": 1, "prompt": "A little girl", "text": "A little girl was playing in her room. She felt very special. Suddenly, she heard a noise. She looked around and saw a giant. He was standing on the wall, looking very serious. The little girl said, \"Hi giant!\" But the giant did not say anything.\n\nThe little girl said, \"Please don't be mad. I just wanted a little toy.\" The giant was still standing on the wall, so the little girl said, \"Okay, okay.\"\n\nThe giant smiled and said, \"I'm sorry. I don't want you to bother me.\" The little girl smiled too. She said, \"It's okay. I like playing in my room.\"\n\nThe giant smiled back and said, \"Thank you. I'm happy now.\" The little girl said goodbye and went to play with her toys. The giant was so happy. He knew he had made a serious mistake. The little girl was happy too, because she had made a new friend. She knew she would never forget the kind giant. The end! \n\nThe little girl was happy. She had made a new friend and made a new friend. She was so glad she had made a new friend. From that day on, she", "reason": "bigram recurred 8x: ('little', 'girl')"}, {"seed": 2, "prompt": "Once upon a time", "text": "Once upon a time, there was a little boy named Timmy. Timmy loved to play with his toys and eat ice cream. One day, Timmy's mom made him a big ice cream cone. Timmy was so happy and he said, \"Thank you, Mommy! This ice cream is delicious!\"\n\nTimmy's mom smiled and said, \"You're welcome, Timmy. But don't forget to close the lid when you're done playing.\"\n\nTimmy nodded and said, \"Okay, Mommy. I will close the lid when I'm done.\"\n\nLater that day, Timmy's mom noticed he looked guilty. \"Timmy, did you do that?\" she asked.\n\n\"Yes, Mommy. I did,\" Timmy replied.\n\nHis mom hugged him and said, \"Timmy, we need to be more careful next time. You always want to be safe and have fun.\"\n\nTimmy nodded and said, \"I'm sorry, Mommy. I'll be more careful next time.\"\n\nThe moral of the story is that it's important to be safe and to always close the lid when playing with things. And it's important to be grateful for the time", "reason": "bigram recurred 4x: ('and', 'said')"}, {"seed": 2, "prompt": "The sun was", "text": "The sun was shining and the birds were singing. It was a beautiful day, and the sun was shining.\n\nTom and his mom went for a walk. They came to a lake and saw a lot of ducks swimming in the lake. Tom's mom said, \"Let's take a look!\"\n\nTom and his mom walked closer. They stopped and looked around. They saw a little duck swimming around in the water. Tom said, \"Can I pet the duck?\"\n\nHis mom said, \"Of course!\" Tom reached out and touched the duck's soft fur. It felt nice and soft.\n\nTom's mom said, \"Let's go and take a few more ducks for a little while.\"\n\nTom was so excited. He said, \"Yes!\" and they both started running home.\n\nWhen they got home, Tom was so happy and he said, \"That was the most beautiful lake I've ever seen!\"\n\nHis mom smiled and said, \"That was a great idea!\"\n\nTom and his mom went outside to look at the ducks and he was so excited. They had a wonderful day and couldn't wait to go back and see them again! \n\nThe End. It was a", "reason": "bigram recurred 3x: ('was', 'a')"}, {"seed": 2, "prompt": "The dog ran", "text": "The dog ran through the woods. The dog was so excited to explore. She had heard about a fox who was trying to steal something. The dog knew she had to be careful, so she quickly ran back to him.\n\nThe fox had a big, furry tail and it was very friendly. He sniffed the fox's tail and barked at it. The dog was so happy to have a friend! She started to run around the woods, chasing after the fox.\n\nBut then the fox ran too quickly and the dog stopped. She looked sad. She tried to forget about the fox.\n\nThe dog saw the fox trying to steal the fox. She was so upset. She ran away and never got to see the fox again.\n\nThe dog was disappointed. She had scared away the fox and now she never saw the fox again. She had learned a lesson that day. She knew she should never follow the fox, even if it was fun. But she was also sad that she had been too competitive. The dog knew she had to obey the fox's rules. She vowed to always be careful in the woods and never to forget the fox. The end.\n\nThe dog was happy that she had remembered the fox", "reason": "bigram recurred 11x: ('the', 'fox')"}, {"seed": 2, "prompt": "A little girl", "text": "A little girl named Lucy was walking through the woods. She saw a mushroom and she thought it was so pretty. She wanted to pick it and take it home.\n\nJust then, she heard a voice. It was coming from a bush. Lucy looked up and saw a rabbit.\n\n\"Hello, little girl,\" said the rabbit. \"What are you doing here?\"\n\n\"I'm picking the mushroom,\" said Lucy.\n\n\"That's so nice,\" said the rabbit. \"Can you come and see what I can find in the woods?\"\n\nLucy was so excited. She wanted to see what the rabbit was up to. \"Can you help me?\" she asked.\n\nThe rabbit smiled and said, \"Sure, I can help you.\"\n\nSo Lucy and the rabbit went on an adventure together. They found a big tree and a little pond. The rabbit showed Lucy many things in the forest, like flowers, birds, and animals.\n\nWhen they were done, the rabbit said, \"Let's go home.\"\n\nLucy said goodbye and waved goodbye. She was so happy and couldn't wait to come back to the woods. She was so glad she had made a new friend.", "reason": "exact doubling: '\"' '\"'"}, {"seed": 3, "prompt": "Once upon a time", "text": "Once upon a time, there was a little girl. She was three years old. She loved to play in the park.\n\nOne day, she saw something shiny in the grass. She walked closer and saw it was a coin. She was so happy and excited.\n\nShe picked up the coin and began to run home. When she got home, she showed her mom the coin. Her mom said it was very valuable.\n\nThe little girl was so happy. She put the coin in a safe place so she could always remember it. She loved to look at it and remember all the things she saw. She knew she was lucky to have found such a valuable thing. \n\nThe little girl took the coin home and kept it safe with her. She was so proud of her special coin. It made her day even more special and she always remembered her special coin. \n\nThe little girl and her coin were very happy together. They had many more things to share with each other. They were best friends. \n\nThe End. The little girl was so lucky to have such a special coin. She would remember that special day in the park and the coin was always there. She was so lucky to have such a special", "reason": "bigram recurred 5x: ('little', 'girl')"}, {"seed": 3, "prompt": "The sun was", "text": "The sun was shining brightly as Tommy the little girl went outside to play. She loved to run and laugh in the sunshine. But today, she was feeling frustrated. She was about to take a nap when she heard a noise. She saw a strange noise coming from the grass. It was a bird! Tommy was so excited and she ran over to see it better. \n\nThe bird was fluttering around and singing a song. Tommy watched it for a moment, watching it. Suddenly, the bird flew away. Tommy was still frustrated, so he quickly ran back inside. But before he could get to bed, he had a plan. \n\nHe went to the kitchen and grabbed some bread and milk. Then he quickly got to work. He made sure he was comfortable and took out the bread. He threw it out the window and watched the bird fly away. \n\nTommy was happy that he had been able to take a nap. He went to bed and had a good sleep inside. He knew that he'd be able to take a nap every night. \n\nThe next day, Tommy's mom called him to wake him up. He smiled as he walked away, happy to have been able to take a nap.", "reason": "bigram recurred 4x: ('to', 'take')"}, {"seed": 3, "prompt": "The dog ran", "text": "The dog ran along the street, looking for something to do when it saw a shop down the street. It was so excited and ran straight to it. It had never seen a shop before, and it ran up to the door. The shopkeeper saw the dog, and he knew that the dog was going to be very friendly. The dog looked up at the shopkeeper with big eyes, and he knew that the shopkeeper must be very nice.\n\nThe dog was so excited, it jumped up and down and barked, \"Woof woof!\" The shopkeeper smiled and said, \"That's great, dog!\" The dog thanked the shopkeeper, and then ran off to play.\n\nThe dog was so happy to have found such a friendly shop. It ran around the park, feeling happy and excited to be there. Everywhere the dog went it said, \"Woof woof!\" to the shopkeeper, and the dog had so much fun. Eventually, it was time to go home, but it was sad to leave the shopkeeper. The dog was so happy it had found a nice shop! It ran back to the shopkeeper and said, \"Thank you for the nice shopkeeper!\" The shopkeeper smiled and said", "reason": "bigram recurred 6x: ('he', 'dog')"}, {"seed": 3, "prompt": "A little girl", "text": "A little girl named Jane went to the park. She saw the big swing and wanted to try it. She went up to it and pushed herself as hard as she could. She felt like she was floating in the air. She was so excited that she started to swing back and forth, higher and higher. Every time she went higher, she felt like she was flying.\n\nOne day, when Jane was swinging, she saw a little bird. It had fallen from its nest. Jane was very sad that the bird couldn't get back up. She knew that she had to help the bird. She went to get a hammer and some nails. She found them in her pocket and put them around the bird. The bird looked so happy and it thanked her. Jane smiled and waved goodbye.\n\nJane was happy that she could help the little bird. The bird was okay, but he was very happy to have a home. Jane waved goodbye to the little bird and went home. She knew that she would always remember that special day at the park. She couldn't wait to come back and swing again. And the bird was happy to be out of reach. Jane was so glad that she could help the little bird and it had been really helpful.", "reason": "bigram recurred 5x: ('that', 'she')"}]}}</script>
+<script>
+const DATA = JSON.parse(document.getElementById('report-data').textContent);
+
+function escapeHtml(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function highlight(text, reason){
+  if (!reason) return escapeHtml(text);
+  let w1, w2;
+  let m = reason.match(/^exact doubling: (['"])(.*?)\1 (['"])(.*?)\3$/);
+  if (m){ w1 = m[2]; w2 = m[4]; }
+  else {
+    m = reason.match(/^bigram recurred \d+x: \((['"])(.*?)\1,\s*(['"])(.*?)\3\)$/);
+    if (m){ w1 = m[2]; w2 = m[4]; }
+  }
+  if (w1 === undefined) return escapeHtml(text);
+  const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(esc(w1) + '\\s?' + esc(w2), 'gi');
+  let out = '', last = 0, mm;
+  while ((mm = re.exec(text))){
+    out += escapeHtml(text.slice(last, mm.index));
+    out += '<mark>' + escapeHtml(mm[0]) + '</mark>';
+    last = mm.index + mm[0].length;
+    if (mm[0].length === 0) re.lastIndex++;
+  }
+  out += escapeHtml(text.slice(last));
+  return out;
+}
+
+function wordCount(t){ return t.trim().split(/\s+/).length; }
+
+function reasonKind(reason){
+  if (!reason) return null;
+  return reason.startsWith('exact doubling') ? 'doubling' : 'bigram';
+}
+
+function computeStats(samples){
+  const total = samples.length;
+  const flagged = samples.filter(s => s.reason).length;
+  const avgWords = samples.reduce((a,s) => a + wordCount(s.text), 0) / total;
+  const endCount = samples.reduce((a,s) => a + ((s.text.toLowerCase().match(/the end/g) || []).length), 0);
+  const restartCount = samples.reduce((a,s) => a + ((s.text.toLowerCase().match(/once upon a time/g) || []).length), 0);
+  const kinds = {bigram:0, doubling:0};
+  samples.forEach(s => { const k = reasonKind(s.reason); if (k) kinds[k]++; });
+  return {total, flagged, avgWords, endCount, restartCount, kinds};
+}
+
+function renderStats(){
+  const groups = [
+    {key:'sweep1', model:'D128', label:'Sweep 1 &middot; D=128', cls:'c'},
+    {key:'sweep1', model:'reference', label:'Sweep 1 &middot; reference', cls:'r'},
+    {key:'sweep2', model:'D128', label:'Sweep 2 &middot; D=128', cls:'c'},
+    {key:'sweep2', model:'reference', label:'Sweep 2 &middot; reference', cls:'r'},
+  ];
+  const grid = document.getElementById('stats-grid');
+  grid.innerHTML = groups.map(g => {
+    const s = computeStats(DATA[g.key][g.model]);
+    const pct = Math.round(100 * s.flagged / s.total);
+    return `<div class="stat-tile ${g.cls}">
+      <div class="sweep-label">${g.label}</div>
+      <div class="num">${s.flagged}<small>/${s.total} flagged</small></div>
+      <div class="pct">${pct}% of samples</div>
+    </div>`;
+  }).join('');
+
+  const s1c = computeStats(DATA.sweep1.D128), s1r = computeStats(DATA.sweep1.reference);
+  const s2c = computeStats(DATA.sweep2.D128), s2r = computeStats(DATA.sweep2.reference);
+  const row = (label, c, r, fmt) => `<tr><td class="k">${label}</td><td class="v" style="color:var(--accent-c)">${fmt(c)}</td><td class="v" style="color:var(--accent-r)">${fmt(r)}</td></tr>`;
+  const fmt1 = n => n.toFixed(2);
+  document.getElementById('metrics-row').innerHTML = `
+    <div class="metric-cell">
+      <div class="mlabel">Sweep 1 (60 tok) &middot; per-sample rate, D=128 vs reference</div>
+      <table>
+        <tr><td class="k"></td><td class="v" style="color:var(--accent-c)">D128</td><td class="v" style="color:var(--accent-r)">ref</td></tr>
+        ${row('avg word count', s1c.avgWords, s1r.avgWords, n=>n.toFixed(1))}
+        ${row('&ldquo;the end&rdquo; / sample', s1c.endCount/s1c.total, s1r.endCount/s1r.total, fmt1)}
+        ${row('story-restarts / sample', s1c.restartCount/s1c.total, s1r.restartCount/s1r.total, fmt1)}
+      </table>
+    </div>
+    <div class="metric-cell">
+      <div class="mlabel">Sweep 2 (250 tok) &middot; per-sample rate, D=128 vs reference</div>
+      <table>
+        <tr><td class="k"></td><td class="v" style="color:var(--accent-c)">D128</td><td class="v" style="color:var(--accent-r)">ref</td></tr>
+        ${row('avg word count', s2c.avgWords, s2r.avgWords, n=>n.toFixed(1))}
+        ${row('&ldquo;the end&rdquo; / sample', s2c.endCount/s2c.total, s2r.endCount/s2r.total, fmt1)}
+        ${row('story-restarts / sample', s2c.restartCount/s2c.total, s2r.restartCount/s2r.total, fmt1)}
+      </table>
+    </div>
+    <div class="metric-cell">
+      <div class="mlabel">Flag kind breakdown (both sweeps combined)</div>
+      <table>
+        <tr><td class="k"></td><td class="v" style="color:var(--accent-c)">D128</td><td class="v" style="color:var(--accent-r)">ref</td></tr>
+        ${row('bigram recurrence', s1c.kinds.bigram+s2c.kinds.bigram, s1r.kinds.bigram+s2r.kinds.bigram, n=>n)}
+        ${row('exact doubling', s1c.kinds.doubling+s2c.kinds.doubling, s1r.kinds.doubling+s2r.kinds.doubling, n=>n)}
+      </table>
+    </div>
+  `;
+}
+
+function pairRows(sweepKey){
+  const cList = DATA[sweepKey].D128, rList = DATA[sweepKey].reference;
+  const rows = [];
+  for (let i = 0; i < cList.length; i++){
+    rows.push({c: cList[i], r: rList[i]});
+  }
+  return rows;
+}
+
+let currentSweep = 'sweep1';
+let flaggedOnly = false;
+
+function panelHtml(sample, cls, label){
+  const flagged = !!sample.reason;
+  const badge = flagged
+    ? `<span class="flagpill flagged">flagged</span>`
+    : `<span class="flagpill clean">clean</span>`;
+  const reasonHtml = flagged ? `<div class="reason">${escapeHtml(sample.reason)}</div>` : '';
+  const hide = (flaggedOnly && !flagged) ? ' hidden' : '';
+  return `<div class="panel${hide}">
+    <div class="panel-head">
+      <span class="modeltag ${cls}"><span class="dot ${cls}"></span>${label}</span>
+      ${badge}
+    </div>
+    ${reasonHtml}
+    <div class="story">${highlight(sample.text, sample.reason)}</div>
+    <div class="panel-foot">
+      <span>prompt: &ldquo;${escapeHtml(sample.prompt)}&rdquo;</span>
+      <span>${wordCount(sample.text)} words</span>
+    </div>
+  </div>`;
+}
+
+function render(){
+  const rows = pairRows(currentSweep);
+  const container = document.getElementById('rows');
+  let html = '';
+  let visibleRows = 0;
+  rows.forEach((pair, idx) => {
+    const cFlagged = !!pair.c.reason, rFlagged = !!pair.r.reason;
+    if (flaggedOnly && !cFlagged && !rFlagged) return;
+    visibleRows++;
+    html += `<div class="rowgroup">
+      <div class="rowmeta"><span class="seedno">seed ${pair.c.seed}</span><span>condition ${idx+1} of ${rows.length}</span></div>
+      <div class="pair">
+        ${panelHtml(pair.c, 'c', 'checkpoint C, D=128')}
+        ${panelHtml(pair.r, 'r', 'reference')}
+      </div>
+    </div>`;
+  });
+  container.innerHTML = html;
+  document.getElementById('empty-state').style.display = visibleRows === 0 ? 'block' : 'none';
+}
+
+document.getElementById('sweep-seg').addEventListener('click', e => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  currentSweep = btn.dataset.sweep;
+  document.querySelectorAll('#sweep-seg button').forEach(b => b.classList.toggle('active', b === btn));
+  render();
+});
+
+document.getElementById('flagged-only').addEventListener('change', e => {
+  flaggedOnly = e.target.checked;
+  render();
+});
+
+renderStats();
+render();
+</script>
