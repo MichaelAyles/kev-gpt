@@ -3603,3 +3603,91 @@ this investigation's black-box characterization approach.
 (off by default) and `KEVGPT_DIAG_DUMP_HEAD` (off by default) diagnostic
 toggles, both documented in-place with what they're for and what they
 already found. No RTL changes, no kev-gpt-repo changes.
+
+## Narrowed further: the shared multi-master DMA read path, and a gap this project already flagged as unverified
+
+Followed `weight_loader_ddr.sv`'s read requests all the way to the
+physical MIG (real RTL reading, not simulation — none of this path is
+exercised by any existing gate, including this session's own streaming
+testbench, which ties `KV_DDR_BACKED=0` and never contends for the MIG
+at all). The real deployed wrapper
+(`xilinx_core_v_mini_mcu_wrapper_kevgpt.sv`) does something the
+simulation has never modeled:
+
+```
+weight_loader_ddr (gen_clk, ~50MHz, PLL-derived from MIG's ui_clk)
+    |  CDC crossing (async_fifo_gray, kevgpt_ddr_bundle.sv)
+    v
+mig_read_mux2 (ui_clk)  -- merges weight reads vs. KV-cache reads
+    v
+mig_read_engine (ui_clk)
+    v
+mig_dual_master_arbiter (ui_clk)  -- merges kevgpt's own bundle vs. cpu_ddr_bridge
+    v
+physical MIG / real DDR3
+```
+
+Two real findings, at two different levels:
+
+**1. An explicitly self-documented CDC gap.** The wrapper's own comment,
+written in a prior session, states outright: *"simulating a DMA path
+entirely on one clock does NOT prove it's CDC-safe on real
+two-clock-domain hardware."* The only test that ever exercised genuinely
+concurrent two-master traffic (`tb_kevgpt_ddr_bundle.sv`) **predates**
+the CDC fix (`gen_clk`/`ui_clk` split) currently deployed, and has never
+been re-run against it — re-verifying with two independent clocks (or
+at minimum a synth-only Vivado checkpoint, since CDC correctness is a
+real-hardware property single-clock simulation structurally cannot
+prove) was flagged as a real follow-up and never done. `weight_loader_ddr`
+lives inside `sequencer_vec.sv`'s hierarchy on `gen_clk`; every
+MIG-facing arbiter/engine runs on `ui_clk`, a genuinely different
+frequency (confirmed: `gen_clk` is PLL-derived FROM `ui_clk`, not a
+renamed wire). Every symptom this whole investigation has found —
+deterministic (not random), invisible to every single-clock simulation
+run, address/access-pattern-correlated — is a textbook CDC signature,
+not a coincidence.
+
+**2. A real, concrete code smell, found in two analogous places.** Both
+`mig_dual_master_arbiter.sv`'s `u_rd_owner_fifo` and
+`mig_read_mux2.sv`'s `u_owner_fifo` — the FIFOs that track *which
+master a pending DDR3 read return belongs to*, so a returned beat gets
+routed back to the requester that actually asked for it — leave
+`in_ready_o` unconnected:
+```systemverilog
+sync_fifo #(...) u_owner_fifo (
+    .in_valid_i(owner_push_valid),
+    .in_ready_o(),   // never checked
+    ...
+```
+Both push an ownership tag on every accepted read command without ever
+confirming the tracking FIFO can actually accept it. Checked the sizing
+by hand: `MAX_OUTSTANDING=16` on the underlying `mig_read_engine`
+should stay comfortably under both FIFOs' depth (32/64) under normal
+operation, so this is not confirmed as the *active* mechanism — but
+it's a real, fragile pattern with zero error signaling if it ever does
+desync (no assertion catches an overflow here, only underflow), and if
+anything upstream — the CDC crossing chief among suspects — ever
+produces more "accepted" events than the engine's own outstanding-count
+implies, ownership tracking would silently desync, misrouting a
+weight-read's return to the KV-cache master (or vice versa) and landing
+the wrong bytes at the wrong row position, deterministically, for a
+given access pattern. Exactly the shape of everything already observed:
+fully reproducible for a fixed (checkpoint, prompt, seed), never seen
+in any simulation, and statistically skewed toward specific vocab-ID
+address ranges rather than uniformly random.
+
+**Where this leaves it.** Narrowed from "mysterious real-hardware
+effect" to one specific, named subsystem — the shared multi-master DMA
+read path and its CDC boundary — with two concrete, line-level
+findings, not yet a proven root cause. Confirming which (if either)
+mechanism is actually responsible needs either a from-scratch
+correctness audit of `async_fifo_gray` and the CDC handshake protocol,
+or real signal-level instrumentation (an ILA) — a genuinely different
+scope of work than this investigation's black-box characterization
+approach (RTL simulation + real-hardware behavioral comparison), which
+has now been pushed about as far as it can go without one of those.
+
+**Files touched**: none — this was read-only RTL analysis
+(`kevgpt_ddr_bundle.sv`, `mig_read_mux2.sv`, `mig_dual_master_arbiter.sv`,
+`xilinx_core_v_mini_mcu_wrapper_kevgpt.sv`, all in `kevgpt-genesys2-soc`),
+no code changes in either repo.
