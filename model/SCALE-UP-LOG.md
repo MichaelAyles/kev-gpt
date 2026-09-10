@@ -3516,3 +3516,90 @@ prints `KEVGPT_DEBUG_SEED,0x%08x,cyc=0x%08x` each turn, so any future
 flagged real-hardware reply can be replayed offline through the Python
 golden reference at the exact seed that produced it. No RTL or
 kev-gpt-repo changes — this was a pure diagnostic addition.
+
+## Chasing "make FPGA and software produce the same stories": three real corrections to the earlier conclusion
+
+The prior section closed with "a real-silicon-only numerical near-tie" as
+the root cause, based on one example (a 0.13%-margin sampled-mode
+divergence). Trying to actually eliminate that divergence — rather than
+just characterize one instance of it — overturned two parts of that
+conclusion and sharpened the third into something concrete.
+
+**Attempt 1 (failed): force greedy decoding as a deterministic baseline.**
+Added `KEVGPT_FORCE_GREEDY` to `kevgpt_interactive/main.c` (seed=0, no
+Gumbel noise at all) on the theory that removing sampling removes the
+near-tie mechanism that flips outcomes. Rebuilt, reloaded, reran the same
+prompt on real hardware: **it still diverged from the golden reference**,
+at generated token ~50 ("she said **.**" vs hardware's "she said
+**care**"). Checked the margin this time: golden's argmax has logit
+11.95; "care" is ranked **15,118th out of 16,384** with logit -8.48 — not
+a near-tie at all, a genuinely gross divergence. **Extended the RTL
+streaming simulation to 53 tokens** (previously never tested past ~25)
+with the same real seed, same checkpoint, greedy mode: simulation still
+matches the golden reference exactly. So greedy mode doesn't solve
+anything, and the RTL is confirmed correct even at this depth — but the
+divergence itself turns out to be a different, more severe phenomenon
+than the original near-tie example, not explained by it.
+
+**Correction 1: the fault is deterministic, not random.** Ran the same 5
+prompts × 8 repeated trials each (40 total) in greedy mode. **Every
+single trial produced byte-identical output**, fixation words included.
+A transient/marginal-timing fault would show *some* variation across
+repeated identical trials; this shows none. This directly contradicts
+the earlier "marginal DDR3 timing flipping a few LSBs" framing — whatever
+is happening is fully reproducible given the same (checkpoint, prompt,
+seed), not probabilistic real-silicon noise.
+
+**Correction 2: the fixation words statistically cluster in vocab-ID
+space.** Checked all 9 known instances against their `data/word_v16384`
+token IDs: `buster`=2048, `buster's`=2049, `bustled`=2051,
+`cardinal`=2211, `care`=2213, `contains`=3086, `cube`=3438,
+`spidey`=13344, `spidey's`=13345. **7 of 9 fall in [2048, 4096)** — 12.5%
+of the vocabulary, so ~1.1 expected by chance. Not proof of a specific
+mechanism on its own, but a real signal that something about that
+address range (specifically, the corresponding rows of the head-weight
+table) is disproportionately implicated.
+
+**Correction 3 (the actual localization): built a raw-DDR3-readback
+diagnostic and definitively ruled out the write side.** Added a firmware
+diagnostic (`KEVGPT_DIAG_DUMP_HEAD`, off by default) that dumps the head
+weight block's word range covering vocab rows 0-4095 (`WB_HEAD =
+NLAYER*GW_BLK = 12*3072 = 36864`, 2 words/row) straight back from DDR3
+via a plain CPU load — bypassing `weight_loader_ddr.sv`'s own streaming
+FSM entirely, so this tests ONLY whether the initial UART-write-to-DDR3
+landed correctly. Also independently confirmed the weight-packing
+pipeline itself is exact: `send_weights.py`'s
+`weight_words_from_checkpoint()` output is byte-for-byte identical
+(2,670,592/2,670,592 words) to what the RTL simulation's own `wrom.mem`
+contains, and the weight blob's base address matches between firmware
+(`uart_load_blob(0, ...)`) and the RTL's `WEIGHTS_DDR_BASE=0`. Diffed
+all 8,192 dumped words against the known-correct reference: **zero
+mismatches.**
+
+**Where this leaves the investigation.** Every candidate has now been
+independently checked and cleared except one:
+- Checkpoint/weights: clean (established earlier).
+- Weight packing/transmission: byte-exact, verified directly.
+- The write side (UART reception → DDR3): byte-exact, verified directly
+  via raw readback, zero mismatches across the suspect range.
+- RTL compute logic, both fully-resident and streaming, greedy and
+  sampled, arbitrary seeds and real captured seeds, up to 53 tokens:
+  bit-exact to the golden reference in every simulation run.
+
+The one thing never directly exercised by simulation — `mig_behav_model.sv`
+is an idealized behavioral memory, not real DDR3 timing — is
+**`weight_loader_ddr.sv`'s real-hardware interaction with the actual
+DDR3/MIG controller during the streaming reload** (the S_HEADSET path,
+triggered mid-inference). By elimination, that's where the divergence is
+introduced: real data, correctly written, read back wrong during
+inference, deterministically, for a set of addresses that skew toward
+the [2048, 4096) vocab-row range. Not yet root-caused further — doing so
+needs either deep MIG/DDR3 protocol-level RTL analysis or real
+signal-level instrumentation (an ILA), a different scope of work than
+this investigation's black-box characterization approach.
+
+**Files touched** (both in `kevgpt-genesys2-soc`, separate repo):
+`sw/applications/kevgpt_interactive/main.c` — `KEVGPT_FORCE_GREEDY`
+(off by default) and `KEVGPT_DIAG_DUMP_HEAD` (off by default) diagnostic
+toggles, both documented in-place with what they're for and what they
+already found. No RTL changes, no kev-gpt-repo changes.
