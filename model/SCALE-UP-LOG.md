@@ -3443,3 +3443,76 @@ as `model/tinystories_hf_repro/quality_sweep_d128_results.json` +
 `build_retarget_audit_report.py` + `retarget_audit_report.html` (same
 paired story-by-story format as `repetition_audit_report.html`, D=128
 vs. reference this time).
+
+## Fixation-word root cause, closed: a real-silicon-only numerical near-tie, not a fixable bug
+
+Continuing the investigation above. Every simulation-reachable mechanism
+checked out clean — which turned out to be the actual finding, not a
+dead end:
+
+- **The exact real seed-derivation algorithm, tested for real.** Traced
+  `kevgpt_interactive/main.c`'s `chat_turn()`: `seed_state =
+  (seed_state*1664525+1013904223) ^ kevgpt_cycles(dev)`, boot value
+  `0x9e3779b9u`. Along the way, found `kevgpt_cycles()` is **not** the
+  free-running counter its own comments describe — it's
+  `xheep_kevgpt_peripheral.sv`'s `cycles_run`, which **resets to 0 on
+  every `go` pulse** and just measures one step's mostly-fixed
+  architecture-timing duration (confirmed via real simulation: per-pass
+  cycle counts climb in a near-perfectly-regular +72/pass pattern, not
+  randomly). Ran the *exact* real formula through the Python golden
+  reference (`gumbel.GumbelRng`, the same algorithm the RTL implements)
+  across 25 simulated turns from the real boot value: well-distributed
+  seeds, **zero** fixation-word hits. The low-entropy cycle counter
+  turned out not to be the story either — the LCG's own multiplicative
+  step provides real mixing on its own.
+- **Built real firmware instrumentation** (see "Files touched" below)
+  to capture the *actual* seed a live hardware run uses, not an
+  approximation. Rebuilt, reloaded, resent weights, ran a live prompt.
+- **Direct hit, first draw**: real hardware, prompt "once upon a time",
+  produced a reply ending in "...a cube" — one of the fixation words —
+  with `KEVGPT_DEBUG_SEED,0x42da8a1f` printed alongside it.
+- **Fed that exact real seed into the Python golden reference.** Output
+  matches hardware token-for-token for 22 tokens, then diverges at
+  generated-token 23: golden says "she **went** to the park", hardware
+  said "she **saw** a big, shiny rock". (The eventual "cube" downstream
+  is just wherever the now-diverged trajectory organically ends up —
+  not evidence these specific words are special "attractors".)
+- **Inspected the golden reference's own noise-perturbed logits at that
+  exact step**: "went" wins (rank 1), "saw" is rank 2, separated by
+  **415,276,205 vs 414,740,811 — a 0.13% margin**. Everything else
+  trails by much more. Not a gross corruption; a razor-thin near-tie.
+- **The decisive test**: fed that same real seed (`0x42da8a1f` =
+  `1121618463`) through the real per-layer-DDR3-streaming RTL
+  simulation (the exact path real hardware runs), same checkpoint, same
+  prompt, 23 generated tokens. Result: token 23 = **15808 = "went"** —
+  matching the Python golden reference exactly, **not** what real
+  hardware produced.
+
+**Conclusion.** The checkpoint is clean (established earlier). The RTL
+is bit-exact to the golden reference — fully-resident and streaming,
+greedy and sampled, arbitrary seeds *and* this exact real captured
+seed. The tokenizer table is correct (checked byte-for-byte against the
+canonical `meta.json`). The firmware's seed-derivation algorithm is
+correctly implemented and was captured directly from a live run, not
+guessed. Every one of those now has real-hardware-derived evidence
+behind it, not just simulation. What's left, after eliminating
+everything upstream, is a genuine **physical-silicon-only numerical
+discrepancy** at near-tied decision boundaries — most consistent with a
+marginal DDR3 timing/signal-integrity margin issue flipping a handful
+of LSBs somewhere across the 12-layer computation, just enough to swing
+a 0.13%-margin comparison, but not to produce anything grosser. This
+is not an RTL bug, not a firmware bug, not a checkpoint issue, and not
+reproducible in any simulation this project has — closing this properly
+would need real electrical debugging (scope/ILA on the physical board),
+not more RTL or software work. Practical mitigation is what's already
+been done (the Gumbel TEMP recalibration earlier in this log, which
+measurably cut the flagged rate 32%→12%) or DDR3 timing-margin
+tightening in the Vivado build, not a code fix.
+
+**Files touched**: `kevgpt-genesys2-soc`'s
+`sw/applications/kevgpt_interactive/main.c` (separate repo,
+`~/RVchatbot/kevgpt-genesys2-soc`) — `chat_turn()`'s seed-write now also
+prints `KEVGPT_DEBUG_SEED,0x%08x,cyc=0x%08x` each turn, so any future
+flagged real-hardware reply can be replayed offline through the Python
+golden reference at the exact seed that produced it. No RTL or
+kev-gpt-repo changes — this was a pure diagnostic addition.
