@@ -5860,3 +5860,78 @@ the real-hardware symptom -- it matters only because it means this gate's
 "genuine two-master sharing is correct" claim had been unverified (not
 disproven, just untested) since 2026-08-16, and is now restored to an
 actual passing gate.
+
+## Real-hardware isolation experiment: "care" pinned down, then a build-dependent twist
+
+Part of the fixation-word investigation (`FIXATION-WORD-CDC-INVESTIGATION.md`
+§2a/§3/§8 item 3 has the full writeup; this entry is the PORT-NOTES-style
+chronological record). §8 item 3's plan (disable `KV_DDR_BACKED`/
+`cpu_ddr_bridge` entirely, resynth, rerun the greedy test) turned out not to
+be buildable for checkpoint C's shape: `KV_DDR_BACKED=0` overflows BRAM to
+~116% (it's hardcoded at `xilinx_core_v_mini_mcu_wrapper_kevgpt.sv:436`, not
+a build flag), and `cpu_ddr_bridge` isn't actually idle during normal chat
+even before touching that -- `main.c`'s `KEVGPT_ITOS(id)` macro reads the
+tokenizer string table through it on every generated token whenever
+`KEVGPT_TOKENIZER_DDR` is defined (true for VOCAB=16384), independent of any
+diagnostic toggle.
+
+Ran the cheap partial version instead: a new off-by-default toggle,
+`KEVGPT_PRINT_IDS_ONLY`, skips `print_word_token()`'s own `cpu_ddr_bridge`
+read (prints the raw numeric token id instead of the decoded string) while
+deliberately leaving `is_stem_repeat()`'s two per-token `cpu_ddr_bridge`
+reads alone, since those feed the repetition guard's actual pick and
+touching them would change what gets generated, invalidating any
+comparison. First attempt used `printf("%u ", tok)` for the id print and
+silently wedged the console after one reply -- libc stdio buffering
+colliding with this file's otherwise-universal raw `uart_putc()` writes,
+unrelated to the DMA path under investigation. Fixed by hand-formatting the
+decimal digits through `uart_putc()` directly (see the comment at
+`print_word_token()` for the full account).
+
+**Result: clean negative for cpu_ddr_bridge print-path traffic specifically.**
+With the fixed toggle, real-hardware output was byte-for-byte identical
+between this reduced-traffic build and a baseline build (`KEVGPT_FORCE_GREEDY=1`,
+`KEVGPT_PRINT_IDS_ONLY=0`) across 5 test prompts, two independent real
+weight+tokenizer reloads (~15 min each, `fabric.genesys2.send_weights`).
+
+**While collecting that comparison, rank-analyzed each divergence against
+the Python golden reference (`IntKVQSequencer(kbits=8, vbits=8, rotate=False,
+divfree=True)`, same checkpoint) and got the sharpest evidence this
+investigation has captured.** 3 of 5 prompts ("in the forest", "my favorite
+toy", "the rocket ship") produced "care" (id 2213) or its stem-relative
+"carefree" (id 2216) as the very first generated token, ranked 2551, 9311,
+and 8149 of 16384 in golden's own distribution -- wild misses, not close
+calls. This is the exact word §2's original greedy-mode capture picked
+(rank 15,118) and the word recurring across multiple earlier real-hardware
+story captures elsewhere in this log ("care for the little girl," "care for
+his family," "care for you care") -- confirms "care" specifically, not a
+generic wrong-word pattern, is this investigation's single most-reproduced
+symptom, now caught at token 0 and precisely rank-characterized. One prompt
+("the wizard cast") was a near-tie (rank 1); one ("once upon a time")
+matched golden exactly -- same severity-variance pattern §2 already
+documented.
+
+**The complication**: added a third off-by-default toggle,
+`KEVGPT_DIAG_LOGIT_PROBE`, printing the raw Q6.25 head logit for ids
+2213/2216/the-actual-winner via `kevgpt_read_bank()`, inserted *after* the
+first token is already decided by `kevgpt_step()`. This third build --
+otherwise identical generation logic -- produced a *different* winning
+token for the same 3 prompts (both "in the forest" and "the rocket ship"
+won with "." instead of "care"; "my favorite toy" won with a different id
+instead of "carefree"), reproducible byte-for-byte across 2 back-to-back
+trials on the same boot (ruling out live per-call flakiness) but different
+from the isolation/baseline builds' shared result. The inserted code cannot
+causally affect this token's value -- it only runs after `kevgpt_step()`
+already returned it -- so the only remaining explanation is indirect: any
+firmware change shifts instruction addresses/timing throughout the binary,
+including during weight prefetch before generation starts (weight reloads
+happen once per layer per token). If the real defect is a live,
+timing-sensitive race, sensitivity to incidental build-to-build timing is
+exactly what this would look like: deterministic within a boot, different
+across boots/builds, same symptom class, different specific corrupted
+value. Leans the investigation back toward the CDC-timing hypothesis over a
+fixed, boot-independent addressing bug.
+
+All 4 diagnostic toggles (`KEVGPT_FORCE_GREEDY`, `KEVGPT_DIAG_DUMP_HEAD`,
+`KEVGPT_PRINT_IDS_ONLY`, `KEVGPT_DIAG_LOGIT_PROBE`) reverted to off before
+committing.

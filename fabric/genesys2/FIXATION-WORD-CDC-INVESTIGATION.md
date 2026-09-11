@@ -1,19 +1,25 @@
 # Fixation-word investigation: real-hardware-only text corruption in the multi-master DDR read path
 
-Status as of 2026-09-11: **open, not root-caused, not fixed on real hardware.**
-Two concrete, verified pieces of progress landed since the previous revision,
-neither of which closes the investigation: (1) §8 item 2's owner-FIFO
+Status as of 2026-09-12: **open, not root-caused, not fixed on real hardware.**
+Three concrete, verified pieces of progress landed since the previous
+revision, none of which closes the investigation: (1) §8 item 2's owner-FIFO
 backpressure gap is now actually fixed in both `mig_dual_master_arbiter.sv`
 and `mig_read_mux2.sv`, not just proposed — see §4's status update; (2) while
 building the gate to verify that fix, a second, *separate* real bug was found
 and fixed — a testbench-only clock-domain mismatch that had been silently
-breaking `tb_kevgpt_ddr_bundle.sv` for weeks (see new §4a). Neither fix is
-confirmed to be *the* fixation-word cause; §4a in particular is explicitly
-ruled out as a hardware explanation, since it lives entirely in test code.
-This document is the standalone reference for the whole investigation —
-everything needed to either continue it or hand it off, without
-reconstructing the trail from `model/SCALE-UP-LOG.md`'s chronological entries
-(which have the full blow-by-blow if this summary needs expanding).
+breaking `tb_kevgpt_ddr_bundle.sv` for weeks (see §4a); (3) §8 item 3's
+weight-traffic-only isolation experiment was run on real hardware (partial/
+cheap version — see new §2a) and, in the process, produced the most precise
+real-hardware evidence this investigation has yet captured: a specific,
+repeatable wrong-token pick ("care"/"carefree") with a real-hardware/build-
+dependent twist that shifts weight back toward §6's timing hypothesis. None
+of the three fixes/findings is confirmed to be *the* fixation-word cause;
+§4a in particular is explicitly ruled out as a hardware explanation, since it
+lives entirely in test code. This document is the standalone reference for
+the whole investigation — everything needed to either continue it or hand it
+off, without reconstructing the trail from `model/SCALE-UP-LOG.md`'s
+chronological entries (which have the full blow-by-blow if this summary
+needs expanding).
 
 **Revision note:** this document's first version over-weighted the CDC
 timing-constraint gap (§6) as *the* leading hypothesis. An external review of
@@ -61,6 +67,99 @@ included. This is not timing noise or metastability-flavored randomness in
 the colloquial sense — it is a reproducible function of (checkpoint, prompt,
 seed, *this specific bitstream*).
 
+## 2a. Real-hardware isolation experiment: "care" identified precisely, then a build-dependent twist
+
+§8 item 3 called for disabling `KV_DDR_BACKED`/`cpu_ddr_bridge` traffic
+entirely and re-running the greedy test — infeasible as scoped (checked
+before spending real Vivado time: `KV_DDR_BACKED=0` overflows BRAM to
+~116% for checkpoint C's shape, and `cpu_ddr_bridge` turns out to carry
+traffic on *every* generated token even outside any diagnostic, via
+`KEVGPT_ITOS`'s tokenizer-string read in `main.c`). Ran the cheap partial
+version instead: a new off-by-default firmware toggle,
+`KEVGPT_PRINT_IDS_ONLY` (`main.c`), skips `print_word_token()`'s own
+`cpu_ddr_bridge` read (prints the raw numeric id instead of the decoded
+string) while deliberately leaving `is_stem_repeat()`'s two per-token
+`cpu_ddr_bridge` reads untouched, since those feed the repetition guard's
+actual pick and touching them would change what gets generated. Net effect:
+2 `cpu_ddr_bridge` reads/token instead of 3, not full elimination.
+
+**First attempt at this toggle used `printf()` for the id print and silently
+wedged the console after one reply** — libc stdio buffering vs. this file's
+otherwise-universal raw `uart_putc()` — nothing to do with the DMA path
+under investigation; fixed by hand-formatting the decimal digits through
+`uart_putc()` directly, matching the rest of the file's convention (see the
+comment at `print_word_token()` in `main.c` for the full account, kept in
+place as a warning against mixing `printf()` into this file's hot per-token
+path again).
+
+**Result — clean negative for the print-path hypothesis specifically**:
+with the fixed toggle, real-hardware output is **byte-for-byte identical**
+between this reduced-traffic build and a baseline build (same
+`KEVGPT_FORCE_GREEDY=1`, `KEVGPT_PRINT_IDS_ONLY=0`) across all 5 test
+prompts, confirmed via two independent real weight+tokenizer reloads
+(~15 minutes each). Reducing `cpu_ddr_bridge` print-path traffic did not
+change the generated tokens at all. §3's table gets a new row for this.
+
+**But rank-analyzing each divergence against the Python golden reference
+turned up the sharpest evidence this investigation has captured**. Using
+`IntKVQSequencer`'s own real-valued logits at the first generated position
+for 5 prompts ("the wizard cast", "in the forest", "my favorite toy", "the
+rocket ship", "once upon a time"):
+
+| prompt | hardware's 1st token | golden's rank for it |
+|---|---|---|
+| "the wizard cast" | "the" | rank 1 of 16384 (golden's #2, logit 8.74 vs 9.05 — a near-tie) |
+| "in the forest" | **"care"** (id 2213) | rank **2551** of 16384 |
+| "my favorite toy" | **"carefree"** (id 2216) | rank **9311** of 16384 |
+| "the rocket ship" | **"care"** (id 2213) | rank **8149** of 16384 |
+| "once upon a time" | exact match | rank 0 |
+
+Three of five prompts converge on the *same specific token* — "care" or its
+stem-relative "carefree" — as the very first generated word, with massive
+rank misses, not close calls. This is not a new phenomenon: it's the exact
+word §2's own original greedy-mode capture picked (rank 15,118, quoted
+above) and the word that recurs across multiple earlier real-hardware story
+captures in `PORT-NOTES.md` ("care for the little girl," "care for his
+family," "care for you care"). This confirms "care"/id 2213 specifically —
+not a generic "wrong word sometimes wins" pattern — is the investigation's
+single most-reproduced symptom, now caught at the earliest possible decode
+position (token 0) and precisely rank-characterized for the first time.
+Confirmed byte-identical across both the isolation and baseline builds
+above (independent evidence the wrong pick isn't itself print-path-related).
+
+**The complication**: a third build — identical generation logic, plus a new
+`KEVGPT_DIAG_LOGIT_PROBE` toggle that reads the raw Q6.25 head logit for
+ids 2213/2216/the-actual-winner via `kevgpt_read_bank()`, inserted *after*
+the first token is already decided — produced a **different** winning token
+for the same 3 prompts ("in the forest" and "the rocket ship" both won with
+"." instead of "care"; "my favorite toy" won with a different id instead of
+"carefree"). "the wizard cast" and "once upon a time" were unaffected. This
+new build's own result was perfectly reproducible (byte-identical across 2
+back-to-back trials on the same boot, ruling out live per-call flakiness),
+but differs from the isolation/baseline builds' shared result.
+
+The inserted diagnostic code cannot causally affect *this* token's value —
+it only executes after `kevgpt_step()` has already returned it. The
+remaining explanation is indirect: any firmware change shifts instruction
+addresses and timing throughout the whole binary, including during prefill/
+weight-prefetch *before* generation starts, which happens on every layer
+per token (`PORT-NOTES.md`, "weight-window reloads happen once per layer
+per TOKEN"). If the real defect is a **live, timing-sensitive race**
+(matching §6's CDC-gap hypothesis, or contention this investigation's
+existing simulation gates never exercise since they're single-master or
+lightly-loaded — see §4's status update), its outcome being sensitive to
+incidental build-to-build timing shifts is exactly what would produce this:
+deterministic within a boot, different across boots/builds, same class of
+symptom, different specific corrupted value depending on exact timing. That
+would make this evidence lean back toward §6 (timing) over a fixed,
+boot-independent addressing bug, which should have reproduced identically
+regardless of unrelated code elsewhere in the binary.
+
+The raw Q6.25 magnitudes captured from the third build are not treated as
+reliable on their own given the winner reassignment — worth re-collecting
+against a build whose winner is independently confirmed stable first,
+per §8's updated priority list.
+
 ## 3. What's ruled out, with direct evidence (in the order it was checked)
 
 | Candidate | Verdict | Evidence |
@@ -71,9 +170,10 @@ seed, *this specific bitstream*).
 | Weight-packing pipeline (`write_mems_wideword`/`wrom_to_words`) | Clean | `send_weights.py`'s transmitted word list is byte-for-byte identical (2,670,592/2,670,592 words) to the RTL simulation's own `wrom.mem`. |
 | UART reception → **DDR3 storage** (`uart_load_blob` in `main.c`) | Clean, but narrower than first claimed | Built a raw-DDR3-readback diagnostic (`KEVGPT_DIAG_DUMP_HEAD`, off by default in `kevgpt_interactive/main.c`) that reads the suspect address range straight from DDR3 via a plain CPU load. Zero mismatches across all 8,192 dumped words. **Correction: this reads DDR3 via a plain CPU load, which bypasses `weight_loader_ddr`, the CDC crossing, `mig_read_mux2`, and `mig_dual_master_arbiter` entirely.** It proves the bytes UART wrote into DDR3 are correct. It proves *nothing* about whether those bytes come back correctly through the real streaming-read path into `weight_bank_tdp` — which is exactly the path under suspicion in §4 and §6a. This was originally written up as "the write side is clean," which overstated what was actually tested. |
 | Tokenizer ID→string table | Clean | The DDR3-resident tokenizer blob on the board is byte-identical to a fresh build from `meta.json`; decodes every suspicious ID correctly (id 2048 genuinely is "buster," etc. — the words themselves are real, unremarkable vocabulary entries). |
+| `cpu_ddr_bridge` print-path traffic (§2a) | Ruled out | Real-hardware output byte-identical between a build with `print_word_token()`'s per-token `cpu_ddr_bridge` read removed (`KEVGPT_PRINT_IDS_ONLY`) and a baseline build with it present, across all 5 test prompts, two independent hardware reloads. Reducing this specific traffic source changed nothing. Does not clear `cpu_ddr_bridge`/`mig_dual_master_arbiter` contention generally — only this one traffic source (print-path reads); `is_stem_repeat()`'s own per-token reads were deliberately left in place (§2a) and remain untested in isolation. |
 | `async_fifo_gray.sv` (the CDC primitive itself) | Clean | Audited directly against Cummings' canonical async-FIFO design: Gray-code math, 2-FF `ASYNC_REG` synchronizer structure, and the full/empty detection formulas are all textbook-correct. The one deliberate deviation (registered `wr_full` instead of combinational, to break a real Vivado DRC LUTLP-1 loop) was hand-traced through a worked example and confirmed not to cause overflow. This clears the FIFO's own logic; it says nothing about physical placement of the synchronizer flops or the actual clock relationship feeding them (§6a). |
 | Sampling-methodology mismatch (my own earlier test artifact) | Ruled out | Reran with the *exact* algorithm the RTL implements (`gumbel.GumbelRng`), not an approximate PyTorch proxy: 1,500 tokens, zero fixation-word hits. |
-| Marginal/random real-silicon timing noise | Narrowed, not ruled out | The 40-trial repeated-greedy-decode test (above) is 100% deterministic. **Correction: this only rules out *pure random/probabilistic* noise, not CDC as a mechanism generally.** `gen_clk` is PLL-derived from `ui_clk`, so their relative phase can be extremely repeatable across power-on/reconfiguration — a synchronizer sampling too close to a transition on one specific, fixed phase relationship would reproduce the *same* deterministic failure every time on a given bitstream. Determinism narrows which CDC mechanisms are plausible; it does not clear CDC as a category. |
+| Marginal/random real-silicon timing noise | Narrowed, not ruled out — new evidence points back toward a timing mechanism | The 40-trial repeated-greedy-decode test (above) is 100% deterministic *within one build*. **Correction: this only rules out *pure random/probabilistic* noise, not CDC as a mechanism generally.** `gen_clk` is PLL-derived from `ui_clk`, so their relative phase can be extremely repeatable across power-on/reconfiguration — a synchronizer sampling too close to a transition on one specific, fixed phase relationship would reproduce the *same* deterministic failure every time on a given bitstream. Determinism narrows which CDC mechanisms are plausible; it does not clear CDC as a category. §2a adds a new data point in the same direction: the specific wrong token picked for 3/5 test prompts changed between two firmware builds whose only difference (a diagnostic read) cannot causally affect the value in question — consistent with a race whose outcome depends on incidental build-to-build timing, not a fixed boot-independent corruption. |
 
 ## 4. What IS implicated: modules, signals, and the traffic path
 
@@ -455,7 +555,13 @@ review. Items 1–4 don't require resolving §6's clock-naming question first;
 item 4 can independently shed light on it as a side effect. **Item 2 is now
 done** (see §4's status update and §4a) — left in place below, unrenumbered,
 as the historical record of the plan and because item 5's full contention
-testbench is still the right way to actually stress-test it.
+testbench is still the right way to actually stress-test it. **Item 3 is
+partially done** (§2a) — its own result (a build-dependent shift in which
+wrong token wins, for a code change that can't causally affect the value)
+is itself evidence favoring item 4 over item 5 as the next move: it points
+at *timing*, which item 4 investigates directly, rather than at contention
+volume/ordering, which item 5's testbench is built to stress. Left in
+original order below since item 4 was already next regardless.
 
 1. **Add a weight-bank CRC diagnostic that exercises the real full path.**
    Software computes the expected CRC32 over each packed weight block/head
@@ -476,17 +582,21 @@ testbench is still the right way to actually stress-test it.
    violation assertions. Not yet exercised under real two-master contention
    (this gate's traffic pattern never filled either owner FIFO close to
    capacity) — that's item 5 below.
-3. **Run the weight-traffic-only isolation experiment on real hardware.**
-   Disable `KV_DDR_BACKED`/`cpu_ddr_bridge` traffic (config + resynth, no new
-   RTL) so only `weight_loader_ddr → CDC → mig_read_engine → MIG` is active,
-   then rerun the same greedy-mode repeated-trial test from §2. If the
-   fixation-word pattern disappears, the defect is in `mig_read_mux2` /
-   `mig_dual_master_arbiter` / the owner-FIFO path specifically, not the base
-   CDC crossing — a fast, high-value bisection. A further bypass of just
-   `mig_dual_master_arbiter` (kevgpt's bundle wired directly to the physical
-   MIG, no `cpu_ddr_bridge` contention) or just `mig_read_mux2` (weight reads
-   wired directly to `mig_read_engine`, no KV contention) sharpens this
-   further if needed — classic divide-and-conquer.
+3. ~~Run the weight-traffic-only isolation experiment on real hardware.~~
+   **Partially done, see §2a.** The full version (disable `KV_DDR_BACKED`)
+   is not buildable for checkpoint C's shape (~116% BRAM); ran the cheap
+   partial version instead (`cpu_ddr_bridge` print-path traffic removed via
+   `KEVGPT_PRINT_IDS_ONLY`) — clean negative, byte-identical hardware output
+   with and without it (§3's new table row). In the process, precisely
+   characterized the "care"/"carefree" fixation pattern via rank analysis
+   AND found that a third build's diagnostic-only change shifted which
+   token wins for 3/5 prompts — see §2a for the full account and why that
+   favors re-prioritizing item 4 below. Remaining unexplored: `is_stem_repeat()`'s
+   own 2 reads/token were deliberately left untouched (decision-relevant,
+   can't be removed without changing what gets generated) — full print+guard
+   `cpu_ddr_bridge` elimination, and the `mig_dual_master_arbiter`/
+   `mig_read_mux2` bypass bisections originally proposed here, remain open
+   if the timing-hypothesis work below doesn't localize it first.
 4. **In parallel, resolve §6's clock-naming question properly.** Open the
    project interactively (not via `open_run` on an archived checkpoint) and
    query the actual synchronizer flip-flops directly rather than guessing
@@ -543,9 +653,19 @@ testbench is still the right way to actually stress-test it.
 - Real captured seed used for the sampled-mode divergence: `0x42da8a1f`,
   prompt "once upon a time," checkpoint `fabric/export_stepC_d128_v16384/goformer.npz`.
 - `kevgpt_interactive/main.c`'s `KEVGPT_DEBUG_SEED` (always on) and
-  `KEVGPT_FORCE_GREEDY`/`KEVGPT_DIAG_DUMP_HEAD` (both off by default,
-  documented in-place) diagnostic instrumentation — reusable for any
-  follow-up real-hardware capture.
+  `KEVGPT_FORCE_GREEDY`/`KEVGPT_DIAG_DUMP_HEAD`/`KEVGPT_PRINT_IDS_ONLY`/
+  `KEVGPT_DIAG_LOGIT_PROBE` (all off by default, documented in-place)
+  diagnostic instrumentation — reusable for any follow-up real-hardware
+  capture. The latter two are new this revision (§2a).
+- §2a's real-hardware captures: 3 independent weight+tokenizer reloads
+  (~15 min each) across 3 firmware builds (isolation, baseline, logit-probe)
+  for the same 5 prompts ("the wizard cast", "in the forest", "my favorite
+  toy", "the rocket ship", "once upon a time"), checkpoint C. Golden-
+  reference rank/logit comparison computed via `IntKVQSequencer(kbits=8,
+  vbits=8, rotate=False, divfree=True)` against `fabric/export_stepC_d128_v16384/goformer.npz`.
+  Raw captured token-id streams, golden comparisons, and per-build results
+  not committed to the repo (session scratch files) — rerun from the
+  firmware toggles above plus the same prompts to reproduce.
 - `model/tinystories_hf_repro/hw_vs_sw_report.html` (published as the
   "Silicon Fidelity" artifact) — the story-by-story sample evidence behind
   the fixation-word pattern, with real captured seeds shown per sample.
