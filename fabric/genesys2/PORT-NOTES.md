@@ -6005,3 +6005,82 @@ cannot causally affect the value in question, a real, previously-invisible
 timing violation somewhere in this 67,133-endpoint domain is a coherent
 explanation -- and this is now the clearest, most concrete next thing to
 test on real hardware this investigation has had.
+
+## The full resynth ran, and it found real, razor-thin margins throughout every kevgpt_ddr_bundle CDC crossing
+
+Direct continuation of the entry above. Ran the full clean rebuild the
+previous entry called for: `AUTO_INCREMENTAL_CHECKPOINT` was explicitly
+disabled on `synth_1` first -- it was pointing at the *pre-fix* synthesis
+checkpoint, which would have silently defeated the whole point of the
+resynth -- then `reset_run synth_1` -> `launch_runs synth_1` (clean, ~10
+min) -> `reset_run impl_1` -> `launch_runs impl_1 -to_step write_bitstream`
+(no `-jobs`, per this project's own documented `launch_runs -jobs` hang
+risk), against the real `.xpr`. ~56 minutes total real Vivado time.
+Post-build, `report_clock_networks` reconfirms `sys_clk_pin` constrained
+with the identical endpoint counts as the in-memory check.
+
+**`report_timing_summary`'s top-level numbers looked clean (0 failing
+setup/hold/PW design-wide) but turned out not to be trustworthy for this
+specific clock class.** Every clock downstream of `sys_clk_pin`
+(`clk_pll_i`, `clk_out1_xilinx_clk_wizard_clk_wiz_0_0` -- Vivado's own
+names for `ui_clk`/`gen_clk`) is auto-inferred, never explicitly
+`create_clock`'d, and lands in the summary's separate "Other Path Groups
+Table" under an `**async_default**` label -- which showed a suspiciously
+clean WNS +11.120ns / 0-of-3264-failing for `clk_out1_xilinx_clk_wizard_clk_wiz_0_0`,
+directly contradicted by a manual `report_timing -from ... -to ...` query
+on the *same* clock object (confirmed non-duplicate: one clock, correctly
+linked `MASTER_CLOCK=clk_pll_i`), which reproducibly found a real
+`VIOLATED -4.122ns` setup path, 85 logic levels deep, inside the CPU
+core's own multiplier/FPU-operand forwarding logic
+(`cv32e40px_xif_wrapper_i/.../id_stage_i`). Could not fully reconcile why
+the summary table disagrees with a direct query for this clock class --
+flagged as an open sub-question, not investigated further since the path
+itself is unrelated CPU-core logic, not kevgpt's own datapath.
+
+**Auditing `kevgpt_seq`'s own hierarchy directly is where this landed
+squarely on target.** Found the real instance names via `get_cells -hier
+-filter {ORIG_REF_NAME == <name>}` rather than guessing (`u_kevgpt/u_seq`
+= sequencer_vec, `u_kevgpt_ddr_bundle`, `u_kevgpt/u_seq/u_gemv/u_wb` =
+weight_bank_tdp, `u_kevgpt/u_seq/g_kvb_ddr.u_kvb` = kv_bank_ddr,
+`u_kevgpt/u_seq/g_wld.u_wld` = weight_loader_ddr, `u_kevgpt/u_seq/u_gemv` =
+gemv_banked_resident_vec, `u_kevgpt/u_seq/u_attnA` = vec_attn_w), then ran
+`report_timing -to [get_pins ...]` scoped to every D pin across all of them
+(8,803 pins), both setup (`-delay_type max`) and hold (`-delay_type min`).
+
+**Zero VIOLATED paths -- but the 5 worst hold-margin paths, 0.054ns to
+0.067ns, are every `async_fifo_gray` crossing in `kevgpt_ddr_bundle.sv`,
+both directions, all four instances.** Not confined to the "official"
+Gray-pointer synchronizer stages either: the single worst path
+(`u_kv_rd_req_cdc/mem_reg_0_3_6_11/RAMC_D1/CLK` -> `u_rd_engine/cmd_addr_q_reg[11]/D`,
+0.054ns) is the CDC FIFO's own data-memory array, read straight into
+`mig_read_engine`'s DMA command-address register -- not a redundant
+pointer bit the FIFO's own empty/full protocol is designed to tolerate,
+but the actual address value the next weight/KV read command will use.
+The next four worst paths repeat the identical shape against
+`cmd_addr_q_reg`/`data_q_reg` for the other three FIFOs (weight
+read-request, KV write-packet), plus two genuine Gray-pointer synchronizer
+paths at 0.060-0.067ns.
+
+**This is the strongest, most complete explanation this investigation has
+produced.** Systemic (every crossing, both directions, not one outlier),
+on paths that directly determine DMA address/data values rather than
+metastability-tolerant pointer bits, and margins this thin are exactly
+what this project's own JTAG-CDC history already documents as fragile
+enough to flip negative under placement changes elsewhere in the design --
+which is precisely the mechanism the earlier session's build-dependent-
+winner finding needed: different firmware builds, different floorplan/
+congestion, different margin tips negative first, different corrupted
+address, different wrong token. Also consistent with why "care"/id 2213
+recurs so often rather than corruption landing uniformly at random: this
+investigation's own earlier raw-DDR3 diagnostic already flagged "rows
+2048-4095" (which covers id 2213) as where fixation words statistically
+cluster -- a corrupted address landing near a real request's address,
+rather than at a uniformly random one, would predictably favor nearby
+rows.
+
+**Not yet done**: actually fixing these margins (Gray-pointer-bus skew
+constraints, `set_max_delay -datapath_only` on the specific FIFO-memory-
+to-consumer paths identified above, or a deeper pipeline/register stage on
+the consumer side) and a real-hardware re-test. Real, likely-iterative
+RTL/constraint engineering, not a one-line fix like the root clock gap
+was.

@@ -1,11 +1,11 @@
 # Fixation-word investigation: real-hardware-only text corruption in the multi-master DDR read path
 
 Status as of 2026-09-12: **open, not confirmed-fixed on real hardware, but
-the CDC timing-constraint gap is now root-caused with a fix applied and
-awaiting real-hardware verification.** Four concrete, verified pieces of
-progress landed since the previous revision: (1) §8 item 2's owner-FIFO
-backpressure gap is now actually fixed in both `mig_dual_master_arbiter.sv`
-and `mig_read_mux2.sv`, not just proposed — see §4's status update; (2) while
+the CDC timing-constraint gap is now root-caused down to specific paths with
+razor-thin real margin.** Four concrete, verified pieces of progress landed
+since the previous revision: (1) §8 item 2's owner-FIFO backpressure gap is
+now actually fixed in both `mig_dual_master_arbiter.sv` and
+`mig_read_mux2.sv`, not just proposed — see §4's status update; (2) while
 building the gate to verify that fix, a second, *separate* real bug was found
 and fixed — a testbench-only clock-domain mismatch that had been silently
 breaking `tb_kevgpt_ddr_bundle.sv` for weeks (see §4a); (3) §8 item 3's
@@ -14,23 +14,29 @@ cheap version — see §2a) and, in the process, produced the most precise
 real-hardware evidence this investigation has yet captured: a specific,
 repeatable wrong-token pick ("care"/"carefree") with a real-hardware/build-
 dependent twist pointing at a timing mechanism; (4) **§6's clock-naming
-question is resolved**: `clk_200mhz_p`, MIG's DDR3 reference clock and the
-root of the entire `gen_clk`/`ui_clk` domain, was confirmed via a live query
-against the real implemented design to have **never been given a
-`create_clock` anywhere in this target's actual XDC fileset** — 67,133 clock
-endpoints, effectively the whole non-JTAG/SPI portion of the chip, with zero
-real static timing analysis ever applied, in any build that has run on this
-board. A one-line fix (a correct line already existed, orphaned, in a
-sibling file that was never added to the build) is applied and verified for
-clock-graph connectivity against the live design; **not yet verified for
-timing closure or real-hardware effect** — needs a full resynthesis and
-real-hardware re-test, the natural next step. See §6's status update. None
-of these is *confirmed* to be *the* fixation-word cause yet, but (4) is the
-strongest, most concrete lead this investigation has produced — a large,
-previously entirely invisible swath of unconstrained logic is a genuinely
-sufficient explanation for the deterministic-per-build, wrong-per-build
-symptom §2a documented. §4a is explicitly ruled out as a hardware
-explanation, since it lives entirely in test code. This document is the
+question is resolved, and it's now the leading hypothesis by a wide
+margin**: `clk_200mhz_p`, MIG's DDR3 reference clock and the root of the
+entire `gen_clk`/`ui_clk` domain, was confirmed via a live query against the
+real implemented design to have **never been given a `create_clock`
+anywhere in this target's actual XDC fileset** — 67,133 clock endpoints,
+effectively the whole non-JTAG/SPI portion of the chip, with zero real
+static timing analysis ever applied, in any build that has run on this
+board. Fixed with one line (a correct constraint already existed, orphaned,
+in a sibling file never added to the build), and a full clean resynthesis
++ reimplementation + rebitstream cycle run against it (~56 minutes) found
+**every `async_fifo_gray` CDC crossing inside `kevgpt_ddr_bundle.sv` — both
+directions, all four instances — sitting at 0.054–0.067ns hold margin**, on
+paths that include the crossing FIFOs' own data-memory output feeding
+directly into the DMA engines' command-address/data registers, not just
+the Gray-pointer synchronizer stages. This is systemic (every crossing, not
+one outlier), on paths that directly determine DMA address/data values, and
+margins this thin are exactly what this project's own JTAG-CDC history
+(§6) already documents as fragile enough to flip negative under placement
+changes from unrelated parts of the design — a coherent, physical
+explanation for §2a's build-dependent-winner finding. Not yet fixed or
+verified on real hardware — see §6/§8 item 4. §4a is explicitly ruled out
+as a hardware explanation, since it lives entirely in test code. This
+document is the
 standalone reference for the whole investigation — everything needed to
 either continue it or hand it off, without reconstructing the trail from
 `model/SCALE-UP-LOG.md`'s chronological entries (which have the full
@@ -524,17 +530,86 @@ automatically once this one root clock exists; no additional
 `gen_clk`/`ui_clk`/MIG/kevgpt/`cpu_ddr_bridge` portion of the chip — which
 is to say, essentially the whole design outside JTAG/SPI-slave — has never
 had real static timing analysis applied to it in any build that has ever
-run on this board. It does **not** yet confirm that real timing violations
-exist there, or that fixing this constraint changes real-hardware behavior
-— that requires a full clean re-synthesis/re-implementation/re-bitstream
-cycle (not an incremental `reset_run`, matching §8 item 4's original
-caution) and a real-hardware re-test of the same greedy-mode divergence
-test from §2/§2a. Given §2a's own finding — that the specific corrupted
-token changed between two firmware builds differing only in a diagnostic
-read that can't causally affect the value in question — a genuine,
-previously-invisible timing violation somewhere in this now-finally-checkable
-67,133-endpoint domain is a strong, coherent explanation for *why* that
-would happen, and this is now the highest-value thing to test next.
+run on this board.
+
+**Update: the full clean rebuild is done, and it found real, systemic,
+razor-thin CDC margins throughout `kevgpt_ddr_bundle.sv`'s entire DMA
+crossing scheme.** Ran the full clean re-synthesis/re-implementation/
+re-bitstream cycle this required (`AUTO_INCREMENTAL_CHECKPOINT` disabled
+first — `synth_1` had it pointing at the *pre-fix* checkpoint, which would
+have silently defeated the point; ~56 minutes real Vivado time, no `-jobs`
+per this project's own known `launch_runs -jobs` hang risk). Post-build,
+`sys_clk_pin` is confirmed constrained with the same 67,133/232 endpoint
+counts, and the top-level `report_timing_summary` shows 0 failing setup/
+hold/pulse-width endpoints design-wide.
+
+That top-level "0 failing" number is misleading on its own, though — it's
+computed per named "Path Group," and every clock downstream of `sys_clk_pin`
+(`clk_pll_i`, `clk_out1_xilinx_clk_wizard_clk_wiz_0_0` — Vivado's own names
+for the MIG-PLL and Clocking-Wizard outputs, i.e. `ui_clk`/`gen_clk`) is an
+*auto-inferred* generated clock, never explicitly `create_clock`'d, and
+lands in `report_timing_summary`'s separate "Other Path Groups Table" under
+an `**async_default**` label showing a suspiciously clean aggregate (WNS
++11.120ns, 0/3264 failing) that a direct, explicit `report_timing -from
+... -to ...` query on the *same* clock (confirmed non-duplicate: one
+`clk_out1_...` clock object, `IS_GENERATED=1`, correctly linked
+`MASTER_CLOCK=clk_pll_i`) flatly contradicts — reproducibly, two different
+query constructions, same result: a real, VIOLATED -4.122ns setup path, 85
+logic levels deep, inside the CPU core's own multiplier/FPU-operand
+forwarding logic (`cv32e40px_xif_wrapper_i/.../id_stage_i`). This
+discrepancy between the summary table and a direct path query was not fully
+reconciled — worth understanding properly before trusting `report_timing_summary`'s
+top-line numbers for this class of auto-inferred clock again — but it's not
+load-bearing for what follows, because that specific violated path is
+unrelated CPU-core logic, not `kevgpt_seq`'s own datapath.
+
+**Directly auditing `kevgpt_seq`'s own hierarchy is where this lands
+squarely on target.** `report_timing -to [get_pins ...]` scoped to every D
+pin inside `sequencer_vec`/`kevgpt_ddr_bundle`/`weight_bank_tdp`/
+`kv_bank_ddr`/`weight_loader_ddr`/`gemv_banked_resident_vec`/`vec_attn_w`
+(8,803 pins) found **zero VIOLATED paths** — but the worst-margin paths,
+setup and hold both, are all inside `kevgpt_ddr_bundle.sv`, and the hold
+margins are startlingly thin: the 5 worst hold paths, **0.054ns to
+0.067ns**, are *every* `async_fifo_gray` instance in the bundle (KV
+read-request, weight read-request, KV write-packet, KV write-ack), in both
+directions, and — critically — not confined to the "official" Gray-pointer
+synchronizer stages. The single worst path
+(`u_kv_rd_req_cdc/mem_reg_.../RAMC_D1/CLK` → `u_rd_engine/cmd_addr_q_reg[11]/D`,
+0.054ns) is the CDC FIFO's own **data memory array**, read straight into
+`mig_read_engine`'s **DMA command-address register** — not a redundant
+pointer bit protected by the FIFO's own empty/full logic, but the actual
+address value a weight/KV read command will use. The next four worst paths
+repeat the same shape against `cmd_addr_q_reg`/`data_q_reg` for the other
+three FIFOs, plus two genuine Gray-pointer synchronizer paths
+(`wr_gray_q_reg` → `wr_gray_rsync1_q_reg`) at 0.060–0.067ns.
+
+**This is the strongest, most complete explanation this investigation has
+produced.** It's systemic (every crossing, both directions, not one
+outlier), it's on paths that directly determine DMA address/data values
+(not just synchronizer metastability that the FIFO's own protocol is
+designed to tolerate), and margins this thin are exactly what the
+project's own JTAG-CDC history (this same file, above) already documents
+as fragile enough to flip negative under placement changes from *unrelated*
+parts of the design — which is precisely the mechanism §2a's build-
+dependent-winner finding needed: different firmware builds, different
+overall floorplan/congestion, different specific margin that tips negative
+first, different specific corrupted address, different specific wrong
+token. It's also consistent with why "care"/id 2213 recurs so often rather
+than corruption landing uniformly at random — this investigation's own
+earlier raw-DDR3 diagnostic work already flagged "rows 2048–4095" (which
+covers id 2213) as where fixation words statistically cluster; a corrupted
+DMA address landing near a real request's address, rather than at a
+uniformly random one, would predictably favor nearby rows.
+
+**Not yet done**: actually fixing these margins (Gray-pointer-bus skew
+constraints, `set_max_delay -datapath_only` on the specific FIFO-memory-to-
+consumer paths identified above, or a deeper pipeline stage) and a
+real-hardware re-test. This needs real RTL/constraint engineering, likely
+iterative, and is the natural continuation of this section rather than a
+one-line fix like the root-clock gap was. Raw report files (`timing_summary_after_fix.rpt`,
+`kevgpt_setup_audit.rpt`, `kevgpt_hold_audit.rpt`, `timing_new_domain.rpt`)
+are session scratch files, not committed — §9 has the exact queries to
+reproduce them against the now-fixed `constraints.xdc`.
 
 ## 6a. External review: corrections and a co-equal hypothesis
 
@@ -690,26 +765,31 @@ original order below since item 4 was already next regardless.
    `create_clock -period 5.000 -name sys_clk_pin [get_ports clk_200mhz_p]`
    to `constraints.xdc`, verified in-memory (moved to "Constrained Clocks",
    `check_timing` clean) against the live design before committing it to the
-   file. **Still needed**: a full clean re-synthesis/re-implementation/
-   re-bitstream cycle (not an incremental `reset_run`) to see what real
-   slack this constraint surfaces, followed by a real-hardware re-test of
-   §2/§2a's greedy-mode divergence test on the new bitstream. This is now
-   the single highest-value remaining step — everything else in this list
-   was scoped around not being able to see real timing in this domain at
-   all; that's no longer true. Gray-pointer-bus skew constraints
-   (`set_max_delay -datapath_only`, `set_bus_skew` from the real synthesized
-   Gray-register names) and `report_cdc -details` (licensing unverified)
-   remain worth trying once a build with this constraint exists to check
-   them against — a 2-FF synchronizer alone doesn't protect a multi-bit bus
-   if routing skew between bits is uncontrolled, and that question was moot
-   without a defined clock to check skew relative to in the first place.
+   file. **The full clean re-synthesis/re-implementation/re-bitstream cycle
+   is now also done** (~56 minutes, `AUTO_INCREMENTAL_CHECKPOINT` explicitly
+   disabled first) **and found the real thing**: every `async_fifo_gray`
+   crossing inside `kevgpt_ddr_bundle.sv` — both directions, all four
+   instances — has razor-thin (0.054–0.067ns) hold margin, on paths that
+   include the FIFO's own data-memory output feeding straight into
+   `mig_read_engine`/`mig_write_engine`'s command-address/data registers,
+   not just the Gray-pointer synchronizer stages. See §6's status update for
+   the full account, including a not-fully-reconciled discrepancy between
+   `report_timing_summary`'s top-line numbers and a direct `report_timing`
+   query for this class of auto-inferred clock (not load-bearing for the
+   `kevgpt_seq`-hierarchy audit that found the thin margins, since that used
+   direct queries throughout). **Now needed**: fix these margins (Gray-
+   pointer-bus skew constraints, `set_max_delay -datapath_only` on the
+   specific FIFO-memory-to-consumer paths identified in §6, or a deeper
+   pipeline/register stage on the consumer side) and a real-hardware
+   re-test of §2/§2a's greedy-mode divergence test. This is real,
+   iterative RTL/constraint engineering, not a one-line fix like the root
+   clock gap was.
    One adjacent question not investigated here: `spi_slave_clk_pin` has no
-   `set_clock_groups` of its own (only `jtag_clk_pin` does, line ~18) — once
-   `sys_clk_pin` and its derived clocks exist for real, Vivado will derive
-   *some* implicit relationship between spi_slave and that whole new domain
-   too, the same class of gap this section's own header comment already
-   documents for JTAG. Worth checking after the resynthesis, not blocking
-   it.
+   `set_clock_groups` of its own (only `jtag_clk_pin` does, line ~18) — now
+   that `sys_clk_pin` and its derived clocks are real, Vivado derives *some*
+   implicit relationship between spi_slave and that whole domain too, the
+   same class of gap this section's own header comment already documents
+   for JTAG. Worth checking alongside the margin fix above.
 5. **If items 1–4 don't localize the defect**, build the full
    `tb_kevgpt_ddr_bundle_full.sv` contention testbench (weight + KV + CPU
    traffic simultaneously, randomized MIG return latency within whatever
@@ -776,3 +856,30 @@ original order below since item 4 was already next regardless.
   impl_1`/`report_clock_networks` sequence to reproduce.
 - Diff: `constraints.xdc` (the `create_clock` fix, §6/§8 item 4) in
   `kevgpt-genesys2-soc`.
+- The full clean rebuild that found the thin CDC margins: `reset_run
+  synth_1` (with `AUTO_INCREMENTAL_CHECKPOINT` explicitly disabled first —
+  it was pointing at the pre-fix checkpoint) → `launch_runs synth_1` →
+  `reset_run impl_1` → `launch_runs impl_1 -to_step write_bitstream`, no
+  `-jobs` (this project's own known hang risk with `launch_runs -jobs`),
+  against the same `.xpr` as above. ~56 minutes real Vivado time. Post-build
+  `report_clock_networks` reconfirms `sys_clk_pin` constrained with the same
+  endpoint counts; `report_timing_summary`'s top-level numbers show 0
+  failing setup/hold/PW design-wide but are not fully trustworthy for
+  auto-inferred clocks (see §6's status update for the unreconciled
+  `**async_default**`-table-vs-direct-query discrepancy). The `kevgpt_seq`-
+  hierarchy-specific audit that found the real thin margins used direct
+  `report_timing -to [get_pins ...]` queries scoped to every D pin inside
+  `sequencer_vec`/`kevgpt_ddr_bundle`/`weight_bank_tdp`/`kv_bank_ddr`/
+  `weight_loader_ddr`/`gemv_banked_resident_vec`/`vec_attn_w` (8,803 pins;
+  real hierarchy paths discovered via `get_cells -hier -filter
+  {ORIG_REF_NAME == <name>}`, not guessed), both `-delay_type max` (setup)
+  and `-delay_type min` (hold), `-max_paths 15 -sort_by slack`. Worst hold
+  path: `u_kevgpt_ddr_bundle/u_kv_rd_req_cdc/mem_reg_0_3_6_11/RAMC_D1/CLK`
+  (clocked by `clk_out1_xilinx_clk_wizard_clk_wiz_0_0`, i.e. `gen_clk`) →
+  `u_kevgpt_ddr_bundle/u_rd_engine/cmd_addr_q_reg[11]/D` (clocked by
+  `clk_pll_i`, i.e. `ui_clk`), slack 0.054ns. Query scripts and raw report
+  files are session scratch files, not committed — rerun the same
+  `open_project`/`open_run impl_1`/`get_cells -hier`/`report_timing`
+  sequence against the now-fixed `constraints.xdc` to reproduce (no need to
+  redo the full resynthesis if the bitstream from this session is still
+  the one loaded/available).
