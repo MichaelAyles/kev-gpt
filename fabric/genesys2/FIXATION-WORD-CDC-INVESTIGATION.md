@@ -1,25 +1,40 @@
 # Fixation-word investigation: real-hardware-only text corruption in the multi-master DDR read path
 
-Status as of 2026-09-12: **open, not root-caused, not fixed on real hardware.**
-Three concrete, verified pieces of progress landed since the previous
-revision, none of which closes the investigation: (1) §8 item 2's owner-FIFO
+Status as of 2026-09-12: **open, not confirmed-fixed on real hardware, but
+the CDC timing-constraint gap is now root-caused with a fix applied and
+awaiting real-hardware verification.** Four concrete, verified pieces of
+progress landed since the previous revision: (1) §8 item 2's owner-FIFO
 backpressure gap is now actually fixed in both `mig_dual_master_arbiter.sv`
 and `mig_read_mux2.sv`, not just proposed — see §4's status update; (2) while
 building the gate to verify that fix, a second, *separate* real bug was found
 and fixed — a testbench-only clock-domain mismatch that had been silently
 breaking `tb_kevgpt_ddr_bundle.sv` for weeks (see §4a); (3) §8 item 3's
 weight-traffic-only isolation experiment was run on real hardware (partial/
-cheap version — see new §2a) and, in the process, produced the most precise
+cheap version — see §2a) and, in the process, produced the most precise
 real-hardware evidence this investigation has yet captured: a specific,
 repeatable wrong-token pick ("care"/"carefree") with a real-hardware/build-
-dependent twist that shifts weight back toward §6's timing hypothesis. None
-of the three fixes/findings is confirmed to be *the* fixation-word cause;
-§4a in particular is explicitly ruled out as a hardware explanation, since it
-lives entirely in test code. This document is the standalone reference for
-the whole investigation — everything needed to either continue it or hand it
-off, without reconstructing the trail from `model/SCALE-UP-LOG.md`'s
-chronological entries (which have the full blow-by-blow if this summary
-needs expanding).
+dependent twist pointing at a timing mechanism; (4) **§6's clock-naming
+question is resolved**: `clk_200mhz_p`, MIG's DDR3 reference clock and the
+root of the entire `gen_clk`/`ui_clk` domain, was confirmed via a live query
+against the real implemented design to have **never been given a
+`create_clock` anywhere in this target's actual XDC fileset** — 67,133 clock
+endpoints, effectively the whole non-JTAG/SPI portion of the chip, with zero
+real static timing analysis ever applied, in any build that has run on this
+board. A one-line fix (a correct line already existed, orphaned, in a
+sibling file that was never added to the build) is applied and verified for
+clock-graph connectivity against the live design; **not yet verified for
+timing closure or real-hardware effect** — needs a full resynthesis and
+real-hardware re-test, the natural next step. See §6's status update. None
+of these is *confirmed* to be *the* fixation-word cause yet, but (4) is the
+strongest, most concrete lead this investigation has produced — a large,
+previously entirely invisible swath of unconstrained logic is a genuinely
+sufficient explanation for the deterministic-per-build, wrong-per-build
+symptom §2a documented. §4a is explicitly ruled out as a hardware
+explanation, since it lives entirely in test code. This document is the
+standalone reference for the whole investigation — everything needed to
+either continue it or hand it off, without reconstructing the trail from
+`model/SCALE-UP-LOG.md`'s chronological entries (which have the full
+blow-by-blow if this summary needs expanding).
 
 **Revision note:** this document's first version over-weighted the CDC
 timing-constraint gap (§6) as *the* leading hypothesis. An external review of
@@ -457,6 +472,70 @@ reading — but I don't have a confirmed explanation for why it's short if
 (querying synchronizer pins directly, plus `report_cdc` if licensed) for
 resolving this cleanly instead of guessing again.
 
+**Status update (2026-09-12): resolved, and it's the second, more alarming
+reading.** Ran §8 item 4's procedure for real — `open_project`/`open_run
+impl_1` on the actual live `.xpr` that produced the currently-deployed
+bitstream (not an archived checkpoint), `report_clock_networks`, direct
+pin/cell discovery instead of guessed hierarchy paths. Result:
+**`clk_200mhz_p` — MIG's 200MHz DDR3 reference clock, the actual pin the
+board's differential oscillator drives — sits under `report_clock_networks`'s
+"Unconstrained Clocks" heading, with 67,133 clock endpoints and 232
+non-clock endpoints.** That single missing root clock explains everything
+this section couldn't previously resolve: it's not OOC-hidden-but-fine, it's
+not a query artifact (confirmed via `check_timing`, which independently
+reported the same 0-clock-source-for-this-domain picture before the fix),
+and the "short Unconstrained Path Table" red herring makes sense now too —
+Vivado's timing engine doesn't enumerate "unconstrained" paths for endpoints
+that were never associated with any clock context at all; it only flags
+paths that have *some* clock but a missing exception. `gen_clk`/`ui_clk`
+never showing up as named clock objects was because they don't exist as
+*top-level* clocks at all — the OOC IPs' own internal clock objects
+(`clk_pll_i`, `clk_out1_xilinx_clk_wizard_clk_wiz_0_0` — confirmed via
+direct query on `kevgpt_ddr_bundle`'s own sync-register cells) exist as
+bookkeeping inside their own OOC scope, but were never linked to a real,
+analyzed top-level clock tree because nothing upstream of them was ever
+constrained.
+
+**Root cause, and it's almost embarrassingly simple**: `clk_200mhz_p`'s
+`create_clock` was never added to this target's actual XDC fileset. A
+correct line already exists, verbatim, in an *orphaned* file in the same
+directory (`mig_traffic_gen_top.xdc`, a leftover from an earlier standalone
+MIG example-design bring-up) — but that file was never referenced by
+`core-v-mini-mcu-fpga.core`'s `genesys2`/`genesys2_kevgpt` filesets (only
+`pin_assign.xdc` + `constraints.xdc` + `ddr3.xdc` are). The pin-level
+`PACKAGE_PIN`/`IOSTANDARD` constraints made it into `pin_assign.xdc`
+correctly; the `create_clock` line got left behind.
+
+**Fix applied and verified for clock-graph connectivity** (not yet for
+timing closure or on real hardware): added
+`create_clock -period 5.000 -name sys_clk_pin [get_ports clk_200mhz_p]` to
+`constraints.xdc` (matching `mig_traffic_gen_top.xdc`'s already-correct
+line exactly). Verified by applying it in-memory against the same live
+implemented design and re-querying: `clk_200mhz_p` moved from
+"Unconstrained Clocks" to "Constrained Clocks" immediately, and a follow-up
+`check_timing` reported 0 `no_clock` / 0 `unconstrained_internal_endpoints`
+/ 0 `multiple_clock` / 0 `generated_clocks`-not-connected-to-source —
+Vivado's own generated-clock inference correctly derives the entire
+downstream MIG-PLL → Clocking-Wizard → `gen_clk`/`ui_clk` chain
+automatically once this one root clock exists; no additional
+`create_generated_clock` lines were needed.
+
+**What this does and doesn't prove**: this confirms the *entire*
+`gen_clk`/`ui_clk`/MIG/kevgpt/`cpu_ddr_bridge` portion of the chip — which
+is to say, essentially the whole design outside JTAG/SPI-slave — has never
+had real static timing analysis applied to it in any build that has ever
+run on this board. It does **not** yet confirm that real timing violations
+exist there, or that fixing this constraint changes real-hardware behavior
+— that requires a full clean re-synthesis/re-implementation/re-bitstream
+cycle (not an incremental `reset_run`, matching §8 item 4's original
+caution) and a real-hardware re-test of the same greedy-mode divergence
+test from §2/§2a. Given §2a's own finding — that the specific corrupted
+token changed between two firmware builds differing only in a diagnostic
+read that can't causally affect the value in question — a genuine,
+previously-invisible timing violation somewhere in this now-finally-checkable
+67,133-endpoint domain is a strong, coherent explanation for *why* that
+would happen, and this is now the highest-value thing to test next.
+
 ## 6a. External review: corrections and a co-equal hypothesis
 
 A review of this document's first draft (2026-09-11, pasted into the
@@ -597,32 +676,40 @@ original order below since item 4 was already next regardless.
    `cpu_ddr_bridge` elimination, and the `mig_dual_master_arbiter`/
    `mig_read_mux2` bypass bisections originally proposed here, remain open
    if the timing-hypothesis work below doesn't localize it first.
-4. **In parallel, resolve §6's clock-naming question properly.** Open the
-   project interactively (not via `open_run` on an archived checkpoint) and
-   query the actual synchronizer flip-flops directly rather than guessing
-   hierarchy paths:
-   ```tcl
-   report_clocks -verbose
-   report_clock_networks
-   get_cells -hier -filter {NAME =~ *kevgpt_ddr_bundle*async_fifo_gray*}
-   # for each representative sync register on both sides of a crossing:
-   get_clocks -of_objects [get_pins <sync_ff_name>/C]
-   report_property [get_cells <sync_ff_name>]   ;# then check LOC placement,
-                                                  ;# the two sync stages should
-                                                  ;# be physically close
-   ```
-   Try `report_cdc -details` / `report_cdc -verbose` if licensed (Vivado ML
-   Enterprise CDC methodology — availability on this installation is
-   unverified) for a direct classification of each synchronizer as safe/
-   unsafe. If clocks are confirmed genuinely unconstrained, add the correct
-   `create_clock`/`set_clock_groups -asynchronous` pair (matching the JTAG
-   precedent at `constraints.xdc` line 18) *and* Gray-pointer-bus skew
-   constraints (`set_max_delay -datapath_only` and, where supported,
-   `set_bus_skew`, from the real synthesized Gray-register names — a 2-FF
-   synchronizer alone doesn't protect a multi-bit bus if routing skew between
-   bits is uncontrolled), then re-synthesize/re-implement from scratch (not
-   an incremental `reset_run`) and check whether previously-"passing" paths
-   now report real, possibly negative, slack.
+4. ~~In parallel, resolve §6's clock-naming question properly.~~ **Done —
+   root cause found and a fix applied, not yet verified on real hardware.**
+   `clk_200mhz_p` (MIG's 200MHz DDR3 reference clock) was confirmed via a
+   live query against the real implemented design (`report_clock_networks`
+   on `open_run impl_1` of the actual `.xpr`) to be genuinely unconstrained
+   — 67,133 clock + 232 non-clock endpoints, essentially the entire
+   `gen_clk`/`ui_clk`/MIG/kevgpt/`cpu_ddr_bridge` domain, never covered by
+   real STA in any build. Root cause: the `create_clock` line for it exists,
+   correctly, in an orphaned sibling file (`mig_traffic_gen_top.xdc`) that
+   was never added to this target's actual XDC fileset. See §6's status
+   update for the full account. Added
+   `create_clock -period 5.000 -name sys_clk_pin [get_ports clk_200mhz_p]`
+   to `constraints.xdc`, verified in-memory (moved to "Constrained Clocks",
+   `check_timing` clean) against the live design before committing it to the
+   file. **Still needed**: a full clean re-synthesis/re-implementation/
+   re-bitstream cycle (not an incremental `reset_run`) to see what real
+   slack this constraint surfaces, followed by a real-hardware re-test of
+   §2/§2a's greedy-mode divergence test on the new bitstream. This is now
+   the single highest-value remaining step — everything else in this list
+   was scoped around not being able to see real timing in this domain at
+   all; that's no longer true. Gray-pointer-bus skew constraints
+   (`set_max_delay -datapath_only`, `set_bus_skew` from the real synthesized
+   Gray-register names) and `report_cdc -details` (licensing unverified)
+   remain worth trying once a build with this constraint exists to check
+   them against — a 2-FF synchronizer alone doesn't protect a multi-bit bus
+   if routing skew between bits is uncontrolled, and that question was moot
+   without a defined clock to check skew relative to in the first place.
+   One adjacent question not investigated here: `spi_slave_clk_pin` has no
+   `set_clock_groups` of its own (only `jtag_clk_pin` does, line ~18) — once
+   `sys_clk_pin` and its derived clocks exist for real, Vivado will derive
+   *some* implicit relationship between spi_slave and that whole new domain
+   too, the same class of gap this section's own header comment already
+   documents for JTAG. Worth checking after the resynthesis, not blocking
+   it.
 5. **If items 1–4 don't localize the defect**, build the full
    `tb_kevgpt_ddr_bundle_full.sv` contention testbench (weight + KV + CPU
    traffic simultaneously, randomized MIG return latency within whatever
@@ -675,3 +762,17 @@ original order below since item 4 was already next regardless.
   `mig_read_mux2.sv` (owner-FIFO backpressure, §4/§8 item 2) in
   `kevgpt-genesys2-soc`; `mig_read_mux2.sv` (kept in sync) and
   `tb_kevgpt_ddr_bundle.sv` (clock fix, §4a) in `kev-gpt`.
+- §6's clock-graph queries (Vivado 2022.2, batch-mode TCL against
+  `hw/vendor/esl_epfl_x_heep/build/openhwgroup.org_systems_core-v-mini-mcu_1.0.5/genesys2_kevgpt-vivado/openhwgroup.org_systems_core-v-mini-mcu_1.0.5.xpr`,
+  `open_run impl_1` — the real implemented design, Sep 6 02:23 build, matching
+  the currently-deployed bitstream): `report_clock_networks` before the fix
+  listed `clk_200mhz_p` under "Unconstrained Clocks" (67,133 clock + 232
+  non-clock endpoints); after applying `create_clock -period 5.000 -name
+  sys_clk_pin [get_ports clk_200mhz_p]` in-memory, it moved to "Constrained
+  Clocks" and `check_timing` reported 0 `no_clock` / 0
+  `unconstrained_internal_endpoints` / 0 `multiple_clock` / 0
+  `generated_clocks`-not-connected. Query scripts and raw logs are session
+  scratch files, not committed — rerun the same `open_project`/`open_run
+  impl_1`/`report_clock_networks` sequence to reproduce.
+- Diff: `constraints.xdc` (the `create_clock` fix, §6/§8 item 4) in
+  `kevgpt-genesys2-soc`.

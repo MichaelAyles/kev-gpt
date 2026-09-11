@@ -5935,3 +5935,73 @@ fixed, boot-independent addressing bug.
 All 4 diagnostic toggles (`KEVGPT_FORCE_GREEDY`, `KEVGPT_DIAG_DUMP_HEAD`,
 `KEVGPT_PRINT_IDS_ONLY`, `KEVGPT_DIAG_LOGIT_PROBE`) reverted to off before
 committing.
+
+## The CDC clock-naming question, resolved: clk_200mhz_p was never constrained at all
+
+Part of the fixation-word investigation (`FIXATION-WORD-CDC-INVESTIGATION.md`
+§6/§8 item 4 has the full writeup). Earlier work in this investigation had
+narrowed the question to two possibilities and couldn't distinguish them
+from static inspection: either MIG/Clocking-Wizard's internal clocks were
+legitimately hidden behind Vivado's out-of-context (OOC) IP methodology
+("fine, just invisible to the queries tried"), or `gen_clk`/`ui_clk`
+genuinely had no top-level timing closure at all ("not fine"). Resolved it
+by actually doing what was recommended: opened the real project (not an
+archived checkpoint) --
+`hw/vendor/esl_epfl_x_heep/build/openhwgroup.org_systems_core-v-mini-mcu_1.0.5/genesys2_kevgpt-vivado/openhwgroup.org_systems_core-v-mini-mcu_1.0.5.xpr`,
+the actual `.xpr` that produced the currently-deployed bitstream (Sep 6
+02:23, matches the bitstream timestamp) -- via `vivado -mode batch`,
+`open_run impl_1`, and ran `report_clocks -verbose` / `report_clock_networks`
+against the live implemented design.
+
+**Answer: the second, worse one.** `report_clock_networks` lists
+`clk_200mhz_p` -- MIG's 200MHz DDR3 reference clock, the actual board pin
+the differential oscillator drives -- directly under "Unconstrained Clocks":
+**67,133 clock endpoints, 232 non-clock endpoints**. That's not a corner of
+the design; that's essentially the entire `gen_clk`/`ui_clk`/MIG/kevgpt/
+`cpu_ddr_bridge` domain (everything except JTAG and SPI-slave), with zero
+real static timing analysis ever applied, in every build that has produced
+a bitstream for this board so far. This also resolves the "why was the
+Unconstrained Path Table short" mystery from earlier in this investigation:
+Vivado's timing engine doesn't enumerate paths as "unconstrained" for
+endpoints that were never associated with any clock context at all -- it
+only flags paths that have *some* clock but a missing exception. A whole
+domain with no root clock produces a short report, not a long one; the
+absence of alarm bells was itself the bug.
+
+**Root cause, once found, was almost anticlimactic.** `clk_200mhz_p`'s pin
+constraints (`PACKAGE_PIN`/`IOSTANDARD`) are correctly in `pin_assign.xdc`.
+Its `create_clock` line is *also* already correct, verbatim, in
+`hw/vendor/esl_epfl_x_heep/hw/fpga/constraints/genesys2/mig_traffic_gen_top.xdc`
+-- but that file is an orphaned leftover from an earlier standalone MIG
+example-design bring-up, and was never added to this target's actual
+fileset (`core-v-mini-mcu-fpga.core`'s `genesys2`/`genesys2_kevgpt` filesets
+list only `pin_assign.xdc` + `constraints.xdc` + `ddr3.xdc`). The correct
+line existed in the repo this whole time, just in a file nothing ever
+built.
+
+**Fix applied, verified for clock-graph connectivity against the live
+design before touching the real file.** Re-applied
+`create_clock -period 5.000 -name sys_clk_pin [get_ports clk_200mhz_p]`
+in-memory against the same open `impl_1` design first: `clk_200mhz_p` moved
+from "Unconstrained Clocks" to "Constrained Clocks" immediately, and a
+follow-up `check_timing` reported 0 `no_clock` / 0
+`unconstrained_internal_endpoints` / 0 `multiple_clock` / 0
+`generated_clocks`-not-connected-to-source -- Vivado's own generated-clock
+inference correctly derives the whole downstream MIG-PLL -> Clocking-Wizard
+-> `gen_clk`/`ui_clk` chain automatically once this one root clock exists,
+no further `create_generated_clock` lines needed. Only then added the line
+for real to `constraints.xdc`, next to the existing `jtag_clk_pin`/
+`spi_slave_clk_pin` `create_clock` statements.
+
+**What this doesn't yet prove**: clock-graph connectivity isn't timing
+closure. This confirms the whole domain has never been *checkable*, not
+that it's currently *broken* -- that needs a full clean re-synthesis/
+re-implementation/re-bitstream cycle (not an incremental `reset_run`) to
+see what real slack this constraint surfaces, and a real-hardware re-test
+of the greedy-mode divergence test afterward. Given the previous session's
+finding that the specific wrong token picked for 3/5 test prompts changed
+between two firmware builds differing only in a diagnostic read that
+cannot causally affect the value in question, a real, previously-invisible
+timing violation somewhere in this 67,133-endpoint domain is a coherent
+explanation -- and this is now the clearest, most concrete next thing to
+test on real hardware this investigation has had.
