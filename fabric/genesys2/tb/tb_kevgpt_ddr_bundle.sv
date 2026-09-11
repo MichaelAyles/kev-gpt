@@ -151,9 +151,29 @@ module tb_kevgpt_ddr_bundle;
   wire wb_ld_rst, wb_w_we;
   wire [31:0] wb_w_data;
 
-  // ui_clk here, not clk -- see the ldn_cnt comment above.
+  // clk (== gen_clk) here, not ui_clk: weight_bank_tdp/weight_loader_ddr live
+  // inside sequencer_vec.sv's gen_clk-domain hierarchy on real hardware, and
+  // kevgpt_ddr_bundle.sv now does a REAL CDC for wl_rd_req/wl_rd_ret
+  // (u_wl_rd_req_cdc/u_wl_rd_ret_cdc, async_fifo_gray) -- so this side must
+  // actually run on gen_clk for that CDC's rd_clk_i/rd_ready_i domain
+  // assumptions to hold. (This corrects an earlier version of this
+  // testbench, from before that CDC existed, that ran these two DUTs on
+  // ui_clk as a simplification -- seen in the ldn_cnt comment below. Left
+  // on ui_clk after the CDC was added, weight_loader_ddr's rd_ret_ready
+  // became an ASYNCHRONOUS signal to u_wl_rd_ret_cdc's own rd_clk_i, with no
+  // synchronizer of its own -- caused rd_ready_i to be sampled at ui_clk's
+  // faster, unrelated rate instead of the FIFO's own gen_clk rate, which
+  // intermittently double-popped a single logical beat (confirmed via a
+  // direct wr/rd accept count on u_wl_rd_ret_cdc's own ports: 10 real
+  // writes vs 14 observed reads, a 4-pop excess exactly equal to
+  // CDC_FIFO_DEPTH -- the classic signature of this class of bug, not a
+  // pointer-math defect in async_fifo_gray.sv itself, which this incident
+  // re-confirms is correct once both of its ports are driven from their
+  // OWN true clock domains). This was a testbench-only wiring bug -- real
+  // hardware never had this mismatch, since weight_loader_ddr's clk port is
+  // always gen_clk there.
   weight_bank_tdp #(.LANES(LANES), .WWORDS(WWORDS), .DP(0), .MEM_PRIMITIVE("block")) u_wb (
-      .clk(ui_clk), .clk2x(ui_clk),
+      .clk(clk), .clk2x(clk),
       .ld_rst(wb_ld_rst), .w_we(wb_w_we), .w_data(wb_w_data),
       .raddr_b(wb_raddr_b), .rword_b(wb_rword_b), .rword1_b(),
       .raddr_a({$clog2(WWORDS){1'b0}}), .rword_a(), .rword1_a()
@@ -169,9 +189,9 @@ module tb_kevgpt_ddr_bundle;
   wire                  wl_rd_ret_valid, wl_rd_ret_ready;
   wire [DATA_W-1:0]     wl_rd_ret_data;
 
-  // ui_clk here, not clk -- see the ldn_cnt comment above.
+  // clk (== gen_clk) here, not ui_clk -- see u_wb's instantiation above.
   weight_loader_ddr #(.ADDR_W(ADDR_W), .DATA_W(DATA_W)) u_wl_dut (
-      .clk(ui_clk), .rst(ui_rst),
+      .clk(clk), .rst(rst),
       .ld_start(ld_start), .ld_ddr_addr(ld_ddr_addr), .ld_words(ld_words), .ld_done(ld_done),
       .wb_ld_rst(wb_ld_rst), .wb_w_we(wb_w_we), .wb_w_data(wb_w_data),
       .rd_req_valid(wl_rd_req_valid), .rd_req_ready(wl_rd_req_ready), .rd_req_addr(wl_rd_req_addr),
@@ -286,16 +306,13 @@ module tb_kevgpt_ddr_bundle;
   always @(posedge clk) begin
     if (rst) wqd_cnt <= 4'd0; else if (wq_done_ddr) wqd_cnt <= wqd_cnt + 4'd1;
   end
-  // weight_loader_ddr/weight_bank_tdp run on ui_clk in THIS testbench only
-  // (see their instantiations below) -- not a real deployment shape, just
-  // isolating them from kevgpt_ddr_bundle's un-CDC'd wl_* pass-through so
-  // this test can cleanly verify the KV path's real CDC fix without also
-  // exercising the weight-loader path's already-known, already-documented
-  // "needs its own CDC once it's actually wired up" gap (see
-  // kevgpt_ddr_bundle.sv's header).
+  // weight_loader_ddr/weight_bank_tdp run on clk (== gen_clk) -- see their
+  // instantiations above -- matching real deployment (both live inside
+  // sequencer_vec.sv's gen_clk-domain hierarchy) now that
+  // kevgpt_ddr_bundle.sv does a real CDC for wl_rd_req/wl_rd_ret.
   reg [3:0] ldn_cnt;
-  always @(posedge ui_clk) begin
-    if (ui_rst) ldn_cnt <= 4'd0; else if (ld_done) ldn_cnt <= ldn_cnt + 4'd1;
+  always @(posedge clk) begin
+    if (rst) ldn_cnt <= 4'd0; else if (ld_done) ldn_cnt <= ldn_cnt + 4'd1;
   end
 
   task automatic do_kv_write(input [3:0] layer, input kv, input [1:0] head, input [8:0] pos);
@@ -422,15 +439,15 @@ module tb_kevgpt_ddr_bundle;
     end
     ld_ddr_addr <= 200 * (DATA_W/8);
     ld_words    <= 16 * SUBW;
-    @(posedge ui_clk);
-    ld_start <= 1'b1; @(posedge ui_clk); ld_start <= 1'b0;
+    @(posedge clk);
+    ld_start <= 1'b1; @(posedge clk); ld_start <= 1'b0;
     wait (ldn_cnt == 1);
-    @(posedge ui_clk);
+    @(posedge clk);
 
     for (wi = 0; wi < 16; wi = wi + 1) begin
       wb_rd_addr_r <= wi[$clog2(WWORDS)-1:0];
-      @(posedge ui_clk);
-      @(posedge ui_clk);
+      @(posedge clk);
+      @(posedge clk);
       wl_want_word = u_mem.mem[200 + wi];
       if (wb_rword_b !== wl_want_word) begin
         $display("PHASE2_WL_MISMATCH,word=%0d,got=%h,want=%h", wi, wb_rword_b, wl_want_word);

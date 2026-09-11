@@ -1,10 +1,19 @@
 # Fixation-word investigation: real-hardware-only text corruption in the multi-master DDR read path
 
-Status as of 2026-09-11: **open, not root-caused, not fixed.** This document is
-the standalone reference for the whole investigation — everything needed to
-either continue it or hand it off, without reconstructing the trail from
-`model/SCALE-UP-LOG.md`'s chronological entries (which have the full blow-by-blow
-if this summary needs expanding).
+Status as of 2026-09-11: **open, not root-caused, not fixed on real hardware.**
+Two concrete, verified pieces of progress landed since the previous revision,
+neither of which closes the investigation: (1) §8 item 2's owner-FIFO
+backpressure gap is now actually fixed in both `mig_dual_master_arbiter.sv`
+and `mig_read_mux2.sv`, not just proposed — see §4's status update; (2) while
+building the gate to verify that fix, a second, *separate* real bug was found
+and fixed — a testbench-only clock-domain mismatch that had been silently
+breaking `tb_kevgpt_ddr_bundle.sv` for weeks (see new §4a). Neither fix is
+confirmed to be *the* fixation-word cause; §4a in particular is explicitly
+ruled out as a hardware explanation, since it lives entirely in test code.
+This document is the standalone reference for the whole investigation —
+everything needed to either continue it or hand it off, without
+reconstructing the trail from `model/SCALE-UP-LOG.md`'s chronological entries
+(which have the full blow-by-blow if this summary needs expanding).
 
 **Revision note:** this document's first version over-weighted the CDC
 timing-constraint gap (§6) as *the* leading hypothesis. An external review of
@@ -12,7 +21,9 @@ that draft (summarized in §6a) made a strong case that an unsafe owner-tracking
 FIFO in the multi-master DMA path is at least as likely a cause, is more
 consistent with the *severity variance* between the two captured divergences
 (§2), and is far cheaper to test. §§3, 6, 7, and 8 below have been corrected
-and re-prioritized accordingly; nothing was deleted, only re-weighted.
+and re-prioritized accordingly; nothing was deleted, only re-weighted. This
+revision adds §4a and updates §4/§8 item 2 with the results of actually doing
+that work.
 
 ## 1. Original task goal
 
@@ -144,6 +155,110 @@ explains why the two captured divergences have such different severity
 ownership index doesn't correlate with any numerical closeness between the
 correct and substituted values, unlike a marginal-timing bit-flip theory,
 which has no obvious reason to sometimes be tiny and sometimes enormous.
+
+**Status: FIXED (defensive), not confirmed as the active bug.** Both
+`u_rd_owner_fifo`/`u_wr_owner_fifo` in `mig_dual_master_arbiter.sv` and
+`u_owner_fifo` in `mig_read_mux2.sv` now wire `in_ready_o` into real
+backpressure — command acceptance (`app_en_o` / `req_valid`) is gated on the
+relevant owner FIFO actually having room, so a command can no longer be
+presented downstream that this arbiter/mux can't track the return of. Added
+outstanding-request counters (independent push/pop accounting, cross-checked
+every cycle against each FIFO's own `count_o`) plus `overflow_o`/`underflow_o`
+assertions in both files, matching the shape §8 item 2 specified. Diffs:
+`mig_dual_master_arbiter.sv` (`kevgpt-genesys2-soc` repo only — this module
+is `ai_accel`-owned, not mirrored into `kev-gpt`) and `mig_read_mux2.sv`
+(present in both repos, kept byte-identical).
+
+Verified via `fabric/genesys2/tb/tb_kevgpt_ddr_bundle.sv` (the actual gate
+that already existed for this — see §4a for why it needed real repair
+first): Phase 1 (KV read/write through the full stack) passes identically
+before and after this fix, 0 errors. The fix could not be positively
+confirmed as *the* active defect, because — with `cpu_ddr_bridge` idle and
+only one requester active per phase in this testbench — none of its owner
+FIFOs ever came close to filling under this test's traffic pattern (hand-
+checked: peak occupancy stayed in single digits against 32/64-deep FIFOs).
+§8 item 5's full contention testbench is what would actually stress this
+path enough to prove or disprove it as the real-hardware cause; this fix is
+correct and cheap regardless of that answer, so it's in either way.
+
+## 4a. A second, real bug found while repairing the verification gate itself
+
+Starting §8 item 2's work required first *running* `tb_kevgpt_ddr_bundle.sv`
+to have something to verify the fix against — and it turned out this gate
+had been silently broken for weeks, independent of anything in §4:
+
+**Toolchain gap.** This Icarus Verilog install (12.0 stable,
+`iverilog -V`) cannot parse this codebase's `assert property (... disable
+iff ...)` concurrent-assertion syntax at all — not a flag issue
+(`-gsupported-assertions`/`-gno-assertions` make no difference), a flat
+parser limitation, confirmed with a two-line minimal repro. Four files in
+this gate's own dependency chain use that syntax (`mig_read_mux2.sv`,
+`mig_read_engine.sv`, `mig_dual_master_arbiter.sv`, `sync_fifo.sv`) — all
+added between 2026-08-16 and this session. Compiling this gate at all
+required bracketing `` `define SYNTHESIS ``/`` `undef SYNTHESIS `` shims
+around exactly those four files (stripping their `` `ifndef SYNTHESIS ``
+assertion blocks for this local run only — real files untouched, and
+`kv_bank.sv`/`weight_bank_tdp.sv` must never see `SYNTHESIS` defined, since
+that flips them to a Xilinx `xpm_memory_tdpram` macro Icarus can't
+elaborate). This means: **whatever machine last reported this gate's own
+"PASS, clean compile" result did not use this Icarus install**, or used it
+before these assertions existed. Worth flagging for whoever sets up CI or a
+fresh dev machine for this repo — the gate harnesses assume Icarus SVA
+support this specific package build doesn't have.
+
+**The real bug, once the gate could actually run.** With the toolchain gap
+worked around, Phase 1 (KV path) passed but Phase 2 (weight-loader path)
+hung to timeout — reproduced identically with §4's fix both applied and
+reverted, ruling that out as cause or cure. Traced precisely:
+`weight_loader_ddr` correctly issued all 16 needed DMA beat requests
+(`issue_cnt` reached `total_beats`), but `drain_cnt` permanently stalled at
+112/128 words. Direct instrumentation of `u_wl_rd_ret_cdc` (the
+`async_fifo_gray` CDC instance for the weight-loader's read-return path,
+inside `kevgpt_ddr_bundle.sv`) at its own ports showed **10 real writes but
+14 reads** — a 4-entry excess exactly equal to `CDC_FIFO_DEPTH`, the
+textbook signature of a phantom-pop bug, not a pointer-math defect. (A
+software scoreboard mirroring `mig_read_mux2`'s owner-FIFO push/pop order
+was built first and found 0 mismatches across the whole run, ruling that
+layer out before chasing this further downstream.)
+
+**Root cause: stale testbench clock wiring, not a production RTL bug.**
+`tb_kevgpt_ddr_bundle.sv` instantiated `weight_loader_ddr`/`weight_bank_tdp`
+on `ui_clk`, with an explicit comment explaining why: at the time that
+choice was made, `kevgpt_ddr_bundle.sv`'s weight-loader read port was "an
+un-CDC'd wl_* pass-through" (the comment's own words), so any clock choice
+for the far side was harmless. Sometime after that comment was written, a
+real CDC (`u_wl_rd_req_cdc`/`u_wl_rd_ret_cdc`, `async_fifo_gray`) was added
+for exactly this port — closing the gap that comment flagged as future work
+— but the testbench's clock wiring for these two DUTs was never updated to
+match. The result: `weight_loader_ddr`'s `rd_ret_ready` became an
+unsynchronized signal crossing into `u_wl_rd_ret_cdc`'s `rd_clk_i` domain
+from the *wrong* clock (`ui_clk`, 7ns, instead of `gen_clk`/`clk`, 10ns, with
+no relationship between them) — occasionally causing the FIFO to register a
+pop twice for what should have been one logical beat. **Real hardware never
+had this mismatch**: `weight_loader_ddr`'s `clk` port is always `gen_clk` in
+the actual deployed design, inside `sequencer_vec.sv`'s own hierarchy — this
+was purely a testbench artifact.
+
+**Fix and verification.** Reclocked `u_wb`/`u_wl_dut` (and the `ldn_cnt`
+counter and Phase 2's stimulus/verification `@(posedge ...)` waits that
+interact with them) from `ui_clk` to `clk`, matching real deployment.
+Result: `KEVGPT_DDR_BUNDLE_VERDICT,PASS`, 0 errors across all 4 phases.
+Confirmed independent of §4's fix (passes with that fix present or reverted
+— the two bugs are unrelated). Diff: `fabric/genesys2/tb/tb_kevgpt_ddr_bundle.sv`
+only (test code, `kev-gpt` repo).
+
+**Why this matters for the investigation despite fixing nothing on real
+hardware:** this gate exists specifically to prove "genuine two-master DMA
+sharing through the real arbiter/mux/CDC stack is correct" — precisely the
+claim §4's traffic-path diagram depends on. It had been unrunnable-or-failing
+for an unknown but non-trivial stretch of time, meaning that claim was
+unverified (not disproven, just untested) for as long as this gate was
+broken. It's now restored to a real, passing gate, which is worth something
+independent of whether either bug found here turns out to be the real
+fixation-word cause — but it should not be read as evidence *toward* either
+hypothesis; it neither confirms nor rules out §6 (the CDC constraint gap) or
+the still-open question of whether §4's owner-FIFO gap was ever actually hit
+on real hardware.
 
 ## 5. What's impacted
 
@@ -285,10 +400,9 @@ look more blocked than the owner-FIFO half of it actually is:
 
 **Tractable as normal RTL/firmware work, no interactive Vivado archaeology
 needed** (see §8, items 1–4):
-- Wiring the owner FIFOs' `in_ready_o` into real backpressure and adding the
-  outstanding-request/response/owner-occupancy accounting assertions (§4,
-  §6a) — a contained RTL change to two files plus new `assert property`
-  statements.
+- ~~Wiring the owner FIFOs' `in_ready_o` into real backpressure and adding
+  the outstanding-request/response/owner-occupancy accounting assertions
+  (§4, §6a)~~ **done** — see §4/§4a.
 - A weight-bank CRC diagnostic that verifies data through the *real* full
   path (`weight_loader_ddr` → CDC → mux → arbiter → MIG → CDC → weight bank),
   closing the gap the corrected §3 table now flags.
@@ -338,7 +452,10 @@ most of which don't require the part that's actually blocked.
 
 Ordered by diagnostic value per unit of implementation effort, per the §6a
 review. Items 1–4 don't require resolving §6's clock-naming question first;
-item 4 can independently shed light on it as a side effect.
+item 4 can independently shed light on it as a side effect. **Item 2 is now
+done** (see §4's status update and §4a) — left in place below, unrenumbered,
+as the historical record of the plan and because item 5's full contention
+testbench is still the right way to actually stress-test it.
 
 1. **Add a weight-bank CRC diagnostic that exercises the real full path.**
    Software computes the expected CRC32 over each packed weight block/head
@@ -350,26 +467,15 @@ item 4 can independently shed light on it as a side effect.
    a fixation word to appear. This is the single most direct fix for the
    corrected §3 claim ("write side is clean" never actually covered this
    path) and should come first.
-2. **Make the owner FIFOs' `in_ready_o` real backpressure, in both
-   `mig_dual_master_arbiter.sv` and `mig_read_mux2.sv`:**
-   ```systemverilog
-   // before
-   .in_valid_i(owner_push_valid), .in_ready_o(),
-   // after
-   .in_valid_i(owner_push_valid), .in_ready_o(owner_ready),
-   ...
-   assign upstream_ready = downstream_ready && owner_ready;
-   ```
-   Add outstanding-request accounting as a running assertion in both modules
-   (`req_count - ret_count == owner_fifo_level`, checked every cycle) plus:
-   ```systemverilog
-   assert property (@(posedge ui_clk) request_accepted |-> owner_ready);
-   assert property (@(posedge ui_clk) owner_pop |-> !owner_empty);
-   ```
-   Cheap, safe, and closes the exact hole §4/§6a identifies as never having
-   been closed. If this assertion ever fires — in simulation or on real
-   hardware via ILA — that is the confirmed defect, not an inference from
-   generated text.
+2. ~~Make the owner FIFOs' `in_ready_o` real backpressure, in both
+   `mig_dual_master_arbiter.sv` and `mig_read_mux2.sv`~~ **DONE** — see §4's
+   status update and §4a for the fix, the gate it was verified against, and
+   the second bug found along the way. Outstanding-request accounting is in
+   place in both files as independent push/pop counters cross-checked
+   against each FIFO's own `count_o`, plus overflow/underflow/backpressure-
+   violation assertions. Not yet exercised under real two-master contention
+   (this gate's traffic pattern never filled either owner FIFO close to
+   capacity) — that's item 5 below.
 3. **Run the weight-traffic-only isolation experiment on real hardware.**
    Disable `KV_DDR_BACKED`/`cpu_ddr_bridge` traffic (config + resynth, no new
    RTL) so only `weight_loader_ddr → CDC → mig_read_engine → MIG` is active,
@@ -443,3 +549,9 @@ item 4 can independently shed light on it as a side effect.
 - `model/tinystories_hf_repro/hw_vs_sw_report.html` (published as the
   "Silicon Fidelity" artifact) — the story-by-story sample evidence behind
   the fixation-word pattern, with real captured seeds shown per sample.
+- `fabric/genesys2/tb/tb_kevgpt_ddr_bundle.sv` — the gate for §4/§4a's work.
+  Verdict now `KEVGPT_DDR_BUNDLE_VERDICT,PASS`, 0 errors, all 4 phases.
+- Diffs from this revision's work: `mig_dual_master_arbiter.sv` and
+  `mig_read_mux2.sv` (owner-FIFO backpressure, §4/§8 item 2) in
+  `kevgpt-genesys2-soc`; `mig_read_mux2.sv` (kept in sync) and
+  `tb_kevgpt_ddr_bundle.sv` (clock fix, §4a) in `kev-gpt`.

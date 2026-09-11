@@ -1230,6 +1230,19 @@ concurrently (`fork`/`join`) -- real two-master sharing, not two sequential
 single-master phases. **Result: `KEVGPT_DDR_BUNDLE_VERDICT,PASS`, 0 errors
 across all four phases**, clean compile.
 
+**2026-09-11 correction**: this gate was later found silently broken --
+unrunnable on this repo's local Icarus install once `assert property
+(... disable iff ...)` statements were added to its dependency chain
+(2026-08-16 onward), and, once made runnable again, genuinely failing
+(Phase 2 timeout) due to a stale testbench clock-domain mismatch, unrelated
+to anything in this section. Both are root-caused, fixed, and re-verified
+(gate is back to a real `PASS`) in "Owner-FIFO backpressure fix + a
+testbench-only clock bug in tb_kevgpt_ddr_bundle.sv" near the end of this
+log; see `fabric/genesys2/FIXATION-WORD-CDC-INVESTIGATION.md` §4/§4a for the
+full writeup. Not implicated in the fixation-word investigation itself --
+flagged here only so this section's original "PASS" claim isn't trusted at
+face value without that context.
+
 All of Phase 2 (both DMA subsystems, plus the arbiter wiring merging them
 with room for `cpu_ddr_bridge` alongside) is now built and gated end to end
 in simulation.
@@ -5774,3 +5787,76 @@ overfitting failure mode from too little data, but does not close the
 gap to the char-level model's fluency, and does not measurably reduce
 this model's baseline repetition rate. `data/ckpt_word16384_distilled.pt`
 was NOT promoted over the deployed checkpoint.
+
+## Owner-FIFO backpressure fix + a testbench-only clock bug in tb_kevgpt_ddr_bundle.sv
+
+Part of the fixation-word investigation (`FIXATION-WORD-CDC-INVESTIGATION.md`
+§4/§4a/§8 item 2 have the full writeup; this entry is the PORT-NOTES-style
+chronological record). Two separate, unrelated fixes came out of this work.
+
+**Fix 1: owner-FIFO backpressure, `mig_dual_master_arbiter.sv` +
+`mig_read_mux2.sv`.** Both modules' owner-tracking FIFOs (the ones that
+record which requester a pending DDR3 read return belongs to) left
+`in_ready_o` unconnected -- a command could be accepted and forwarded to MIG
+while its owner FIFO was full, silently dropping the push and scrambling
+every owner tag after it. Wired `in_ready_o` into real backpressure in both
+(command acceptance now gates on the relevant owner FIFO having room), and
+added outstanding-request accounting: independent push/pop counters
+cross-checked every cycle against each FIFO's own `count_o`, plus
+overflow/underflow/backpressure-violation assertions. `mig_dual_master_arbiter.sv`
+turned out to have *two* owner FIFOs with this exact bug (`u_rd_owner_fifo`
+for reads, `u_wr_owner_fifo` for writes -- only the read one had been
+flagged in the investigation doc before this).
+
+**Fix 2: a real, separate bug found while verifying fix 1 --
+`tb_kevgpt_ddr_bundle.sv`'s weight-loader DUTs were on the wrong clock.**
+Verifying fix 1 needed a working gate to run it against. Getting
+`tb_kevgpt_ddr_bundle.sv` to even compile on this repo's local Icarus
+install (12.0 stable) first required working around a toolchain gap: this
+Icarus build cannot parse `assert property (... disable iff ...)` at all --
+confirmed with a two-line minimal repro, unaffected by
+`-gsupported-assertions`/`-gno-assertions`. Four files in this gate's own
+dependency chain use that syntax (`mig_read_mux2.sv`, `mig_read_engine.sv`,
+`mig_dual_master_arbiter.sv`, `sync_fifo.sv`, all touched 2026-08-16
+onward) -- compiled around it locally by bracketing `` `define
+SYNTHESIS``/`` `undef SYNTHESIS `` shims around exactly those four files
+(stripping their `` `ifndef SYNTHESIS `` assertion blocks for this run
+only; `kv_bank.sv`/`weight_bank_tdp.sv` must never see `SYNTHESIS` defined,
+since that flips them to an unelaborable `xpm_memory_tdpram` macro).
+Whatever machine last produced this gate's recorded "PASS, clean compile"
+either used a different simulator or ran before these assertions existed --
+worth checking before assuming this specific `iverilog` package is enough
+for a fresh dev machine on this repo.
+
+Once compiling, Phase 1 (KV path) passed but Phase 2 (weight-loader path)
+hung to timeout -- reproduced identically with fix 1 both applied and
+reverted, ruling it out as cause or cure of this specific hang. Traced with
+targeted instrumentation (a software scoreboard mirroring `mig_read_mux2`'s
+owner-FIFO push/pop order first -- 0 mismatches, clearing that layer; then
+direct hierarchical counts on `u_wl_rd_ret_cdc`'s own write/read ports):
+**10 real writes, 14 reads** on the weight-loader's read-return CDC FIFO --
+a 4-entry excess exactly equal to `CDC_FIFO_DEPTH`, the signature of a
+phantom-pop bug. Root cause: `tb_kevgpt_ddr_bundle.sv` instantiated
+`weight_loader_ddr`/`weight_bank_tdp` on `ui_clk`, per an explicit in-file
+comment dating from when `kevgpt_ddr_bundle.sv`'s weight-loader read port
+was still "an un-CDC'd wl_* pass-through." A real CDC
+(`u_wl_rd_req_cdc`/`u_wl_rd_ret_cdc`) was added for that port later, closing
+the gap that comment flagged as future work, but the testbench's clock
+wiring for these two DUTs was never updated to match -- leaving
+`weight_loader_ddr`'s `rd_ret_ready` crossing into the CDC FIFO's `rd_clk_i`
+domain from the wrong, unrelated clock (`ui_clk` instead of `gen_clk`),
+occasionally double-popping a beat. **Real hardware never had this
+mismatch** -- `weight_loader_ddr`'s `clk` is always `gen_clk` in the actual
+design. Fixed by reclocking `u_wb`/`u_wl_dut` (and the dependent
+`ldn_cnt`/stimulus/verification code) from `ui_clk` to `clk`. **Result:
+`KEVGPT_DDR_BUNDLE_VERDICT,PASS`, 0 errors, all 4 phases** -- confirmed
+independent of fix 1 (passes with it present or reverted).
+
+**Bottom line for the fixation-word investigation**: fix 1 is a real,
+correct, defensive hardening, not yet proven to be the active real-hardware
+defect (this gate's traffic never filled either owner FIFO close to
+capacity). Fix 2 is entirely testbench-only and explicitly does not explain
+the real-hardware symptom -- it matters only because it means this gate's
+"genuine two-master sharing is correct" claim had been unverified (not
+disproven, just untested) since 2026-08-16, and is now restored to an
+actual passing gate.

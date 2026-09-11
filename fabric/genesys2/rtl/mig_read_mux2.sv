@@ -78,7 +78,14 @@ module mig_read_mux2 #(
     assign both_valid = a_req_valid && b_req_valid;
     assign select_b   = both_valid ? prefer_b_q : b_req_valid;
 
-    assign req_valid = a_req_valid || b_req_valid;
+    // Owner-FIFO backpressure: don't present a request downstream to
+    // mig_read_engine until the owner FIFO (below) has room to track its
+    // return. owner_ready comes from u_owner_fifo's in_ready_o -- previously
+    // left unconnected, so a request could be accepted here while the owner
+    // FIFO was full, the push silently dropped, and the pop-side/return-demux
+    // scrambled for every request after it (see mig_dual_master_arbiter.sv's
+    // header for the same class of bug, fixed there the same way).
+    assign req_valid = (a_req_valid || b_req_valid) && owner_ready;
     assign req_addr  = select_b ? b_req_addr : a_req_addr;
     assign accepted  = req_valid && req_ready;
 
@@ -111,6 +118,9 @@ module mig_read_mux2 #(
     wire owner_push_side  = select_b;
     wire owner_pop_side;
     wire owner_empty;
+    wire owner_ready;
+    wire [$clog2(OWNER_DEPTH+1)-1:0] owner_count;
+    wire owner_overflow, owner_underflow;
 
     sync_fifo #(
         .DATA_W(1),
@@ -120,7 +130,7 @@ module mig_read_mux2 #(
         .rst_ni(!rst),
         .clear_i(1'b0),
         .in_valid_i(owner_push_valid),
-        .in_ready_o(),
+        .in_ready_o(owner_ready),
         .in_data_i(owner_push_side),
         .out_valid_o(),
         .out_ready_i(ret_valid && ret_ready),
@@ -129,9 +139,9 @@ module mig_read_mux2 #(
         .empty_o(owner_empty),
         .almost_full_o(),
         .almost_empty_o(),
-        .count_o(),
-        .overflow_o(),
-        .underflow_o()
+        .count_o(owner_count),
+        .overflow_o(owner_overflow),
+        .underflow_o(owner_underflow)
     );
 
     assign a_ret_data  = ret_data;
@@ -144,9 +154,40 @@ module mig_read_mux2 #(
     assign ret_ready = (owner_empty) ? 1'b0
                       : owner_pop_side ? b_ret_ready : a_ret_ready;
 
+    // Outstanding-request accounting: independent push/pop counter,
+    // cross-checked against the owner FIFO's own count_o every cycle --
+    // deliberately redundant with the FIFO's internal bookkeeping, to catch
+    // a divergence between what this mux's own accept/pop logic believes is
+    // outstanding and what the FIFO primitive itself believes (exactly the
+    // class of bug the previously-unconnected in_ready_o allowed).
+    reg [$clog2(OWNER_DEPTH+1)-1:0] outstanding_q;
+    wire owner_pop = ret_valid && ret_ready;
+    always @(posedge clk) begin
+        if (rst) outstanding_q <= {($clog2(OWNER_DEPTH+1)){1'b0}};
+        else outstanding_q <= outstanding_q
+                             + (owner_push_valid && owner_ready)
+                             - owner_pop;
+    end
+
 `ifndef SYNTHESIS
     a_no_owner_underflow :
     assert property (@(posedge clk) disable iff (rst) ret_valid |-> !owner_empty)
     else $error("mig_read_mux2: read return with no owner recorded");
+
+    a_owner_never_pushed_when_not_ready :
+    assert property (@(posedge clk) disable iff (rst) owner_push_valid |-> owner_ready)
+    else $error("mig_read_mux2: owner FIFO pushed while not ready -- backpressure gate failed");
+
+    a_owner_no_overflow :
+    assert property (@(posedge clk) disable iff (rst) !owner_overflow)
+    else $error("mig_read_mux2: owner FIFO overflow");
+
+    a_owner_no_underflow :
+    assert property (@(posedge clk) disable iff (rst) !owner_underflow)
+    else $error("mig_read_mux2: owner FIFO underflow");
+
+    a_outstanding_matches_fifo :
+    assert property (@(posedge clk) disable iff (rst) outstanding_q == owner_count)
+    else $error("mig_read_mux2: outstanding-request counter diverged from owner FIFO level");
 `endif
 endmodule
