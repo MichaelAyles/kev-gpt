@@ -3691,3 +3691,113 @@ has now been pushed about as far as it can go without one of those.
 (`kevgpt_ddr_bundle.sv`, `mig_read_mux2.sv`, `mig_dual_master_arbiter.sv`,
 `xilinx_core_v_mini_mcu_wrapper_kevgpt.sv`, all in `kevgpt-genesys2-soc`),
 no code changes in either repo.
+
+## Auditing `async_fifo_gray.sv`: the CDC primitive is correct, the XDC constraint for its use here is missing
+
+Directly audited the CDC FIFO primitive itself (Gray-code math, the
+2-FF `ASYNC_REG`-tagged synchronizer chains, the full/empty detection
+formulas) against Cummings' canonical async-FIFO design. **No bug
+found in the module itself**: `bin2gray`/`gray2bin` are the standard,
+correct conversions; the full-flag comparison
+(`{~rd_gray_wsync2_q[PTR_W-1:PTR_W-2], rd_gray_wsync2_q[PTR_W-3:0]}`)
+is the textbook Cummings formula, bit-for-bit; and the one deliberate
+deviation from the canonical design — registering `wr_full` instead of
+computing it combinationally, done to break a real Vivado DRC LUTLP-1
+same-cycle loop the module's own comment documents hitting in all four
+of this project's earlier streamer CDC instances — was hand-traced
+through a DEPTH=4 example and confirmed to still block pushes at
+exactly the right boundary, no overflow. Backpressure propagation from
+the CDC FIFO's `wr_ready_o` back through `mig_read_mux2` and
+`mig_read_engine` to the request source was also traced end-to-end and
+found correctly wired.
+
+**Where the actual gap is: Vivado timing constraints, not RTL.**
+`gen_clk` (the sequencer's compute clock, confirmed PLL-derived from
+`ui_clk`, MIG's own clock) crosses into `ui_clk` through six
+`async_fifo_gray` instances inside `kevgpt_ddr_bundle.sv` — the KV
+read/write pair and the weight read-request/read-return pair. Grepped
+every `.xdc` constraint file in the project: **zero mentions of
+`gen_clk`, `ui_clk`, or any generated-clock/asynchronous-group
+declaration for this pair.** The one `set_clock_groups -asynchronous`
+in the whole constraints file only separates `jtag_clk_pin` from
+everything else.
+
+This project's own constraints file documents having hit exactly this
+bug class before, for a different clock pair:
+> "jtag_clk_pin has no fixed phase relationship to any other clock...
+> This was never declared anywhere... without it, Vivado still derives
+> an implicit setup/hold relationship... from their two periods'
+> least-common-multiple beat pattern, and checks worst-case alignment
+> within it. That's how the DMI CDC was passing hold with only
+> WHS=0.090ns... real margin, but against an artificial, coincidental
+> relationship that was never supposed to be checked at all... thin
+> enough that placement changes elsewhere flipped it negative."
+
+Since `gen_clk` is PLL-derived from `ui_clk` with a real, computable
+frequency ratio, Vivado's STA can construct exactly this kind of
+"implicit" synchronous-looking relationship across the
+`async_fifo_gray` synchronizer paths instead of properly excluding
+them as asynchronous — meaning a build can report "0 errors, timing
+met" while the real CDC synchronizers have thin or negative actual
+margin. This explains every symptom this whole investigation has
+found: real-hardware-only (STA/placement-dependent, invisible to any
+simulation), fully deterministic for a given bitstream (the margin is
+fixed by that build's specific place-and-route, not random), and
+plausibly access-pattern-correlated (a thin margin trips more often at
+specific Gray-code bit-transition points, which correlate with
+specific streaming access patterns).
+
+**This is now a concretely actionable, checkable hypothesis** — add
+`set_clock_groups -asynchronous` (or per-path
+`set_max_delay -datapath_only`) for `gen_clk` vs `ui_clk`, matching the
+fix already applied for JTAG, then re-run timing analysis to see
+whether previously-"passing" CDC paths actually had inadequate margin.
+That is real Vivado/XDC work on real hardware, not something further
+code reading can resolve — the natural next step, not done yet.
+
+**Why this never showed up in any earlier "successful" Genesys2
+deployment.** Checked the git history rather than assume — three
+independent, dated reasons, none of which contradict any prior
+milestone:
+
+1. **The CDC primitives were proven on different signals before
+   kev-gpt existed.** `mig_dual_master_arbiter`/`async_fifo_gray` were
+   built 2026-08-16 for `ai_accel` (a separate matmul-acceleration
+   effort sharing this same MIG). That same day, this project ran a
+   real ILA-based CDC/metastability investigation on `ai_accel`'s own
+   paths and fixed exactly this class of gap — "Fix DDR3 900MHz
+   overspeed, raise clk_gen to 50MHz, add missing JTAG async-CDC
+   constraints." kev-gpt's own Genesys2 port started 2026-08-22, six
+   days later, and `kevgpt_ddr_bundle.sv` (creating the specific
+   `gen_clk`/`ui_clk` crossing under suspicion here) was written that
+   day — reusing the now-proven primitives for a **new** set of
+   crossings that the historical record shows no matching XDC audit
+   for.
+2. **The specific mechanism wasn't even active for the first several
+   milestones.** `KV_DDR_BACKED(1)` has been set since the first
+   commit, but `weight_loader_ddr`'s per-layer streaming reads — the
+   actual CDC path implicated here — didn't start until 2026-08-26
+   ("per-layer weight streaming to NLAYER=8"). Every earlier
+   "successful" bring-up (Option A/B at NLAYER=4/8, 2026-08-22/23)
+   bulk-loaded weights once at boot over UART, never touching this
+   path during inference at all.
+3. **Traffic through the path has grown ~8.5x since the first time it
+   was exercised.** VOCAB=1900 was verified on real hardware
+   2026-08-27, the day after streaming went live, same NLAYER=12
+   architecture. `GW_HEAD = ceil(VOCAB/LANES)*D` was 3,840 words at
+   VOCAB=1900; it's 32,768 words at today's VOCAB=16384 — 8.5x more
+   DMA beats crossing the CDC boundary per token generated. If the
+   per-crossing failure probability is low and roughly constant (what
+   a marginal, uncaught timing window would produce), the *observed*
+   rate scales with how many times that boundary gets crossed —
+   fewer opportunities at VOCAB=1900 means a real defect could sit
+   invisible in a handful of test chats.
+
+A softer, fourth point: the fixation-word symptom likely didn't
+appear from nowhere — it's plausibly why the Gumbel TEMP
+recalibration (earlier in this log) measurably helped (32%→12%
+flagged). That fix addressed real noise-magnitude miscalibration, not
+this CDC path, but a lower sampling temperature makes the model pick
+its own high-confidence token more often, giving this corruption
+fewer chances to actually become the winning candidate — reducing the
+symptom without touching the underlying defect.
