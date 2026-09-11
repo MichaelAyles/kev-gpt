@@ -1,8 +1,9 @@
 # Fixation-word investigation: real-hardware-only text corruption in the multi-master DDR read path
 
 Status as of 2026-09-12: **open, not confirmed-fixed on real hardware, but
-the CDC timing-constraint gap is now root-caused down to specific paths with
-razor-thin real margin.** Four concrete, verified pieces of progress landed
+the CDC timing-constraint gap is now root-caused, fixed, and verified
+in-memory — only a real bitstream + real-hardware re-test stand between
+here and an actual answer.** Four concrete, verified pieces of progress landed
 since the previous revision: (1) §8 item 2's owner-FIFO backpressure gap is
 now actually fixed in both `mig_dual_master_arbiter.sv` and
 `mig_read_mux2.sv`, not just proposed — see §4's status update; (2) while
@@ -33,10 +34,15 @@ one outlier), on paths that directly determine DMA address/data values, and
 margins this thin are exactly what this project's own JTAG-CDC history
 (§6) already documents as fragile enough to flip negative under placement
 changes from unrelated parts of the design — a coherent, physical
-explanation for §2a's build-dependent-winner finding. Not yet fixed or
-verified on real hardware — see §6/§8 item 4. §4a is explicitly ruled out
-as a hardware explanation, since it lives entirely in test code. This
-document is the
+explanation for §2a's build-dependent-winner finding. **The margins are now
+fixed too**: three scoped `set_max_delay -datapath_only` exceptions in
+`constraints.xdc`, covering both the Gray-pointer synchronizers and the
+FIFO-memory-to-consumer data paths across all six real instances, verified
+in-memory two independent ways (down to sourcing the exact real file
+content via `read_xdc`). Not yet verified on real hardware — needs one more
+full resynthesis and a real-hardware re-test, the actual verdict. See §6/§8
+item 4. §4a is explicitly ruled out as a hardware explanation, since it
+lives entirely in test code. This document is the
 standalone reference for the whole investigation — everything needed to
 either continue it or hand it off, without reconstructing the trail from
 `model/SCALE-UP-LOG.md`'s chronological entries (which have the full
@@ -601,15 +607,41 @@ covers id 2213) as where fixation words statistically cluster; a corrupted
 DMA address landing near a real request's address, rather than at a
 uniformly random one, would predictably favor nearby rows.
 
-**Not yet done**: actually fixing these margins (Gray-pointer-bus skew
-constraints, `set_max_delay -datapath_only` on the specific FIFO-memory-to-
-consumer paths identified above, or a deeper pipeline stage) and a
-real-hardware re-test. This needs real RTL/constraint engineering, likely
-iterative, and is the natural continuation of this section rather than a
-one-line fix like the root-clock gap was. Raw report files (`timing_summary_after_fix.rpt`,
-`kevgpt_setup_audit.rpt`, `kevgpt_hold_audit.rpt`, `timing_new_domain.rpt`)
-are session scratch files, not committed — §9 has the exact queries to
-reproduce them against the now-fixed `constraints.xdc`.
+**Update: the margins are fixed, verified in-memory two independent ways,
+not yet verified on real hardware.** Added three `set_max_delay
+-datapath_only` exceptions to `constraints.xdc`, scoped explicitly to the
+six real `async_fifo_gray` instances inside `u_kevgpt_ddr_bundle` (by exact
+hierarchical cell name, `-filter {NAME =~ ...}` — a bare multi-pattern
+`-hierarchical {list}` was tried first for `get_cells` and silently
+resolved to "No valid object(s) found," unlike `get_nets -hierarchical
+{list}` which the DMI CDC constraint below uses successfully — a real,
+non-obvious Vivado quirk worth remembering before reusing that shorthand
+for `get_cells` again): one exception for the `wr_gray_q` → `wr_gray_rsync1_q`
+synchronizer stage, one for the mirror `rd_gray_q` → `rd_gray_wsync1_q`
+stage, and one for the FIFO-memory-array data paths (5 of the 6 instances
+have them — `u_kv_wr_ack_cdc` is a 1-bit ack pulse with no memory array to
+except). Bound: 4ns, comfortably under min_period(gen_clk=20ns,
+ui_clk=10ns)=10ns and ~7x the worst real routed delay actually observed
+(0.563ns) — same aggressive-but-safe spirit as the DMI CDC's own 2ns bound
+below.
+
+Verified twice against the live implemented design before committing:
+first with the exception built via a Tcl filter-string helper (confirmed
+the previously-0.054ns worst path now reports "No timing paths found," and
+`kevgpt_seq`'s hierarchy-wide worst remaining margin is 0.108ns — matching
+the DMI CDC's own already-accepted baseline, not a new thin spot); then a
+second time via `read_xdc` on the *exact* real, multi-line, backslash-
+continued file content as actually committed (catching any escaping/
+continuation issue the first test's differently-constructed Tcl strings
+could have missed) — identical result, `check_timing` shows zero
+regressions both times. Not yet verified on real hardware — needs a full
+clean resynthesis (already run once, straightforward to repeat) and a
+real-hardware re-test of §2/§2a's greedy divergence test. Raw report files
+(`timing_summary_after_fix.rpt`, `kevgpt_setup_audit.rpt`,
+`kevgpt_hold_audit.rpt`, `timing_new_domain.rpt`,
+`kevgpt_hold_audit_after_fix.rpt`, `worst_path_realfile_recheck.rpt`) are
+session scratch files, not committed — §9 has the exact queries to
+reproduce them.
 
 ## 6a. External review: corrections and a co-equal hypothesis
 
@@ -777,13 +809,15 @@ original order below since item 4 was already next regardless.
    `report_timing_summary`'s top-line numbers and a direct `report_timing`
    query for this class of auto-inferred clock (not load-bearing for the
    `kevgpt_seq`-hierarchy audit that found the thin margins, since that used
-   direct queries throughout). **Now needed**: fix these margins (Gray-
-   pointer-bus skew constraints, `set_max_delay -datapath_only` on the
-   specific FIFO-memory-to-consumer paths identified in §6, or a deeper
-   pipeline/register stage on the consumer side) and a real-hardware
-   re-test of §2/§2a's greedy-mode divergence test. This is real,
-   iterative RTL/constraint engineering, not a one-line fix like the root
-   clock gap was.
+   direct queries throughout). **Margins are now fixed too** — three scoped
+   `set_max_delay -datapath_only` exceptions added to `constraints.xdc`,
+   covering both the Gray-pointer synchronizer stages and the FIFO-memory-
+   to-consumer data paths across all six real `async_fifo_gray` instances,
+   verified in-memory two independent ways (including sourcing the exact
+   real file content via `read_xdc`) — see §6's status update. **Now
+   needed**: one more full clean resynthesis with both fixes present, and a
+   real-hardware re-test of §2/§2a's greedy-mode divergence test — the
+   actual verdict on whether this was the fixation-word cause.
    One adjacent question not investigated here: `spi_slave_clk_pin` has no
    `set_clock_groups` of its own (only `jtag_clk_pin` does, line ~18) — now
    that `sys_clk_pin` and its derived clocks are real, Vivado derives *some*
@@ -883,3 +917,26 @@ original order below since item 4 was already next regardless.
   sequence against the now-fixed `constraints.xdc` to reproduce (no need to
   redo the full resynthesis if the bitstream from this session is still
   the one loaded/available).
+- The margin-fix verification: `get_cells -hierarchical -filter {NAME =~
+  "u_kevgpt_ddr_bundle/<inst>/wr_gray_q_reg*" || ...}` resolved 18 cells
+  (6 instances × 3 Gray-pointer bits) for both the `wr_gray_q`/
+  `rd_gray_q` source sets and their matching `wr_gray_rsync1_q`/
+  `rd_gray_wsync1_q` destinations; the `mem_reg*` filter resolved 1,287
+  cells across the 5 instances that have a memory array (`u_kv_wr_ack_cdc`,
+  1-bit, has none). After applying the three `set_max_delay -datapath_only`
+  exceptions in-memory: `report_timing -from [get_cells
+  u_kevgpt_ddr_bundle/u_kv_rd_req_cdc/mem_reg_0_3_6_11] -to [get_pins
+  {u_kevgpt_ddr_bundle/u_rd_engine/cmd_addr_q_reg[11]/D}]` → "No timing
+  paths found" (was `Slack (MET): 0.054ns` before); the same `kevgpt_seq`-
+  hierarchy hold-audit query's worst remaining margin is 0.108ns (matching
+  the DMI CDC's own already-accepted baseline elsewhere in this file, not a
+  new thin spot); `check_timing` shows identical 0/0/0/0 no_clock/
+  unconstrained_internal_endpoints/multiple_clock/generated_clocks counts
+  before and after. Repeated a second time via `read_xdc` on the real,
+  committed `constraints.xdc` file directly (not a Tcl-reconstructed
+  equivalent) against the same live design, to catch any escaping/line-
+  continuation issue specific to the file's actual multi-line backslash
+  syntax — identical result both times.
+- Diff: `constraints.xdc` (the CDC-margin `set_max_delay -datapath_only`
+  fix, §6/§8 item 4) in `kevgpt-genesys2-soc`, same file as the
+  `sys_clk_pin` fix above.

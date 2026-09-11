@@ -6084,3 +6084,54 @@ to-consumer paths identified above, or a deeper pipeline/register stage on
 the consumer side) and a real-hardware re-test. Real, likely-iterative
 RTL/constraint engineering, not a one-line fix like the root clock gap
 was.
+
+## The CDC margins are fixed: three scoped set_max_delay exceptions in constraints.xdc
+
+Direct continuation. Three `set_max_delay -datapath_only` exceptions added
+to `constraints.xdc`, scoped explicitly by full hierarchical cell name to
+the six real `async_fifo_gray` instances inside `u_kevgpt_ddr_bundle`
+(`u_kv_wr_pkt_cdc`, `u_kv_wr_ack_cdc`, `u_kv_rd_req_cdc`, `u_kv_rd_ret_cdc`,
+`u_wl_rd_req_cdc`, `u_wl_rd_ret_cdc`) -- deliberately not a bare
+`*async_fifo_gray*` wildcard, matching this file's own documented lesson
+from the DMI CDC fix about over-broad CDC-net wildcards silently perturbing
+unrelated logic elsewhere in the design.
+
+**A real Vivado quirk hit along the way**: `get_cells -hierarchical
+{pattern1 pattern2 ...}` (the bare multi-pattern-list form) silently
+resolved to "No valid object(s) found" for these six-instance lists, even
+though the exact same instances individually resolve fine and
+`get_nets -hierarchical {pattern1 pattern2}` (used successfully by the
+existing DMI CDC constraint in this same file) handles multi-pattern lists
+correctly. `get_cells` needed the explicit `-filter {NAME =~ "..." || NAME
+=~ "..." || ...}` boolean-OR form instead -- worth remembering before
+reusing the `-hierarchical {list}` shorthand for `get_cells` specifically.
+
+Three exceptions, 4ns bound (comfortably under min_period(gen_clk=20ns,
+ui_clk=10ns)=10ns, ~7x the worst real routed delay actually observed):
+(1) `wr_gray_q` -> `wr_gray_rsync1_q`, the write-side Gray-pointer
+synchronizer stage, across all 6 instances (18 cells each side); (2) the
+mirror `rd_gray_q` -> `rd_gray_wsync1_q` stage (18 cells each side); (3)
+the FIFO-memory-array data paths, `-from` only (any destination), across
+the 5 instances that actually have a memory array (`u_kv_wr_ack_cdc` is a
+1-bit ack pulse, no `mem_reg` cells to except) -- 1,287 cells total.
+
+**Verified twice against the live implemented design before committing.**
+First pass: built the exception via a Tcl filter-string helper, applied
+in-memory, re-checked the exact worst path
+(`u_kv_rd_req_cdc/mem_reg_0_3_6_11` -> `u_rd_engine/cmd_addr_q_reg[11]/D`)
+-- went from `Slack (MET): 0.054ns` to "No timing paths found" (correctly
+reclassified under the exception); re-ran the same `kevgpt_seq`-hierarchy
+hold audit from the previous entry -- worst remaining margin is now
+0.108ns, matching the DMI CDC's own already-accepted baseline elsewhere in
+this file, not a new thin spot; `check_timing` shows identical 0/0/0/0
+no_clock/unconstrained_internal_endpoints/multiple_clock/generated_clocks
+counts before and after. Second pass: `read_xdc` on the *exact* real,
+committed file (multi-line backslash continuations and all, not a
+Tcl-reconstructed equivalent) against the same live design, specifically
+to catch any escaping/continuation issue the first pass's differently-
+constructed Tcl strings could have missed -- identical result.
+
+**Still needed**: one more full clean resynthesis with both fixes present
+(sys_clk_pin + these three exceptions), and a real-hardware re-test of the
+greedy-mode divergence test -- the actual answer to whether this was the
+fixation-word cause.
