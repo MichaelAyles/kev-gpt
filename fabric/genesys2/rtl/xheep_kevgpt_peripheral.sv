@@ -72,6 +72,26 @@
 //       (free-running since power-on/reset); read it at a checkpoint of
 //       your choosing and compare against a host- or simulation-computed
 //       expected value for the identical run.
+//  0x50 WBDIAG_ADDR (write-only): weight_bank_tdp row address (raddr_a,
+//       $clog2(WWORDS) bits) -- FIXATION-WORD-POSTMORTEM.md item 6. Held,
+//       not a pulse: write once, then read WBDIAG_DATA0-7 as many times as
+//       needed: weight_bank_tdp's port A is otherwise completely unused
+//       for reading (see gemv_banked_resident_vec.sv's own comment), so
+//       this is a free, always-safe tap -- correct whether the sequencer
+//       is idle or actively computing, since nothing else ever reads port
+//       A. To dump a specific vocab row's real resident weight content,
+//       compute row = group*k_count + k for k=0..D-1, where group =
+//       vocab_id/LANES and w_base(=0 for the head GEMV under
+//       WEIGHT_STREAM_PER_LAYER=1) is folded in already; each row holds
+//       LANES nibbles, the target vocab id's value sits at nibble
+//       (vocab_id % LANES). Read promptly after the head GEMV completes,
+//       before the next token's forward pass starts reloading QKV weights
+//       into the same (single-buffered) resident image.
+//  0x54-0x70 WBDIAG_DATA0-7 (read-only): the 256-bit row at WBDIAG_ADDR,
+//       as 8 sequential 32-bit words (DATA0 = bits [31:0] ... DATA7 =
+//       bits [255:224]). Valid one cycle after WBDIAG_ADDR is written --
+//       always true by the time firmware's own register-bus round trip
+//       reaches a subsequent read, same as every other bank readback here.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -197,6 +217,25 @@ module xheep_kevgpt_peripheral #(
 );
     wire clk = clk_i;
     wire [31:0] weight_stream_crc;  // Sec8 item 1 -- see u_seq's own port comment
+    // FIXATION-WORD-POSTMORTEM.md item 6 -- see u_seq's own wbdiag_addr/
+    // wbdiag_pair port comment (gemv_banked_resident_vec.sv has the full
+    // rationale: this is weight_bank_tdp's otherwise-completely-unused port
+    // A, and why it carries BOTH DP=1 column-parity halves). The row's own
+    // LSB (wbdiag_addr_r[0], below) selects which half WBDIAG_DATA0-7
+    // expose -- an earlier version of this tap exposed only the even half
+    // unconditionally, silently returning the wrong row's data for every
+    // odd address; caught by item 6's own simulation gate before real
+    // hardware, see FIXATION-WORD-POSTMORTEM.md item 6's verification note.
+    // WBDIAG_DATA0-7 hardcode 8x 32-bit slices (256 bits, one half) --
+    // correct for the deployed LANES=64 (LANES*4=256), NOT generically
+    // parameterized; the check below flags it loudly if that ever changes.
+    wire [LANES*8-1:0] wbdiag_pair;
+    wire [LANES*4-1:0] wbdiag_data = wbdiag_addr_r[0] ? wbdiag_pair[LANES*8-1:LANES*4]
+                                                        : wbdiag_pair[LANES*4-1:0];
+`ifndef SYNTHESIS
+    initial if (LANES*4 != 256)
+        $display("xheep_kevgpt_peripheral: WARNING LANES=%0d makes wbdiag_data %0d bits, but WBDIAG_DATA0-7 only expose the low 256 -- add more WBDIAG_DATA registers before trusting this diagnostic", LANES, LANES*4);
+`endif
     wire [5:0] windex = reg_req_i.addr[7:2];
     // tok_id/core_tok_out width: was hardcoded [8:0] (max 511), fine for
     // every char-level VOCAB (<=193) this project ever deployed but a real
@@ -218,6 +257,7 @@ module xheep_kevgpt_peripheral #(
     reg          wld_ld_start_r;
     reg [28:0]   wld_ld_ddr_addr_r;
     reg [31:0]   wld_ld_words_r;
+    reg [$clog2(WWORDS)-1:0] wbdiag_addr_r;
 
     // ---- write side: one register-file update per accepted write request ----
     // (matches the AXI shell's pulse semantics for go/wl_we/seed_we -- each is
@@ -229,6 +269,7 @@ module xheep_kevgpt_peripheral #(
             tok_id<=0; pos<=0; rd_sel<=0; rd_addr<=0; dbg_stop<=0;
             seed<=0; seed_we<=0;
             wld_ld_start_r<=0; wld_ld_ddr_addr_r<=0; wld_ld_words_r<=0;
+            wbdiag_addr_r<=0;
         end else if (reg_req_i.valid && reg_req_i.write) begin
             go_pulse<=0; wl_rst<=0; wl_we<=0; seed_we<=0; wld_ld_start_r<=0;   // 1-cycle pulses default low
             case (windex)
@@ -243,6 +284,7 @@ module xheep_kevgpt_peripheral #(
                 6'hD: wld_ld_ddr_addr_r <= reg_req_i.wdata[28:0];          // 0x34 WLD_ADDR
                 6'hE: wld_ld_words_r    <= reg_req_i.wdata;                // 0x38 WLD_WORDS
                 6'hF: wld_ld_start_r    <= reg_req_i.wdata[0];             // 0x3C WLD_CTRL
+                6'h14: wbdiag_addr_r    <= reg_req_i.wdata[$clog2(WWORDS)-1:0]; // 0x50 WBDIAG_ADDR
                 default: ;
             endcase
         end else begin
@@ -285,6 +327,14 @@ module xheep_kevgpt_peripheral #(
             6'h10: rdata_mux = {23'b0, health_sticky_i};  // 0x40 DDR_HEALTH
             6'h11: rdata_mux = {24'b0, health_count_i};   // 0x44 DDR_ERR_COUNT
             6'h13: rdata_mux = weight_stream_crc;         // 0x4C WEIGHT_STREAM_CRC
+            6'h15: rdata_mux = wbdiag_data[31:0];          // 0x54 WBDIAG_DATA0
+            6'h16: rdata_mux = wbdiag_data[63:32];         // 0x58 WBDIAG_DATA1
+            6'h17: rdata_mux = wbdiag_data[95:64];         // 0x5C WBDIAG_DATA2
+            6'h18: rdata_mux = wbdiag_data[127:96];        // 0x60 WBDIAG_DATA3
+            6'h19: rdata_mux = wbdiag_data[159:128];       // 0x64 WBDIAG_DATA4
+            6'h1A: rdata_mux = wbdiag_data[191:160];       // 0x68 WBDIAG_DATA5
+            6'h1B: rdata_mux = wbdiag_data[223:192];       // 0x6C WBDIAG_DATA6
+            6'h1C: rdata_mux = wbdiag_data[255:224];       // 0x70 WBDIAG_DATA7
             default: rdata_mux = 32'b0;
         endcase
     end
@@ -335,6 +385,7 @@ module xheep_kevgpt_peripheral #(
         .wld_ld_words(wld_ld_words_r), .wld_ld_done(core_wld_done),
         .wl_rd_req_valid(wl_rd_req_valid), .wl_rd_req_ready(wl_rd_req_ready), .wl_rd_req_addr(wl_rd_req_addr),
         .wl_rd_ret_valid(wl_rd_ret_valid), .wl_rd_ret_ready(wl_rd_ret_ready), .wl_rd_ret_data(wl_rd_ret_data),
-        .weight_stream_crc(weight_stream_crc)
+        .weight_stream_crc(weight_stream_crc),
+        .wbdiag_addr(wbdiag_addr_r), .wbdiag_pair(wbdiag_pair)
     );
 endmodule

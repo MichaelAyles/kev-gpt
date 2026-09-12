@@ -78,7 +78,28 @@ module gemv_banked_resident_vec #(
     // at LANES=256. The sequencer addresses embeds from even pair bases.
     input  wire                          emb_sel,
     input  wire [$clog2(WWORDS)-1:0]     emb_addr,
-    output wire [LANES*8-1:0]            emb_pair
+    output wire [LANES*8-1:0]            emb_pair,
+    // ---- weight-bank diagnostic readback (fixation-word investigation, item 6:
+    // "snapshot the suspect rows directly" -- see FIXATION-WORD-POSTMORTEM.md).
+    // weight_bank_tdp's port A is otherwise COMPLETELY UNUSED for reading in
+    // this instantiation (tied to raddr_a=0, rword_a left unconnected below) --
+    // nothing in the compute path (MAC accumulation reads port B only, via
+    // waddr/wword_rd) ever touches port A's read side. That makes it a free,
+    // zero-risk tap: driving it from a CPU-controlled address and observing
+    // the result can never perturb inference, at any time, running or idle.
+    //
+    // K2=1 (this design's own deployed config) puts weight_bank_tdp in DP=1
+    // column-parity-split mode: raddr_a's LSB is IGNORED by the memory --
+    // rword_a always returns the EVEN-indexed bank, rword1_a always the ODD
+    // one, at the pair index raddr_a[WAW-1:1], regardless of raddr_a[0].
+    // Exposing only rword_a (as an earlier version of this port did) silently
+    // returns the wrong row's data for every odd address -- caught by item
+    // 6's own simulation gate before real hardware (see
+    // FIXATION-WORD-POSTMORTEM.md item 6's verification note). Fixed the
+    // same way emb_pair (above) already solves this exact problem: expose
+    // BOTH halves, let the consumer pick by address parity.
+    input  wire [$clog2(WWORDS)-1:0]     wbdiag_addr,
+    output wire [LANES*8-1:0]            wbdiag_pair   // {odd(rword1_a), even(rword_a)}
 );
     localparam integer WBITS  = LANES*4;
     localparam integer YBITS  = LANES*32;
@@ -127,7 +148,7 @@ module gemv_banked_resident_vec #(
         .clk(clk), .clk2x(clk),
         .ld_rst(ld_rst), .w_we(w_we), .w_data(w_data),
         .raddr_b(waddr), .rword_b(wword_rd), .rword1_b(wword2_rd),
-        .raddr_a({$clog2(WWORDS){1'b0}}), .rword_a(), .rword1_a());
+        .raddr_a(wbdiag_addr), .rword_a(wbdiag_pair[WBITS-1:0]), .rword1_a(wbdiag_pair[2*WBITS-1:WBITS]));
 
     // ---- run FSM + RLAT-deep read/mac pipeline -------------------------------
     localparam [1:0] IDLE = 2'd0, RUN = 2'd1, FIN = 2'd2;

@@ -221,7 +221,19 @@ module sequencer_vec #(
     // arbiter -> MIG -> CDC end to end, which no prior diagnostic covered
     // (KEVGPT_DIAG_DUMP_HEAD reads DDR3 via a plain CPU load, bypassing
     // this entire path).
-    output wire [31:0]          weight_stream_crc
+    output wire [31:0]          weight_stream_crc,
+
+    // FIXATION-WORD-POSTMORTEM.md item 6: raw readback of weight_bank_tdp's
+    // OWN resident content, through u_gemv's otherwise-unused port A (see
+    // gemv_banked_resident_vec.sv's own comment on wbdiag_addr/wbdiag_pair
+    // for why this is a free, zero-risk tap, and why it must expose BOTH
+    // the even and odd DP=1 column-parity halves). Lets firmware directly
+    // diff what's actually resident on-chip after a real streaming reload
+    // against the known-correct exported weight image, closing the gap
+    // every prior diagnostic left open (CRC only checked aggregate/rolling
+    // correctness, never a specific row's content).
+    input  wire [$clog2(WWORDS)-1:0] wbdiag_addr,
+    output wire [LANES*8-1:0]        wbdiag_pair
 );
     localparam integer ROWS  = D    / P;
     localparam integer ROWS3 = D3   / P;
@@ -613,7 +625,8 @@ module sequencer_vec #(
         .x_we(gv_xwe), .x_data(gv_xdata),
         .start(gv_start), .done(gv_done), .gdone(gv_gdone),
         .rd_addr(gv_rdaddr[$clog2(GEMV_MMAX/P)-1:0]), .y_out(gv_yout),
-        .emb_sel(emb_sel_w), .emb_addr(emb_addr_w), .emb_pair(emb_pair));
+        .emb_sel(emb_sel_w), .emb_addr(emb_addr_w), .emb_pair(emb_pair),
+        .wbdiag_addr(wbdiag_addr), .wbdiag_pair(wbdiag_pair));
 
     // ---- vec_dequant (P lanes, runtime frac) -----------------------------------
     reg               dq_vin;

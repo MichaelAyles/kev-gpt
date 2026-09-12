@@ -113,6 +113,12 @@ module tb;
     // simulation's own value here, for a real captured seed, is the
     // "expected" value to compare real hardware's own report against.
     wire [31:0] weight_stream_crc;
+    // FIXATION-WORD-POSTMORTEM.md item 6: same real-hardware readback tap
+    // (weight_bank_tdp's port A, via KEVGPT_REG_WBDIAG_*) -- driven here to
+    // verify the new RTL plumbing itself before trusting a real-hardware
+    // capture (bit-honest before fast).
+    reg  [$clog2(WWORDSP)-1:0] wbdiag_addr_tb;
+    wire [LANES*8-1:0]         wbdiag_pair_tb;  // {odd, even} -- DP=1 column-parity halves
 
     wire              rd_cmd_valid;
     wire [ADDR_W-1:0] rd_cmd_addr;
@@ -170,7 +176,8 @@ module tb;
         .wl_rd_req_addr(wl_rd_req_addr),
         .wl_rd_ret_valid(wl_rd_ret_valid), .wl_rd_ret_ready(wl_rd_ret_ready),
         .wl_rd_ret_data(wl_rd_ret_data),
-        .weight_stream_crc(weight_stream_crc));
+        .weight_stream_crc(weight_stream_crc),
+        .wbdiag_addr(wbdiag_addr_tb), .wbdiag_pair(wbdiag_pair_tb));
 
     reg [VIDXWP-1:0] prompt [0:PLEN-1];
     reg [VIDXWP-1:0] stream [0:PLEN+NGEN-1];
@@ -179,7 +186,7 @@ module tb;
 
     initial begin
         rst = 1'b1; go = 1'b0; tok = 0; pos = 9'd0; rsel = 0; raddr = 0;
-        seed_r = 32'b0; seed_we_r = 1'b0;
+        seed_r = 32'b0; seed_we_r = 1'b0; wbdiag_addr_tb = 0;
         // stage the FULL weight image into the simulated DDR3 directly --
         // WBITS(=LANES*4)=256=DATA_W at LANES=64, so one wrom.mem line is
         // exactly one DMA beat; no unpacking arithmetic of its own here,
@@ -209,6 +216,52 @@ module tb;
         for (i = PLEN; i < PLEN + NGEN; i = i + 1) $fwrite(fs, "%0d\n", stream[i]);
         $fclose(fs);
         $display("WEIGHT_STREAM_CRC,0x%08x", weight_stream_crc);
+
+        // ---- FIXATION-WORD-POSTMORTEM.md item 6: verify the new wbdiag
+        // readback tap against the known-correct source directly. Only
+        // meaningful at LANES=64 (this testbench's own header comment: one
+        // wrom.mem line IS one 256-bit DMA beat IS one weight_bank_tdp row
+        // at that LANES value, no sub-beat unpacking arithmetic in play) --
+        // skip otherwise rather than risk a false PASS/FAIL from an
+        // unaccounted-for unit mismatch. Checks vocab id 2213's ("care")
+        // own group (2213/64=34, 2213%64=37 -- weight_bank_tdp rows
+        // 34*128..34*128+127) plus row 0 as a boundary-free sanity anchor.
+        // Read IMMEDIATELY after the loop above, before any further reload
+        // could overwrite the head block's single-buffered image -- same
+        // timing constraint real hardware's own firmware dump has to respect.
+        if (LANES == 64) begin : wbdiag_check
+            integer r, wbd_fail, target_vocab, group;
+            reg [255:0] expect_row, got_row;
+            wbd_fail = 0;
+            target_vocab = (VOCABP > 2213) ? 2213 : 0;
+            group = target_vocab / 64;
+            $display("WBDIAG_CHECK_START,target_vocab=%0d,group=%0d,lane=%0d",
+                      target_vocab, group, target_vocab % 64);
+            for (r = -1; r < 128; r = r + 1) begin
+                if (r == -1) wbdiag_addr_tb = 0;              // sanity anchor
+                else         wbdiag_addr_tb = group*128 + r;  // group's own 128 rows
+                @(posedge clk); #1;                            // settle: 1-cyc registered read + margin
+                // DP=1 column-parity split: raddr_a's LSB is ignored by the
+                // memory itself -- rword_a (pair low half) always returns
+                // the EVEN bank, rword1_a (pair high half) always the ODD
+                // one. Select by the target row's own LSB, same fix as
+                // xheep_kevgpt_peripheral.sv's wbdiag_data mux.
+                got_row    = wbdiag_addr_tb[0] ? wbdiag_pair_tb[LANES*8-1:LANES*4]
+                                                : wbdiag_pair_tb[LANES*4-1:0];
+                expect_row = u_mem.mem[dut.WB_HEAD + wbdiag_addr_tb];
+                if (got_row !== expect_row) begin
+                    wbd_fail = wbd_fail + 1;
+                    if (wbd_fail <= 5)
+                        $display("WBDIAG_CHECK_MISMATCH,row=%0d,got=%064x,expect=%064x",
+                                  wbdiag_addr_tb, got_row, expect_row);
+                end
+            end
+            $display("WBDIAG_CHECK_VERDICT,match=%0d,rows_checked=129,mismatches=%0d",
+                      (wbd_fail == 0), wbd_fail);
+        end else begin
+            $display("WBDIAG_CHECK_SKIPPED,LANES=%0d (only meaningful at LANES=64)", LANES);
+        end
+
         $display("TB_DONE");
         $finish;
     end
