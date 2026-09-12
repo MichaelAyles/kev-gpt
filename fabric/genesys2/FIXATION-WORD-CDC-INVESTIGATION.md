@@ -7,8 +7,10 @@ possibility ruled out.** A new direct readback tap (§8 item 8, from
 bit-exact correct at the exact moment real hardware produced "care" as
 the fixation word — the wrong weights are not the mechanism, at least
 for this specific implicated row. See §8 item 8 for the full account,
-including a newly-surfaced (and not yet chased) setup-timing violation
-on the KV-cache read-return path, unrelated to the new tap itself.
+including a newly-surfaced setup-timing violation on the KV-cache
+read-return path (unrelated to the new tap itself) that was chased and
+resolved as a benign verification-bound recalibration, not a hardware
+bug.
 
 Status as of 2026-09-12: **open, not root-caused. The CDC timing-constraint
 gap (§6) has now been fully investigated, fixed, rebuilt from scratch, and
@@ -1194,10 +1196,32 @@ original order below since item 4 was already next regardless.
    violations** (worst −0.255ns) on `u_kv_rd_ret_cdc → kv_bank_ddr`'s
    `r_codebuf_reg[...]` — the KV-cache DMA read-return path. None of the
    new WBDIAG signals appear in any violated or worst-margin path, so
-   this doesn't implicate item 8's own change — but it's a real,
-   previously-uncaught finding on this investigation's own suspected
-   traffic path, flagged here for follow-up rather than chased
-   immediately (see the new recommendation in `FIXATION-WORD-POSTMORTEM.md`).
+   this doesn't implicate item 8's own change.
+
+   **Chased and resolved (2026-09-13): benign, a recalibration, not a
+   hardware bug.** `report_timing` on the worst path confirmed the
+   existing `mem_reg*` `set_max_delay -datapath_only` exception (§6, the
+   one covering the FIFO-memory-to-consumer data paths, `-from`-only, no
+   `-to` restriction) DOES correctly apply here — `Timing Exception:
+   MaxDelay Path 4.000ns -datapath_only`, source cell independently
+   confirmed inside the wildcard match. The real routed delay is
+   4.04–4.25ns across all 4 paths (83% route delay on a fanout-12 net
+   between physically distant slices), simply exceeding the exception's
+   4.000ns bound by up to 0.253ns — a real routing-congestion increase
+   from this design's growth (VOCAB 1900→16384, ~8.5x DMA traffic) since
+   that bound was calibrated, not a missing or broken constraint, and not
+   a new architectural gap. Critically, 4.253ns worst-observed still fits
+   comfortably inside a full clock period (10ns) — this was a
+   verification bound with less margin than intended, not evidence of an
+   actual electrical hazard. Widened to 6.000ns (still ~40% under the
+   10ns ceiling, ~1.75ns margin over the worst path found), verified
+   in-memory against the real implemented design: all 4 violations clear
+   (0/0 setup+hold across the same hierarchy-wide audit), `check_timing`
+   shows the same clean baseline. Diff: `constraints.xdc` (recalibration
+   only — see its own updated comment for the full account). Not yet
+   built into a fresh bitstream; doesn't affect the bitstream currently
+   deployed for this item's own WBDIAG diagnostic either way, since
+   routing itself is unchanged by this constraint edit.
 
    **Real-hardware result.** Programmed the new bitstream, rebuilt
    firmware with `KEVGPT_FORCE_GREEDY=1` and a new

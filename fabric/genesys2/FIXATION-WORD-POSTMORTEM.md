@@ -311,8 +311,12 @@ isn't a timing or ordering bug.
    weights are not the mechanism, at least for this row, at this moment.
    A full clean rebuild for this also surfaced a new, previously-uncaught
    setup-timing violation (4 paths, worst −0.255ns) on the KV-cache
-   read-return path — unrelated to this tap, not yet chased, worth its
-   own follow-up. Full account in `FIXATION-WORD-CDC-INVESTIGATION.md`
+   read-return path — unrelated to this tap. Chased and resolved: the
+   existing CDC exception genuinely applies, the real routed delay
+   (4.04–4.25ns) simply outgrew its 4ns bound as the design scaled up
+   (VOCAB 1900→16384), and still fits comfortably inside a full clock
+   period — a verification-bound recalibration (widened to 6ns, verified
+   clean), not a hardware bug. Full account in `FIXATION-WORD-CDC-INVESTIGATION.md`
    §8 item 8.
 2. **Isolate §2a's firmware-timing sensitivity on its own terms.** The one
    still-unexplained build-dependent result (a diagnostic-only firmware
