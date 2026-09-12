@@ -1,5 +1,15 @@
 # Fixation-word investigation: real-hardware-only text corruption in the multi-master DDR read path
 
+Status as of 2026-09-13: **open, not root-caused, but one more concrete
+possibility ruled out.** A new direct readback tap (§8 item 8, from
+`FIXATION-WORD-POSTMORTEM.md`'s own reassessment) confirmed that
+"care"'s (vocab id 2213) real DMA-streamed head-weight data is
+bit-exact correct at the exact moment real hardware produced "care" as
+the fixation word — the wrong weights are not the mechanism, at least
+for this specific implicated row. See §8 item 8 for the full account,
+including a newly-surfaced (and not yet chased) setup-timing violation
+on the KV-cache read-return path, unrelated to the new tap itself.
+
 Status as of 2026-09-12: **open, not root-caused. The CDC timing-constraint
 gap (§6) has now been fully investigated, fixed, rebuilt from scratch, and
 retested on real hardware — and definitively ruled out.** Two real,
@@ -890,6 +900,13 @@ original order below since item 4 was already next regardless.
    already a known gap before this update, still unresolved. Closing it
    needs either a much longer/matching-length simulation or a firmware cap
    on generation length, neither done yet.
+
+   **Status update (2026-09-13): superseded by a more direct test, item 6
+   below — see that item for the actual result.** A rolling CRC over the
+   whole session can only ever prove "the aggregate byte stream was
+   consistent," never "this specific row's data was correct" — not
+   strong enough evidence either way for the fixation-word question.
+   Item 6's per-row readback closes that gap directly.
 2. ~~Make the owner FIFOs' `in_ready_o` real backpressure, in both
    `mig_dual_master_arbiter.sv` and `mig_read_mux2.sv`~~ **DONE** — see §4's
    status update and §4a for the fix, the gate it was verified against, and
@@ -1142,6 +1159,74 @@ original order below since item 4 was already next regardless.
    A third independent data point (after item 5's simulation gate and item
    6's ILA) all agreeing: no owner-FIFO invariant violation observed
    anywhere, under any form of exercise, on this design.
+8. **New, from `FIXATION-WORD-POSTMORTEM.md`'s own reassessment (its item
+   6, not to be confused with this list's item 6 above): direct row-level
+   readback of `weight_bank_tdp`'s real resident content.** Done —
+   result is a clean, direct negative for "corrupted head-weight data"
+   as the cause, at least for vocab id 2213 ("care"), captured at the
+   exact moment the symptom fired.
+
+   The postmortem's own reassessment argued every hypothesis so far
+   (§6's CDC margins, §4's owner-FIFO races, item 1's rolling CRC) tested
+   *transport/ordering*, never directly asked "did the correct weight
+   data actually land for the specific row this investigation keeps
+   implicating." Built a new tap: `weight_bank_tdp`'s port A is
+   completely unused for reading in the real design (tied to a constant,
+   its output left unconnected) — a free, zero-risk readback path,
+   wired through `gemv_banked_resident_vec.sv` → `sequencer_vec.sv` →
+   two new `xheep_kevgpt_peripheral.sv` registers (`0x50 WBDIAG_ADDR`,
+   `0x54–0x70 WBDIAG_DATA0-7`). Verified in simulation first (bit-honest
+   before fast): an early version exposed only half of `weight_bank_tdp`'s
+   DP=1 column-parity-split storage, silently returning the wrong row's
+   data for every odd address — caught by a new simulation gate
+   (64/128 rows mismatched) before touching real hardware, fixed by
+   exposing both halves and selecting by row parity (same pattern the
+   design's own `emb_pair` port already used for this exact problem).
+   Re-verified: all 129 checked rows matched the known-correct source
+   bit-exactly.
+
+   Full clean resynthesis (~50 min) to deploy the new registers, plus a
+   dedicated `kevgpt_seq`-hierarchy D-pin timing audit (52,827 pins
+   across `sequencer_vec`/`kevgpt_ddr_bundle`/`weight_bank_tdp`/
+   `kv_bank_ddr`/`weight_loader_ddr`/`gemv_banked_resident_vec`/
+   `vec_attn_w`) before trusting the bitstream: 0 hold violations (worst
+   margin 0.052ns, in `vec_attn_w`'s accumulators), but **4 new setup
+   violations** (worst −0.255ns) on `u_kv_rd_ret_cdc → kv_bank_ddr`'s
+   `r_codebuf_reg[...]` — the KV-cache DMA read-return path. None of the
+   new WBDIAG signals appear in any violated or worst-margin path, so
+   this doesn't implicate item 8's own change — but it's a real,
+   previously-uncaught finding on this investigation's own suspected
+   traffic path, flagged here for follow-up rather than chased
+   immediately (see the new recommendation in `FIXATION-WORD-POSTMORTEM.md`).
+
+   **Real-hardware result.** Programmed the new bitstream, rebuilt
+   firmware with `KEVGPT_FORCE_GREEDY=1` and a new
+   `KEVGPT_DIAG_WBDIAG_VOCAB=2213` toggle (dumps vocab 2213's full
+   D=128-element INT4 weight row, read back through the real streaming
+   path, right after the last generated token's head GEMV), resent
+   weights, and ran prompt "in the forest" — which reproduced the
+   fixation symptom live in the same reply this dump was captured from:
+   *"care for animals care. one day, a little bird came to the
+   forest..."* Captured `KEVGPT_WBDIAG_START,vocab=2213,group=34,lane=37`
+   followed by 128 hex nibbles. **Compared byte-for-byte against the
+   known-correct value independently extracted from the same checkpoint's
+   `wrom.mem` (group 34's 128 rows, nibble 37 of each): exact match, zero
+   differences.**
+
+   **Conclusion: the real DMA-streamed weight data for "care" was
+   bit-exact correct at the exact moment real hardware picked "care" as
+   the wrong word.** This rules out corrupted/misrouted head-weight data
+   as the mechanism for this specific implicated vocab id — the defect,
+   whatever it is, is not "the wrong weights got loaded for this row."
+   Remaining candidates, narrowed by this result: the same corruption
+   mechanism hitting a *different* part of the weight image (QKV/
+   attention/MLP weights across the 12 layers — not checked this way),
+   the hidden-state/activation computation itself (upstream of the
+   classifier, never isolated this directly), or a genuine real-silicon
+   numerical/timing effect during the GEMV accumulation itself — the
+   original hypothesis from early in `model/SCALE-UP-LOG.md`, deprioritized
+   in favor of the CDC/FIFO hypotheses months ago and never conclusively
+   ruled back in or out.
 
 ## 9. Evidence trail / artifacts
 

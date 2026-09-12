@@ -295,12 +295,25 @@ isn't a timing or ordering bug.
 
 ## 8. Recommended next steps
 
-1. **Audit the row-2048–4095 address computation directly** *(highest
-   value)*. Walk `weight_loader_ddr.sv`'s and `weight_bank_tdp.sv`'s
-   address/row arithmetic by hand for every (block, layer, head)
-   combination that resolves into that row range, specifically looking for
-   aliasing, off-by-N, or a boundary condition — not another timing sweep.
-   This is new work; nothing in the existing item list (1–7) targets it.
+1. ~~**Audit the row-2048–4095 address computation directly.**~~ **Done,
+   2026-09-13 — result: clean, direct negative for corrupted weight
+   data.** Reading turned up that `weight_loader_ddr.sv` has no per-load
+   address arithmetic at all in the deployed streaming mode (every
+   reload target is a fixed compile-time constant) — so instead of
+   auditing arithmetic that doesn't exist, built a direct readback tap
+   on `weight_bank_tdp`'s own otherwise-unused port A, verified it in
+   simulation (catching and fixing a real bug in the tap itself — an
+   unhandled DP=1 column-parity split that returned the wrong row's data
+   for every odd address), then deployed to real hardware. Captured
+   vocab id 2213's ("care") real, DMA-streamed weight row immediately
+   after a live reproduction of the fixation symptom itself — **exact
+   bit-for-bit match** against the known-correct source. The wrong
+   weights are not the mechanism, at least for this row, at this moment.
+   A full clean rebuild for this also surfaced a new, previously-uncaught
+   setup-timing violation (4 paths, worst −0.255ns) on the KV-cache
+   read-return path — unrelated to this tap, not yet chased, worth its
+   own follow-up. Full account in `FIXATION-WORD-CDC-INVESTIGATION.md`
+   §8 item 8.
 2. **Isolate §2a's firmware-timing sensitivity on its own terms.** The one
    still-unexplained build-dependent result (a diagnostic-only firmware
    change shifting which wrong token wins, same bitstream) was folded into
