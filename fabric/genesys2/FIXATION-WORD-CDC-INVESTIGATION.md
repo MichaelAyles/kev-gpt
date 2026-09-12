@@ -45,11 +45,13 @@ unfinished read and then deadlock. Fixed; re-swept 11 random seeds
 (§4/§8 item 2) held up under genuine sustained three-way contention with no
 new defect surfacing — see §8 item 5 and §3's table for the full account.
 With items 1–5 all exhausted, item 6 (ILA on architectural invariants on
-real hardware) is done for a first pass: armed all 8 owner-FIFO invariant
-flags on real hardware and ran 15 real generations reproducing the
-fixation-word symptom — the ILA never triggered. A real, if modest-sample,
-negative result for owner-FIFO races manifesting as one of these named
-invariants on real silicon. See §8 item 6 for the full account, including
+real hardware) is done: armed all 8 owner-FIFO invariant flags on real
+hardware and ran 96 real generations (12 prompts × 8 repeats, ~265s
+continuous UART-driven DMA traffic) reproducing the fixation-word symptom
+pervasively ("cardinal" 90x, "chug" 56x, verbatim word-repeat loops) —
+the ILA never triggered, not once. A substantial negative result for
+owner-FIFO races manifesting as one of these named invariants on real
+silicon. See §8 item 6 for the full account, including
 two real ILA-bring-up methodology issues found and fixed
 (`save_constraints -force` silently rewriting six tracked constraint
 files; this board's JTAG bridge not keeping an ILA armed across a
@@ -229,7 +231,7 @@ per §8's updated priority list.
 | Marginal/random real-silicon timing noise | Narrowed, not ruled out | The 40-trial repeated-greedy-decode test (above) is 100% deterministic *within one build*. This only rules out *pure random/probabilistic* noise. §2a's build-to-build wrong-token change is real evidence for a *live runtime race* in general (see §2a's correction — it can't be an FPGA placement effect, since those builds shared one bitstream) — it just isn't evidence specifically for §6's CDC margins, which the direct real-hardware retest below rules out. |
 | **CDC timing-constraint gap (§6) — both the missing root clock and the razor-thin `async_fifo_gray` margins** | **Ruled out, definitively** | Both real bugs (confirmed via live Vivado queries, not guesses) were fixed, verified in-memory two independent ways each, built into a completely fresh bitstream (`AUTO_INCREMENTAL_CHECKPOINT` disabled, full clean synth+impl+bitgen, no incremental reuse), and re-tested on real hardware against the exact same 5-prompt greedy test as §2a. **Result: byte-for-byte identical wrong tokens at the identical positions** — "care"/"carefree" at token 0 for the same 3/5 prompts, same 100% determinism across 8 repeats each. Fixing two real, previously-invisible timing gaps changed nothing observable. Whatever causes the fixation-word symptom, it is not a static CDC synchronizer margin or a missing top-level clock constraint. |
 | Owner-FIFO/backpressure defect surviving under genuine sustained contention (§8 item 5, Hypothesis B) | Ruled out (for the scenarios this gate covers) | Built `tb_kevgpt_ddr_bundle_full.sv` — three concurrent generators (KV, weight, synthetic CPU side-B) running continuously through a randomized-latency, randomized-backpressure MIG model, checked against reference on every transaction, not phased or end-of-test-only. A real bug did surface, but in the gate itself (a stale-counter race in the read-completion detector, fixed — see §8 item 5); after that fix, 11 random seeds (including the two that used to hang forever) all pass clean, 0 errors. §4/§8 item 2's owner-FIFO fix held up under sustained three-way contention; no new defect found. |
-| Owner-FIFO architectural invariants violated on real hardware (§8 item 6) | Not observed (modest sample) | Real ILA on `mig_read_mux2`/`mig_dual_master_arbiter`'s owner-FIFO invariants (outstanding-counter mismatch, push-while-not-ready, pop-while-empty — 8 flags, OR'd trigger), armed and exercised with 15 real generations reproducing the fixation-word symptom. Never triggered. Small sample relative to §6's retest; a real data point, not yet as conclusive. |
+| Owner-FIFO architectural invariants violated on real hardware (§8 item 6) | Not observed, substantial sample | Real ILA on `mig_read_mux2`/`mig_dual_master_arbiter`'s owner-FIFO invariants (outstanding-counter mismatch, push-while-not-ready, pop-while-empty — 8 flags, OR'd trigger), armed and exercised across two runs totaling 111 real generations (15 then 96 more, 12 prompts × 8 repeats, ~265s continuous DMA traffic on the second), with the fixation-word symptom firing pervasively ("cardinal" 90x, "chug" 56x, verbatim repeat loops). Never triggered, not once, across either run. |
 
 ## 4. What IS implicated: modules, signals, and the traffic path
 
@@ -1016,14 +1018,27 @@ original order below since item 4 was already next regardless.
    — `STATUS.CORE_STATUS` stayed `WAITING FOR TRIGGER` throughout (sample
    count advancing normally as the pre-trigger ring buffer filled, not a
    capture event). None of the 8 owner-FIFO architectural invariants was
-   violated during this run. This is a real, if modest-sample, negative
-   result for Hypothesis B specifically manifesting as one of these named
-   invariant violations on real hardware — consistent with the full
-   contention simulation gate (§8 item 5) also passing clean after its
-   own bugfix. Worth a larger sample (more prompts/repeats, deeper/longer
-   capture) before treating this as as conclusive as §6's CDC retest, but
-   the first real-hardware data point points the same direction: away
-   from owner-FIFO races, at least in this specific form.
+   violated during this run.
+
+   **Re-ran at ~6x the sample, same continuous armed session, no reload
+   needed** (board was still up from the first pass): 12 varied prompts
+   × 8 repeats = 96 real generations, 265s of continuous UART-driven DMA
+   traffic. The fixation-word/repetition-collapse symptom fired
+   pervasively across this run — "cardinal" 90 times, "chug" 56 times,
+   "carefree" 3 times, plus at least one verbatim word-level repetition
+   loop (`"bird's bird's bird's bird's..."` in one reply) — this is not a
+   marginal or lucky-draw sample, the symptom-producing conditions were
+   genuinely hit hard and often. **Still zero triggers** across all 96
+   generations. This meaningfully strengthens the negative result: a
+   symptom this reliably reproducible, exercised this many times under
+   continuous real DMA contention, never once tripped any of the 8 named
+   owner-FIFO invariants. Combined with the full contention simulation
+   gate (§8 item 5) also passing clean, Hypothesis B (owner-FIFO races,
+   at least in this specific invariant-violation form) is now on much
+   firmer ground as ruled out — not yet at §6's CDC-retest level of
+   certainty (this is still one board, one bitstream, one ILA
+   configuration), but a substantial, repeated, symptom-co-occurring
+   negative result rather than a single modest sample.
 7. **Longer-term, once fixed**: keep a small permanent hardware health
    monitor (owner-FIFO overflow/underflow counters, request/response
    counters per master, a sticky `DDR_PROTOCOL_ERROR` bit) so any future

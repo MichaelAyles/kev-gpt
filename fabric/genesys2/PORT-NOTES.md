@@ -6383,3 +6383,42 @@ capture, maybe a second ILA window further into a long reply rather than
 just the first ~512 pre-trigger cycles) before fully closing out
 Hypothesis B; item 7's permanent hardware health monitors as a next lead
 if this holds up.
+
+## Bigger-sample ILA rerun -- 96 generations, symptom pervasive, still zero triggers
+
+Direct continuation, same session, same armed bitstream still programmed
+on the board (no reload needed -- confirmed alive with a quick sanity
+prompt over UART first). Widened the prompt-test script from 5 prompts x
+3 repeats (15 generations) to 12 varied prompts x 8 repeats (96
+generations), same arm-inside-one-continuous-hw_manager-connection
+pattern as the first pass (`exec`'d as a child process from the same Tcl
+script that arms the ILA, `TRIGGER_CONDITION OR` across all 8 flags).
+
+96 generations completed in 265s of continuous UART-driven real DMA
+traffic. Checked the actual replies afterward, not just the trigger
+status, to make sure this wasn't a lucky/unrepresentative sample: the
+fixation-word/repetition-collapse symptom fired constantly --
+`grep -oE "carefree|cardinal|chug"` across the full transcript found
+"cardinal" 90 times, "chug" 56 times, "carefree" 3 times, plus at least
+one verbatim word-level repetition loop (`"bird's bird's bird's
+bird's..."`, six-plus repeats in a single reply). This is squarely the
+symptom this whole investigation exists to explain, hit hard and
+repeatedly, not a marginal case.
+
+**Zero triggers, across all 96 generations.** `STATUS.CORE_STATUS`
+stayed `WAITING FOR TRIGGER` the entire run. Combined with the first
+pass's 15 clean generations, that's 111 real generations total, with the
+symptom reproducing pervasively, and not one violation of any of the 8
+owner-FIFO architectural invariants (`mig_read_mux2`'s single owner FIFO,
+`mig_dual_master_arbiter`'s separate rd/wr owner FIFOs -- outstanding-
+counter mismatch, push-while-not-ready, pop-while-empty).
+
+This meaningfully strengthens Hypothesis B's negative result -- a
+symptom this reliably reproducible, exercised this many times under
+continuous real contention, never once tripped any of these specific
+named invariants. Not yet at §6's CDC-retest level of certainty (one
+board, one bitstream, one ILA configuration, and there could always be a
+real violation this specific probe set doesn't happen to be watching),
+but a real, repeated, symptom-co-occurring negative result rather than a
+single small sample. Item 7 (permanent hardware health monitors) is the
+next lead if no other candidate surfaces first.
