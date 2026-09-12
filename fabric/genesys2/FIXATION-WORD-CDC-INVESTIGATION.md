@@ -45,7 +45,18 @@ unfinished read and then deadlock. Fixed; re-swept 11 random seeds
 (§4/§8 item 2) held up under genuine sustained three-way contention with no
 new defect surfacing — see §8 item 5 and §3's table for the full account.
 With items 1–5 all exhausted, item 6 (ILA on architectural invariants on
-real hardware) is the next lead.
+real hardware) is done for a first pass: armed all 8 owner-FIFO invariant
+flags on real hardware and ran 15 real generations reproducing the
+fixation-word symptom — the ILA never triggered. A real, if modest-sample,
+negative result for owner-FIFO races manifesting as one of these named
+invariants on real silicon. See §8 item 6 for the full account, including
+two real ILA-bring-up methodology issues found and fixed
+(`save_constraints -force` silently rewriting six tracked constraint
+files; this board's JTAG bridge not keeping an ILA armed across a
+disconnect) and a false alarm properly resolved (a `clk_gen`/CPU-FPU
+timing violation surfaced mid-bring-up turned out to be the same
+already-known, already-triaged issue from this document's own earlier §6
+work, not a new regression, and not implicating kevgpt's own datapath).
 
 Separately, §8 item 2's owner-FIFO backpressure gap is fixed in both
 `mig_dual_master_arbiter.sv` and `mig_read_mux2.sv` (§4's status update),
@@ -218,6 +229,7 @@ per §8's updated priority list.
 | Marginal/random real-silicon timing noise | Narrowed, not ruled out | The 40-trial repeated-greedy-decode test (above) is 100% deterministic *within one build*. This only rules out *pure random/probabilistic* noise. §2a's build-to-build wrong-token change is real evidence for a *live runtime race* in general (see §2a's correction — it can't be an FPGA placement effect, since those builds shared one bitstream) — it just isn't evidence specifically for §6's CDC margins, which the direct real-hardware retest below rules out. |
 | **CDC timing-constraint gap (§6) — both the missing root clock and the razor-thin `async_fifo_gray` margins** | **Ruled out, definitively** | Both real bugs (confirmed via live Vivado queries, not guesses) were fixed, verified in-memory two independent ways each, built into a completely fresh bitstream (`AUTO_INCREMENTAL_CHECKPOINT` disabled, full clean synth+impl+bitgen, no incremental reuse), and re-tested on real hardware against the exact same 5-prompt greedy test as §2a. **Result: byte-for-byte identical wrong tokens at the identical positions** — "care"/"carefree" at token 0 for the same 3/5 prompts, same 100% determinism across 8 repeats each. Fixing two real, previously-invisible timing gaps changed nothing observable. Whatever causes the fixation-word symptom, it is not a static CDC synchronizer margin or a missing top-level clock constraint. |
 | Owner-FIFO/backpressure defect surviving under genuine sustained contention (§8 item 5, Hypothesis B) | Ruled out (for the scenarios this gate covers) | Built `tb_kevgpt_ddr_bundle_full.sv` — three concurrent generators (KV, weight, synthetic CPU side-B) running continuously through a randomized-latency, randomized-backpressure MIG model, checked against reference on every transaction, not phased or end-of-test-only. A real bug did surface, but in the gate itself (a stale-counter race in the read-completion detector, fixed — see §8 item 5); after that fix, 11 random seeds (including the two that used to hang forever) all pass clean, 0 errors. §4/§8 item 2's owner-FIFO fix held up under sustained three-way contention; no new defect found. |
+| Owner-FIFO architectural invariants violated on real hardware (§8 item 6) | Not observed (modest sample) | Real ILA on `mig_read_mux2`/`mig_dual_master_arbiter`'s owner-FIFO invariants (outstanding-counter mismatch, push-while-not-ready, pop-while-empty — 8 flags, OR'd trigger), armed and exercised with 15 real generations reproducing the fixation-word symptom. Never triggered. Small sample relative to §6's retest; a real data point, not yet as conclusive. |
 
 ## 4. What IS implicated: modules, signals, and the traffic path
 
@@ -933,12 +945,85 @@ original order below since item 4 was already next regardless.
    vendored `kevgpt-genesys2-soc` repo's own copy of `kv_bank_ddr.sv`/
    `kevgpt_ddr_bundle.sv` (unmodified by this item — only the testbench
    itself changed).
-6. **Only after 1–5 are clean should real ILA time be spent hunting
-   metastability directly**, and even then, per §6a: trigger on architectural
-   invariants (`owner_fifo_level != req_count - ret_count`, `owner_push &&
-   !owner_ready`, `owner_pop && owner_empty`) rather than trying to observe
-   the synchronizer flip-flops' metastable behavior itself, which is
-   difficult to catch and rarely conclusive.
+6. ~~Only after 1–5 are clean should real ILA time be spent hunting
+   metastability directly~~ **Done, first pass — armed and exercised on
+   real hardware, no trigger.** Added always-synthesized `mark_debug`-
+   tagged taps in `mig_read_mux2.sv` and `mig_dual_master_arbiter.sv`
+   mirroring each module's own simulation-only assertions exactly:
+   `outstanding_q != owner_count` (both the single owner FIFO in
+   `mig_read_mux2` and the separate rd/wr owner FIFOs in
+   `mig_dual_master_arbiter`), `owner_push_valid && !owner_ready` (rd and
+   wr), and `ret_valid`/`app_rd_data_valid_i` firing while the owner FIFO
+   is empty — 8 one-bit flags total, OR'd together as the ILA trigger
+   condition, plus the three owner-FIFO occupancy counts as context,
+   inserted via the standard UG908 scripted debug-core flow
+   (`create_debug_core`/`connect_debug_port` on `open_run synth_1`,
+   `opt_design`/`place_design`/`route_design`/`write_bitstream`/
+   `write_debug_probes`, bypassing the `impl_1` run infrastructure).
+   Two real methodology issues found and fixed along the way, worth
+   recording for whoever runs ILA on this board next:
+   - **`save_constraints -force` (needed to work around a
+     `create_debug_core`/`implement_debug_core` ordering requirement)
+     silently rewrote six tracked constraint `.xdc` files** — not just
+     appending the debug-core definition to the target constraints file,
+     but re-serializing (and in the process reformatting/inlining Tcl
+     variables in) every other file in the constraint fileset. Caught via
+     `git status`/`git diff` before committing anything; reverted cleanly
+     with `git checkout --` since nothing had been committed. Do not run
+     `save_constraints -force` in this project without immediately
+     diffing the full constraints directory afterward.
+   - **This board's JTAG bridge (`hw_server` via a Digilent virtual-cable
+     connection, not a dedicated Xilinx Platform Cable) does not keep the
+     ILA core armed across a `close_hw_target`/`disconnect_hw_server`
+     cycle** — confirmed empirically: `STATUS.CORE_STATUS` reverts to
+     `IDLE` (sample count 0) on a fresh reconnect even after a clean
+     disconnect, not just an abrupt one. The arm-then-exercise-then-check
+     sequence has to run inside one continuous `hw_manager` connection;
+     fixed by having the arming Tcl script `exec` the UART prompt-test
+     Python script as a child process (inheriting Vivado's own stale
+     `PYTHONHOME`/`PYTHONPATH` breaks a `.venv` interpreter launched this
+     way — unset both from Tcl's `env` array before the `exec` call) so
+     the whole sequence — arm, run real inference over UART, check status
+     — happens without ever dropping the hw_server connection in between.
+   - Also had to re-verify, mid-bring-up, that a resource-tight ILA
+     insertion (BRAM was 98.88% utilized before adding any debug core)
+     wasn't itself introducing a new timing failure: a first attempt (24
+     probe bits, 4096-deep) showed a large regression
+     (WNS −4.68ns, 1828 failing endpoints on `clk_gen`/
+     `clk_out1_xilinx_clk_wizard_clk_wiz_0_0`) that looked alarming until
+     a from-scratch **no-ILA** rebuild (after reverting the
+     `save_constraints` contamination above) reproduced the *same*
+     violation (WNS −4.235ns, 1680 failing) on its own — this is the
+     already-known, already-triaged CPU-core FPU/APU-forwarding timing
+     gap from earlier in this document's own §6 resynth work (see that
+     entry: a direct `report_timing` query on this exact clock already
+     found a `-4.122ns` violation in
+     `cv32e40px_xif_wrapper_i/.../id_stage_i`, confirmed unrelated to
+     kevgpt's own datapath via an 8,803-pin audit scoped to
+     `sequencer_vec`/`kv_bank_ddr`/`weight_bank_tdp`/
+     `weight_loader_ddr`/`gemv_banked_resident_vec`/`vec_attn_w` that
+     found zero violated paths there) — not a new regression, and not
+     something the ILA work introduced. Settled on a leaner 8-probe,
+     2048-deep configuration (no owner-FIFO-count context signals) for
+     the actual bring-up, both to stay further from the BRAM ceiling and
+     to keep the isolation clean.
+   **Real-hardware result**: armed all 8 flags (OR'd trigger condition),
+   ran 15 full generations (5 standard test prompts × 3 repeats, real
+   sampling mode, not forced-greedy) over the live UART console —
+   genuinely reproduced the fixation-word/repetition symptom in the
+   replies ("carefree"/"cardinal"/"chug" pattern collapse, matching this
+   document's own established symptom shape. **The ILA never triggered**
+   — `STATUS.CORE_STATUS` stayed `WAITING FOR TRIGGER` throughout (sample
+   count advancing normally as the pre-trigger ring buffer filled, not a
+   capture event). None of the 8 owner-FIFO architectural invariants was
+   violated during this run. This is a real, if modest-sample, negative
+   result for Hypothesis B specifically manifesting as one of these named
+   invariant violations on real hardware — consistent with the full
+   contention simulation gate (§8 item 5) also passing clean after its
+   own bugfix. Worth a larger sample (more prompts/repeats, deeper/longer
+   capture) before treating this as as conclusive as §6's CDC retest, but
+   the first real-hardware data point points the same direction: away
+   from owner-FIFO races, at least in this specific form.
 7. **Longer-term, once fixed**: keep a small permanent hardware health
    monitor (owner-FIFO overflow/underflow counters, request/response
    counters per master, a sticky `DDR_PROTOCOL_ERROR` bit) so any future

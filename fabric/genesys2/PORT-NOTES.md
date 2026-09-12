@@ -6286,3 +6286,100 @@ iverilog invocation, documented in the testbench's own header comment);
 porting any of this to the vendored `kevgpt-genesys2-soc` repo (out of
 scope -- only the testbench changed here, `kv_bank_ddr.sv`/
 `kevgpt_ddr_bundle.sv`/`mig_dual_master_arbiter.sv` etc. are unmodified).
+
+## Real ILA on the owner-FIFO invariants (§8 item 6) -- armed, exercised, no trigger
+
+Added always-synthesized `mark_debug`-tagged taps to `mig_read_mux2.sv`
+and `mig_dual_master_arbiter.sv` (kevgpt-genesys2-soc repo; mirrored into
+kev-gpt's own `fabric/genesys2/rtl/mig_read_mux2.sv` copy), mirroring each
+file's own simulation-only assertions exactly: outstanding-counter
+mismatch, owner-FIFO pushed while not ready (rd and wr sides), and a
+return/pop arriving with the owner FIFO empty. 8 one-bit flags total
+across both files' owner FIFOs (`mig_read_mux2` has one; the dual-master
+arbiter has separate rd/wr ones), plus the three owner-FIFO occupancy
+counts as context. Assertions are `ifndef SYNTHESIS`-gated and don't exist
+in the bitstream at all -- hunting the same invariants on real hardware
+needs real wires an ILA can probe.
+
+Inserted the debug core via the standard UG908 scripted flow
+(`create_debug_core`/`connect_debug_port` against `open_run synth_1`,
+then `opt_design`/`place_design`/`route_design`/`write_bitstream`/
+`write_debug_probes`, bypassing `impl_1`'s run infrastructure -- a
+one-off debug build, not something to fold into the managed runs).
+
+**Two real methodology bugs found and fixed along the way:**
+
+1. `save_constraints -force` (needed -- `implement_debug_core` refuses to
+   run against an unsaved design) doesn't just append the debug-core
+   definition to the target constraints file. It re-serializes and
+   reformats *every* file in the constraint fileset -- caught via `git
+   status`/`git diff` showing six tracked `.xdc` files modified, including
+   Tcl variables in unrelated files getting inlined to their resolved
+   values. Reverted cleanly with `git checkout --` (nothing had been
+   committed yet). Lesson for next time: never trust `save_constraints
+   -force` without immediately diffing the whole constraints directory.
+
+2. This board's JTAG bridge (`hw_server` via a Digilent virtual-cable
+   connection) does **not** keep an armed ILA core waiting across a
+   `close_hw_target`/`disconnect_hw_server` cycle -- confirmed
+   empirically, `STATUS.CORE_STATUS` reverts to `IDLE` (sample count 0)
+   on a fresh reconnect even after a *clean* disconnect, not just an
+   abrupt script exit. Fix: arm, exercise, and check status all inside
+   one continuous `hw_manager` connection -- the arming Tcl script
+   `exec`s the UART prompt-test Python script as a child process rather
+   than shelling out between separate Vivado invocations. That in turn
+   needed `unset ::env(PYTHONHOME)`/`unset ::env(PYTHONPATH)` before the
+   `exec` call, since Vivado's own bundled-Python environment variables
+   otherwise leak into and break a `.venv` interpreter launched as a
+   child process (`Fatal Python error: init_fs_encoding`).
+
+**A timing false alarm, resolved by checking this document's own earlier
+work instead of re-deriving it from scratch:** BRAM was already 98.88%
+utilized before adding any debug core. A first attempt (24 probe bits,
+4096-deep, ~3 more BRAM36 tiles) showed a large setup-timing regression
+(WNS -4.68ns, 1828 failing endpoints on `clk_gen`/
+`clk_out1_xilinx_clk_wizard_clk_wiz_0_0`) that looked like real new
+damage. A from-scratch clean rebuild with **zero** debug core (after
+reverting the `save_constraints` contamination above, so genuinely
+pristine constraints) reproduced essentially the *same* violation on its
+own (WNS -4.235ns, 1680 failing) -- meaning it isn't caused by the ILA at
+all. Checked this document's own §6 entry ("The full resynth ran, and it
+found real, razor-thin margins...") before spending more build cycles
+chasing it: this exact clock, this exact failure class, was already found
+and triaged there -- a direct `report_timing` query found a `-4.122ns`
+violation in `cv32e40px_xif_wrapper_i/.../id_stage_i` (X-HEEP's stock
+CV32E40PX CPU core's own FPU/APU-operand-forwarding logic), and a
+dedicated audit of kevgpt's *own* hierarchy (`sequencer_vec`,
+`kv_bank_ddr`, `weight_bank_tdp`, `weight_loader_ddr`,
+`gemv_banked_resident_vec`, `vec_attn_w` -- 8,803 pins) found zero
+violated paths. Same pre-existing, already-accepted, CPU-core-only gap,
+not a new regression and not implicating the datapath under
+investigation -- would have cost a repeat of that whole audit to
+re-confirm from nothing if this document hadn't already had the answer.
+Settled on a leaner 8-probe/2048-deep config for the actual bring-up
+regardless, both for BRAM headroom and to keep the isolation clean.
+
+**Real-hardware result**: programmed the 8-probe ILA bitstream (stale
+`hw_target` issue hit again during programming, same fix as always --
+`HW_TARGET` pinned to the live `200300B5E5AAB` URI), reloaded firmware,
+resent weights+tokenizer (~15 min), armed all 8 flags with
+`CONTROL.TRIGGER_CONDITION OR`, then ran 15 full generations (5 standard
+test prompts x 3 repeats, real sampling mode) over the live UART console
+in one continuous hw_manager session. Real replies genuinely showed the
+fixation-word/repetition-collapse symptom this whole document is chasing
+("carefree"/"cardinal"/"chug" pattern lock-in). **The ILA never
+triggered** -- `STATUS.CORE_STATUS` stayed `WAITING FOR TRIGGER`
+throughout, sample count advancing normally as the pre-trigger ring
+buffer filled (not a capture event). None of the 8 owner-FIFO
+architectural invariants fired during real, symptom-reproducing traffic.
+A real negative result for Hypothesis B manifesting as one of these named
+invariants on silicon -- consistent with the full contention gate (§8
+item 5) also passing clean -- though the sample here (15 generations) is
+much smaller than §6's CDC retest and shouldn't yet be treated as equally
+conclusive.
+
+Not yet done: a larger-sample rerun (more prompts/repeats, deeper/longer
+capture, maybe a second ILA window further into a long reply rather than
+just the first ~512 pre-trigger cycles) before fully closing out
+Hypothesis B; item 7's permanent hardware health monitors as a next lead
+if this holds up.
