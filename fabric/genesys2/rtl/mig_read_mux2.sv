@@ -169,6 +169,20 @@ module mig_read_mux2 #(
                              - owner_pop;
     end
 
+    // ---- ILA debug taps (fabric/genesys2/FIXATION-WORD-CDC-INVESTIGATION.md
+    // Sec8 item 6): the assertions right below are simulation-only and
+    // don't exist in the bitstream at all -- hunting these same invariants
+    // on real hardware needs real, always-synthesized wires an ILA can
+    // actually probe. Each mirrors one assertion's own condition exactly.
+    (* mark_debug = "true", dont_touch = "true" *) wire dbg_owner_mismatch;
+    assign dbg_owner_mismatch = (outstanding_q != owner_count);
+    (* mark_debug = "true", dont_touch = "true" *) wire dbg_push_not_ready;
+    assign dbg_push_not_ready = owner_push_valid && !owner_ready;
+    (* mark_debug = "true", dont_touch = "true" *) wire dbg_pop_when_empty;
+    assign dbg_pop_when_empty = ret_valid && owner_empty;
+    (* mark_debug = "true", dont_touch = "true" *) wire [$clog2(OWNER_DEPTH+1)-1:0] dbg_owner_count;
+    assign dbg_owner_count = owner_count;
+
 `ifndef SYNTHESIS
     a_no_owner_underflow :
     assert property (@(posedge clk) disable iff (rst) ret_valid |-> !owner_empty)
