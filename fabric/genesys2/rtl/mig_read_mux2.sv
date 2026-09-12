@@ -68,7 +68,15 @@ module mig_read_mux2 #(
     output wire [ADDR_W-1:0]    req_addr,
     input  wire                 ret_valid,
     output wire                 ret_ready,
-    input  wire [DATA_W-1:0]    ret_data
+    input  wire [DATA_W-1:0]    ret_data,
+
+    // ---- owner-FIFO health taps (Sec8 item 7): plain port-level copies of
+    // the item-6 dbg_* wires below, for ddr_health_monitor.sv -- kept
+    // separate from the mark_debug wires themselves so neither use case
+    // constrains the other (ILA probing vs. a permanent synthesized path).
+    output wire                 dbg_owner_mismatch_o,
+    output wire                 dbg_push_not_ready_o,
+    output wire                 dbg_pop_when_empty_o
 );
     // ---- command-channel arbitration (priority-with-hysteresis) -------------
     reg prefer_b_q;
@@ -182,6 +190,10 @@ module mig_read_mux2 #(
     assign dbg_pop_when_empty = ret_valid && owner_empty;
     (* mark_debug = "true", dont_touch = "true" *) wire [$clog2(OWNER_DEPTH+1)-1:0] dbg_owner_count;
     assign dbg_owner_count = owner_count;
+
+    assign dbg_owner_mismatch_o = dbg_owner_mismatch;
+    assign dbg_push_not_ready_o = dbg_push_not_ready;
+    assign dbg_pop_when_empty_o = dbg_pop_when_empty;
 
 `ifndef SYNTHESIS
     a_no_owner_underflow :

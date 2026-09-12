@@ -60,6 +60,16 @@ timing violation surfaced mid-bring-up turned out to be the same
 already-known, already-triaged issue from this document's own earlier §6
 work, not a new regression, and not implicating kevgpt's own datapath).
 
+Item 7 (permanent hardware health monitor) is also done — the same 8
+invariants item 6's ILA watches, now sticky-latched and exposed as plain
+MMIO registers (`DDR_HEALTH`/`DDR_ERR_COUNT`/`DDR_HEALTH_CLR`), no ILA
+session needed. Built, unit-gated in simulation, deployed to real
+hardware, and exercised with 96 more real generations — zero violations,
+independently confirmed via a direct GDB memory read. A third data point
+(alongside item 5's simulation gate and item 6's ILA) all agreeing: no
+owner-FIFO invariant violation observed under any form of exercise on
+this design. See §8 item 7 for the full account.
+
 Separately, §8 item 2's owner-FIFO backpressure gap is fixed in both
 `mig_dual_master_arbiter.sv` and `mig_read_mux2.sv` (§4's status update),
 and a testbench-only clock-domain bug found while verifying that fix is
@@ -1039,12 +1049,41 @@ original order below since item 4 was already next regardless.
    certainty (this is still one board, one bitstream, one ILA
    configuration), but a substantial, repeated, symptom-co-occurring
    negative result rather than a single modest sample.
-7. **Longer-term, once fixed**: keep a small permanent hardware health
-   monitor (owner-FIFO overflow/underflow counters, request/response
-   counters per master, a sticky `DDR_PROTOCOL_ERROR` bit) so any future
-   regression of this class surfaces as an explicit error rather than a
-   silently wrong generated word. Useful precedent for future scale-up,
-   independent of how this specific investigation resolves.
+7. ~~Longer-term, once fixed: keep a small permanent hardware health
+   monitor~~ **Done — built and verified on real hardware, independent of
+   this investigation resolving.** New `ddr_health_monitor.sv`: sticky-
+   latches all 8 of item 6's owner-FIFO invariant flags (one bit each,
+   plus a combined "any violation" bit — the `DDR_PROTOCOL_ERROR` bit this
+   item asked for), keeps an 8-bit saturating total-violation-event
+   counter, and crosses both from `ui_clk` into `gen_clk` using this
+   project's existing `common_cells` `sync` primitive — plain single-bit
+   2-flop synchronizers on the sticky bits and on a toggle-pulse for the
+   counter (never on the raw multi-bit datapath itself). Clear is a held
+   level, not a pulse, specifically to survive CDC without risking a
+   missed single-cycle clear. Exposed through three new
+   `xheep_kevgpt_peripheral` registers (`0x40 DDR_HEALTH`,
+   `0x44 DDR_ERR_COUNT`, `0x48 DDR_HEALTH_CLR`) any firmware or host tool
+   can read with a plain MMIO load — no ILA session, no JTAG, no
+   re-programming required to check. `kevgpt_interactive`'s `main.c` now
+   checks it after every reply and prints an explicit
+   `KEVGPT_DDR_HEALTH_WARNING` line if anything is ever set, matching this
+   item's own "explicit error, not a silently wrong generated word."
+   Gated by a dedicated unit testbench (`tb_ddr_health_monitor.sv`,
+   synthetic stimulus on genuinely different non-integer-multiple
+   `gen_clk`/`ui_clk` periods, covering sticky-latch/CDC/held-clear/
+   counter-saturation behavior) before ever touching real hardware — clean
+   `DDR_HEALTH_MONITOR_VERDICT,PASS`. Built into a fresh bitstream
+   (BRAM unchanged at 98.88%, confirming near-zero resource cost; the
+   worst timing-violated path is still the same pre-existing, already-
+   accepted `cv32e40px` FPU/APU path from §6's own resynth work, nothing
+   new), programmed, and exercised with 96 more real generations
+   (reproducing the fixation-word symptom just as pervasively as item 6's
+   own run) — zero `KEVGPT_DDR_HEALTH_WARNING` lines, and a direct GDB
+   memory read independently confirmed both registers read genuinely zero
+   (`0x20070040`/`0x20070044`), not just an unexercised firmware check.
+   A third independent data point (after item 5's simulation gate and item
+   6's ILA) all agreeing: no owner-FIFO invariant violation observed
+   anywhere, under any form of exercise, on this design.
 
 ## 9. Evidence trail / artifacts
 

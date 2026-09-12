@@ -36,6 +36,34 @@
 //       STATUS.b2 (wld_done) latches high when the load completes, clearing
 //       on the next WLD_CTRL write (mirrors STATUS.b0's done_latched vs.
 //       go_pulse clearing behaviour) or on soft_reset/rst_ni.
+//
+// Registers below 0x40 are also Genesys2/DDR-only, added for
+// fabric/genesys2/FIXATION-WORD-CDC-INVESTIGATION.md Sec8 item 7's
+// permanent hardware health monitor (ddr_health_monitor.sv, instantiated
+// at the top-level wrapper, watching mig_read_mux2's and
+// mig_dual_master_arbiter's owner-FIFO architectural invariants):
+//  0x40 DDR_HEALTH (read-only): sticky violation bits, one per invariant
+//       (b0 rdmux_owner_mismatch, b1 rdmux_push_not_ready, b2
+//       rdmux_pop_when_empty, b3 dualarb_rd_mismatch, b4
+//       dualarb_wr_mismatch, b5 dualarb_rd_push_not_ready, b6
+//       dualarb_wr_push_not_ready, b7 dualarb_rd_pop_when_empty, b8 =
+//       combined OR of all 8 -- "any violation since the last clear").
+//       All zero is the expected, steady-state reading; any bit set means
+//       a real owner-FIFO invariant was violated at least once since the
+//       last DDR_HEALTH_CLR write (or reset) -- worth an ILA re-run (item
+//       6) to see it happen live, not just that it happened.
+//  0x44 DDR_ERR_COUNT (read-only): 8-bit saturating count of total
+//       violation *events* (any one or more of the 8 flags true on a
+//       given ui_clk cycle counts as one event) since the last clear.
+//       Saturates at 0xFF rather than wrapping -- read "255" as "at least
+//       255", not literally 255.
+//  0x48 DDR_HEALTH_CLR (write-only, b0): a HELD LEVEL, not a one-cycle
+//       pulse like every other *_CTRL register above -- write 1, wait a
+//       few cycles for the clear to reach and settle in ddr_health_
+//       monitor's own ui_clk domain (it's synchronized, not a same-cycle
+//       clear), then write 0 to resume normal monitoring. Deliberately
+//       NOT auto-clearing: a pulse can be missed crossing clock domains,
+//       a held level cannot.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -149,7 +177,15 @@ module xheep_kevgpt_peripheral #(
     output logic [28:0]          wl_rd_req_addr,
     input  logic                 wl_rd_ret_valid,
     output logic                 wl_rd_ret_ready,
-    input  logic [255:0]         wl_rd_ret_data
+    input  logic [255:0]         wl_rd_ret_data,
+
+    // ---- DDR health monitor (Sec8 item 7) -- ddr_health_monitor.sv at the
+    // top level already does all the sticky-latch/CDC/counter work; this
+    // peripheral just exposes its gen_clk-domain outputs as registers and
+    // passes the clear level through. ----------------------------------------
+    input  logic [8:0]           health_sticky_i,
+    input  logic [7:0]           health_count_i,
+    output logic                 health_clear_o
 );
     wire clk = clk_i;
     wire [5:0] windex = reg_req_i.addr[7:2];
@@ -214,6 +250,19 @@ module xheep_kevgpt_peripheral #(
         else if (core_wld_done) wld_done_latched <= 1'b1;
     end
 
+    // 0x48 DDR_HEALTH_CLR: a HELD LEVEL (see this module's own header
+    // comment for why), NOT one of the one-cycle pulses in the shared
+    // write-side always block above -- kept in its own always block so it
+    // is never swept up in that block's "default low every other cycle"
+    // pulse semantics.
+    reg health_clear_r;
+    always @(posedge clk) begin
+        if (!rst_ni) health_clear_r <= 1'b0;
+        else if (reg_req_i.valid && reg_req_i.write && windex == 6'h12)
+            health_clear_r <= reg_req_i.wdata[0];
+    end
+    assign health_clear_o = health_clear_r;
+
     // ---- read side: combinational mux, same word map as the AXI shell ----
     reg [31:0] rdata_mux;
     always @(*) begin
@@ -224,6 +273,8 @@ module xheep_kevgpt_peripheral #(
             6'h9: rdata_mux = {{(32-VIDXW){1'b0}}, core_tok_out};
             6'hA: rdata_mux = cycles_latched;
             6'hB: rdata_mux = 32'h5351_5256;              // "SQRV"
+            6'h10: rdata_mux = {23'b0, health_sticky_i};  // 0x40 DDR_HEALTH
+            6'h11: rdata_mux = {24'b0, health_count_i};   // 0x44 DDR_ERR_COUNT
             default: rdata_mux = 32'b0;
         endcase
     end

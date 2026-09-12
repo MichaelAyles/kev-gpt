@@ -6422,3 +6422,114 @@ real violation this specific probe set doesn't happen to be watching),
 but a real, repeated, symptom-co-occurring negative result rather than a
 single small sample. Item 7 (permanent hardware health monitors) is the
 next lead if no other candidate surfaces first.
+
+## Permanent DDR health monitor (Sec8 item 7) -- built, gated, deployed, zero violations
+
+Direct continuation. Item 6's ILA proved the 8 owner-FIFO invariants stay
+clean under real exercise, but checking them requires re-programming a
+debug bitstream and manually re-arming a trigger every time -- item 7's
+own ask is a monitor that's just *there*, always, no ILA session needed.
+
+New `ddr_health_monitor.sv` (kevgpt-genesys2-soc's `kevgpt_seq/rtl/`,
+mirrored into kev-gpt's own `fabric/genesys2/rtl/`): sticky-latches all 8
+of item 6's invariant flags (mirrored via new plain output ports on
+`mig_read_mux2.sv` and `mig_dual_master_arbiter.sv`, separate from the
+`mark_debug` wires so neither use case constrains the other), plus a
+combined "any violation" bit and an 8-bit saturating total-event counter,
+crossed from `ui_clk` into `gen_clk` (where `xheep_kevgpt_peripheral`'s
+register file lives) using this project's existing `common_cells` `sync`
+primitive -- single-bit 2-flop synchronizers on the sticky bits and on a
+toggle-pulse for the counter, deliberately never on the raw multi-bit
+datapath itself. Clear is a held level (firmware writes 1, waits a few
+cycles, writes 0), not a one-cycle pulse -- a pulse can be missed crossing
+clock domains, a held level cannot. Three new `xheep_kevgpt_peripheral`
+registers: `0x40 DDR_HEALTH` (sticky bits, read), `0x44 DDR_ERR_COUNT`
+(saturating count, read), `0x48 DDR_HEALTH_CLR` (the held-level clear,
+write).
+
+**A real bug caught before it reached hardware**: the top wrapper's first
+draft declared the new `ddr_health_sticky`/`ddr_health_count`/
+`ddr_health_clear` signals *after* `u_kevgpt`'s own instantiation, which
+uses them first (declared right before `u_kevgpt_ddr_bundle` instead,
+further down the file). Vivado's synth log flagged it cleanly --
+`undeclared symbol 'ddr_health_sticky', assumed default net type 'wire'`
+followed by `'ddr_health_sticky' is already implicitly declared` at the
+real declaration -- meaning the first (and only functionally connected)
+use silently got Verilog's default 1-bit `wire` instead of the intended
+9-bit bus, truncating the whole status down to one bit. Fixed by moving
+the declarations above `u_kevgpt`. Worth remembering: an implicit-wire
+warning in a Vivado synth log for a signal you *did* declare almost
+always means a declaration-vs-first-use ordering bug, not a real
+"forgot to declare it" mistake -- check file order before assuming the
+declaration is missing.
+
+Also found the new file needed registering in the Vivado project's own
+sources (module not found until then) -- added to
+`kevgpt_seq/kevgpt_seq.core`'s (FuseSoC) fileset for correctness, and
+directly `add_files`'d into the live `.xpr` project (safer than a full
+`mcu-gen` regeneration, which has its own documented verible-reformatting
+blast-radius risk -- not worth it for one new file).
+
+Gated with a dedicated unit testbench,
+`fabric/genesys2/tb/tb_ddr_health_monitor.sv` -- synthetic stimulus
+directly on the 8 raw inputs (no real `mig_read_mux2`/
+`mig_dual_master_arbiter` instantiated; this proves the monitor's own
+logic, not the invariants themselves, which items 5/6 already cover),
+genuinely different non-integer-multiple `gen_clk`/`ui_clk` periods to
+actually stress the CDC. Covers: each of the 8 flags sets exactly its own
+sticky bit and the combined "any" bit and nothing else; sticky really
+holds across many idle cycles with no re-trigger; the counter increments
+per event and saturates at 255 rather than wrapping (drove 310 total
+events); clear (a held level) resets both sticky bits and the counter on
+both clock domains; the monitor keeps working correctly after a clear.
+Clean `DDR_HEALTH_MONITOR_VERDICT,PASS`, 0 errors.
+
+Also caught and fixed a piece of genuinely dead RTL along the way: an
+earlier draft kept a local `ui_clk`-side saturating counter (`count_q`)
+that nothing ever actually read (only the toggle bit crosses domains,
+by design) -- Vivado's synth log said so directly ("Unused sequential
+element count_q_reg was removed"), and it was removed from the source
+rather than left as inert-but-confusing logic.
+
+**Real-hardware build**: full clean resynth (`reset_run synth_1` first,
+per this session's own established discipline) plus `open_run synth_1`
+-> `opt_design`/`place_design`/`route_design`/`write_bitstream` (the
+same bypass-`impl_1` pattern item 6's ILA work used). BRAM stayed at
+440/445 (98.88%) tiles -- unchanged from the item-6 baseline, confirming
+the monitor's own footprint (11 `sync` instances, ~22 flip-flops) is
+negligible. Timing: WNS -4.433ns / 1832 failing endpoints on `clk_gen`,
+essentially the same magnitude as the already-known baseline; the worst
+violated path is still, confirmed directly, the identical pre-existing
+`cv32e40px_xif_wrapper_i/.../id_stage_i` `apu_flags_ex_o_reg`/
+`apu_operands_ex_o_reg` CPU-FPU path from §6's own resynth work -- nothing
+new, not touching kevgpt's own datapath.
+
+Added a small firmware hook to `kevgpt_interactive/main.c`'s `chat_turn()`
+(new `kevgpt_regs.h` register defines: `KEVGPT_REG_DDR_HEALTH`/
+`_DDR_ERR_COUNT`/`_DDR_HEALTH_CLR`): checks `DDR_HEALTH` after every reply
+and prints `KEVGPT_DDR_HEALTH_WARNING,sticky=0x...,count=...` only if it's
+ever nonzero -- always-on, not a toggle-gated diagnostic like this
+session's earlier `KEVGPT_FORCE_GREEDY`/`KEVGPT_PRINT_IDS_ONLY` switches,
+matching item 7's own "surfaces as an explicit error" intent. A healthy
+session's output is byte-for-byte unchanged (two cheap MMIO reads, no
+printf unless something's actually wrong).
+
+Programmed, reloaded firmware, resent weights+tokenizer, then ran 96 more
+real generations (same 12-prompt x 8-repeat set item 6's bigger sample
+used) over the live UART console -- the fixation-word symptom reproduced
+just as pervasively as before. **Zero `KEVGPT_DDR_HEALTH_WARNING` lines.**
+Independently double-checked with a direct GDB memory peek (bypassing the
+firmware's own conditional print entirely) at
+`EXT_PERIPHERAL_START_ADDRESS+0x40`/`+0x44`
+(`0x20070040`/`0x20070044`): both registers read genuinely
+`0x00000000`, confirming this isn't a silent bug in the firmware check's
+own logic.
+
+Sec8 item 7 is done. Three independent lines of evidence now agree: the
+full multi-master contention simulation gate (item 5), the real-hardware
+ILA (item 6), and this permanent hardware monitor (item 7) have never
+once observed an owner-FIFO architectural invariant violation, across
+simulation, 111 ILA-watched real generations, and 96 more monitor-watched
+real generations. Hypothesis B is about as thoroughly ruled out as this
+investigation's tooling can currently manage. The fixation-word root
+cause remains open; nothing in items 1-7 has found it yet.

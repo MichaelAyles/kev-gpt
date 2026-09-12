@@ -91,7 +91,17 @@ module kevgpt_ddr_bundle #(
     output wire                 app_wdf_end,
     input  wire                 app_wdf_rdy,
     input  wire [DATA_W-1:0]    app_rd_data,
-    input  wire                 app_rd_data_valid
+    input  wire                 app_rd_data_valid,
+
+    // ---- owner-FIFO health taps (fabric/genesys2/FIXATION-WORD-CDC-
+    // INVESTIGATION.md Sec8 item 7): raw, ui_clk-domain pass-through of
+    // u_rd_mux's own item-6 debug flags, for ddr_health_monitor.sv at the
+    // top level to latch/count/CDC into a permanent, software-readable
+    // status -- no logic added here, this module stays a pure pass-
+    // through so its own existing simulation gates are unaffected.
+    output wire                 rdmux_owner_mismatch,
+    output wire                 rdmux_push_not_ready,
+    output wire                 rdmux_pop_when_empty
 );
     // ---- CDC: kv_bank_ddr's write packet (gen_clk -> ui_clk) ----------------
     wire kv_wr_pkt_valid_ui, kv_wr_pkt_ready_ui;
@@ -193,7 +203,10 @@ module kevgpt_ddr_bundle #(
         .b_req_valid(wl_rd_req_valid_ui), .b_req_ready(wl_rd_req_ready_ui), .b_req_addr(wl_rd_req_addr_ui),
         .b_ret_valid(wl_rd_ret_valid_ui), .b_ret_ready(wl_rd_ret_ready_ui), .b_ret_data(wl_rd_ret_data_ui),
         .req_valid(rdm_req_valid), .req_ready(rdm_req_ready), .req_addr(rdm_req_addr),
-        .ret_valid(rdm_ret_valid), .ret_ready(rdm_ret_ready), .ret_data(rdm_ret_data)
+        .ret_valid(rdm_ret_valid), .ret_ready(rdm_ret_ready), .ret_data(rdm_ret_data),
+        .dbg_owner_mismatch_o(rdmux_owner_mismatch),
+        .dbg_push_not_ready_o(rdmux_push_not_ready),
+        .dbg_pop_when_empty_o(rdmux_pop_when_empty)
     );
 
     wire              rd_cmd_valid, rd_cmd_grant;
