@@ -1,48 +1,46 @@
 # Fixation-word investigation: real-hardware-only text corruption in the multi-master DDR read path
 
-Status as of 2026-09-12: **open, not confirmed-fixed on real hardware, but
-the CDC timing-constraint gap is now root-caused, fixed, and verified
-in-memory — only a real bitstream + real-hardware re-test stand between
-here and an actual answer.** Four concrete, verified pieces of progress landed
-since the previous revision: (1) §8 item 2's owner-FIFO backpressure gap is
-now actually fixed in both `mig_dual_master_arbiter.sv` and
-`mig_read_mux2.sv`, not just proposed — see §4's status update; (2) while
-building the gate to verify that fix, a second, *separate* real bug was found
-and fixed — a testbench-only clock-domain mismatch that had been silently
-breaking `tb_kevgpt_ddr_bundle.sv` for weeks (see §4a); (3) §8 item 3's
-weight-traffic-only isolation experiment was run on real hardware (partial/
-cheap version — see §2a) and, in the process, produced the most precise
-real-hardware evidence this investigation has yet captured: a specific,
-repeatable wrong-token pick ("care"/"carefree") with a real-hardware/build-
-dependent twist pointing at a timing mechanism; (4) **§6's clock-naming
-question is resolved, and it's now the leading hypothesis by a wide
-margin**: `clk_200mhz_p`, MIG's DDR3 reference clock and the root of the
-entire `gen_clk`/`ui_clk` domain, was confirmed via a live query against the
-real implemented design to have **never been given a `create_clock`
-anywhere in this target's actual XDC fileset** — 67,133 clock endpoints,
-effectively the whole non-JTAG/SPI portion of the chip, with zero real
-static timing analysis ever applied, in any build that has run on this
-board. Fixed with one line (a correct constraint already existed, orphaned,
-in a sibling file never added to the build), and a full clean resynthesis
-+ reimplementation + rebitstream cycle run against it (~56 minutes) found
-**every `async_fifo_gray` CDC crossing inside `kevgpt_ddr_bundle.sv` — both
-directions, all four instances — sitting at 0.054–0.067ns hold margin**, on
-paths that include the crossing FIFOs' own data-memory output feeding
-directly into the DMA engines' command-address/data registers, not just
-the Gray-pointer synchronizer stages. This is systemic (every crossing, not
-one outlier), on paths that directly determine DMA address/data values, and
-margins this thin are exactly what this project's own JTAG-CDC history
-(§6) already documents as fragile enough to flip negative under placement
-changes from unrelated parts of the design — a coherent, physical
-explanation for §2a's build-dependent-winner finding. **The margins are now
-fixed too**: three scoped `set_max_delay -datapath_only` exceptions in
-`constraints.xdc`, covering both the Gray-pointer synchronizers and the
-FIFO-memory-to-consumer data paths across all six real instances, verified
-in-memory two independent ways (down to sourcing the exact real file
-content via `read_xdc`). Not yet verified on real hardware — needs one more
-full resynthesis and a real-hardware re-test, the actual verdict. See §6/§8
-item 4. §4a is explicitly ruled out as a hardware explanation, since it
-lives entirely in test code. This document is the
+Status as of 2026-09-12: **open, not root-caused. The CDC timing-constraint
+gap (§6) has now been fully investigated, fixed, rebuilt from scratch, and
+retested on real hardware — and definitively ruled out.** Two real,
+previously-invisible bugs were found and fixed in the process (worth
+keeping regardless): `clk_200mhz_p` (MIG's DDR3 reference clock, the root
+of the entire `gen_clk`/`ui_clk` domain) had never been given a
+`create_clock` anywhere in this target's actual XDC fileset — 67,133 clock
+endpoints, effectively the whole non-JTAG/SPI portion of the chip, with
+zero real static timing analysis ever applied in any build that has run on
+this board; once fixed, every `async_fifo_gray` CDC crossing inside
+`kevgpt_ddr_bundle.sv` (all six instances, both directions) turned out to
+have razor-thin (0.054–0.067ns) hold margin, including on the FIFOs' own
+data-memory paths feeding straight into DMA command-address/data
+registers, not just the Gray-pointer synchronizer stages. Both were fixed
+(one `create_clock` line; three scoped `set_max_delay -datapath_only`
+exceptions), verified in-memory multiple ways, built into a genuinely
+fresh bitstream (no incremental synthesis reuse), programmed onto real
+hardware, and retested against the exact same 5-prompt greedy-mode
+divergence test from §2/§2a. **Result: byte-for-byte identical wrong
+tokens at identical positions with identical determinism** — fixing two
+real timing gaps changed nothing observable. See §6's status update and
+§3's table.
+
+This also required correcting §2a's own earlier conclusion: it had
+attributed a build-dependent change in which wrong token won to
+"placement/routing differences between builds," reasoning that supported
+the CDC hypothesis — but the three builds compared there differ only in
+*firmware*, all sharing one FPGA bitstream, so that explanation could
+never have been an FPGA-placement effect. That finding still points at
+*some* live runtime race (the wrong token change couldn't have been
+firmware-side noise touching an unrelated computation), just not
+specifically at §6's now-ruled-out static CDC margins — narrowing back
+toward §4/Hypothesis B (owner-FIFO contention, already fixed defensively
+but not confirmed active) or §8 item 5's full multi-master contention
+testbench as the next real leads.
+
+Separately, §8 item 2's owner-FIFO backpressure gap is fixed in both
+`mig_dual_master_arbiter.sv` and `mig_read_mux2.sv` (§4's status update),
+and a testbench-only clock-domain bug found while verifying that fix is
+also fixed (§4a, explicitly not a hardware explanation — it lives entirely
+in test code). This document is the
 standalone reference for the whole investigation — everything needed to
 either continue it or hand it off, without reconstructing the trail from
 `model/SCALE-UP-LOG.md`'s chronological entries (which have the full
@@ -166,21 +164,27 @@ back-to-back trials on the same boot, ruling out live per-call flakiness),
 but differs from the isolation/baseline builds' shared result.
 
 The inserted diagnostic code cannot causally affect *this* token's value —
-it only executes after `kevgpt_step()` has already returned it. The
-remaining explanation is indirect: any firmware change shifts instruction
-addresses and timing throughout the whole binary, including during prefill/
-weight-prefetch *before* generation starts, which happens on every layer
-per token (`PORT-NOTES.md`, "weight-window reloads happen once per layer
-per TOKEN"). If the real defect is a **live, timing-sensitive race**
-(matching §6's CDC-gap hypothesis, or contention this investigation's
-existing simulation gates never exercise since they're single-master or
-lightly-loaded — see §4's status update), its outcome being sensitive to
-incidental build-to-build timing shifts is exactly what would produce this:
-deterministic within a boot, different across boots/builds, same class of
-symptom, different specific corrupted value depending on exact timing. That
-would make this evidence lean back toward §6 (timing) over a fixed,
-boot-independent addressing bug, which should have reproduced identically
-regardless of unrelated code elsewhere in the binary.
+it only executes after `kevgpt_step()` has already returned it.
+
+**Correction (2026-09-12, after the real-hardware CDC-fix retest below):**
+the original write-up here attributed this to "build-to-build placement/
+routing shifts" and used it as evidence *for* §6's CDC-timing hypothesis.
+That reasoning had a hole that only became visible once §6's fix was
+actually tested on real hardware: **the isolation, baseline, and
+logit-probe builds are three different *firmware* images running on the
+*same* FPGA bitstream** — firmware changes cannot move a single LUT, flop,
+or route on the fabric. Whatever made the logit-probe build pick a
+different token, it cannot have been an FPGA placement/timing effect,
+because the FPGA's physical implementation was identical across all three
+builds. The real mechanism has to be something sensitive to *firmware
+execution timing* itself — e.g. exactly which wall-clock cycle a DMA
+request gets issued on, relative to some other concurrent activity — a
+genuine runtime race, not a static synchronizer margin. This still doesn't
+localize the race (§8 item 5's full contention testbench remains the
+right tool for that), but it does mean this specific finding is evidence
+for a *live* race in general, not specifically for §6's CDC margins — see
+§6's own retest result below, which rules the CDC-margin hypothesis out
+directly.
 
 The raw Q6.25 magnitudes captured from the third build are not treated as
 reliable on their own given the winner reassignment — worth re-collecting
@@ -200,7 +204,8 @@ per §8's updated priority list.
 | `cpu_ddr_bridge` print-path traffic (§2a) | Ruled out | Real-hardware output byte-identical between a build with `print_word_token()`'s per-token `cpu_ddr_bridge` read removed (`KEVGPT_PRINT_IDS_ONLY`) and a baseline build with it present, across all 5 test prompts, two independent hardware reloads. Reducing this specific traffic source changed nothing. Does not clear `cpu_ddr_bridge`/`mig_dual_master_arbiter` contention generally — only this one traffic source (print-path reads); `is_stem_repeat()`'s own per-token reads were deliberately left in place (§2a) and remain untested in isolation. |
 | `async_fifo_gray.sv` (the CDC primitive itself) | Clean | Audited directly against Cummings' canonical async-FIFO design: Gray-code math, 2-FF `ASYNC_REG` synchronizer structure, and the full/empty detection formulas are all textbook-correct. The one deliberate deviation (registered `wr_full` instead of combinational, to break a real Vivado DRC LUTLP-1 loop) was hand-traced through a worked example and confirmed not to cause overflow. This clears the FIFO's own logic; it says nothing about physical placement of the synchronizer flops or the actual clock relationship feeding them (§6a). |
 | Sampling-methodology mismatch (my own earlier test artifact) | Ruled out | Reran with the *exact* algorithm the RTL implements (`gumbel.GumbelRng`), not an approximate PyTorch proxy: 1,500 tokens, zero fixation-word hits. |
-| Marginal/random real-silicon timing noise | Narrowed, not ruled out — new evidence points back toward a timing mechanism | The 40-trial repeated-greedy-decode test (above) is 100% deterministic *within one build*. **Correction: this only rules out *pure random/probabilistic* noise, not CDC as a mechanism generally.** `gen_clk` is PLL-derived from `ui_clk`, so their relative phase can be extremely repeatable across power-on/reconfiguration — a synchronizer sampling too close to a transition on one specific, fixed phase relationship would reproduce the *same* deterministic failure every time on a given bitstream. Determinism narrows which CDC mechanisms are plausible; it does not clear CDC as a category. §2a adds a new data point in the same direction: the specific wrong token picked for 3/5 test prompts changed between two firmware builds whose only difference (a diagnostic read) cannot causally affect the value in question — consistent with a race whose outcome depends on incidental build-to-build timing, not a fixed boot-independent corruption. |
+| Marginal/random real-silicon timing noise | Narrowed, not ruled out | The 40-trial repeated-greedy-decode test (above) is 100% deterministic *within one build*. This only rules out *pure random/probabilistic* noise. §2a's build-to-build wrong-token change is real evidence for a *live runtime race* in general (see §2a's correction — it can't be an FPGA placement effect, since those builds shared one bitstream) — it just isn't evidence specifically for §6's CDC margins, which the direct real-hardware retest below rules out. |
+| **CDC timing-constraint gap (§6) — both the missing root clock and the razor-thin `async_fifo_gray` margins** | **Ruled out, definitively** | Both real bugs (confirmed via live Vivado queries, not guesses) were fixed, verified in-memory two independent ways each, built into a completely fresh bitstream (`AUTO_INCREMENTAL_CHECKPOINT` disabled, full clean synth+impl+bitgen, no incremental reuse), and re-tested on real hardware against the exact same 5-prompt greedy test as §2a. **Result: byte-for-byte identical wrong tokens at the identical positions** — "care"/"carefree" at token 0 for the same 3/5 prompts, same 100% determinism across 8 repeats each. Fixing two real, previously-invisible timing gaps changed nothing observable. Whatever causes the fixation-word symptom, it is not a static CDC synchronizer margin or a missing top-level clock constraint. |
 
 ## 4. What IS implicated: modules, signals, and the traffic path
 
@@ -634,12 +639,44 @@ second time via `read_xdc` on the *exact* real, multi-line, backslash-
 continued file content as actually committed (catching any escaping/
 continuation issue the first test's differently-constructed Tcl strings
 could have missed) — identical result, `check_timing` shows zero
-regressions both times. Not yet verified on real hardware — needs a full
-clean resynthesis (already run once, straightforward to repeat) and a
-real-hardware re-test of §2/§2a's greedy divergence test. Raw report files
-(`timing_summary_after_fix.rpt`, `kevgpt_setup_audit.rpt`,
+regressions both times.
+
+**Final update: real-hardware retest complete, and the result is a clean,
+negative one — §6 is not the fixation-word cause.** Ran a second full
+clean resynthesis (both fixes present, `AUTO_INCREMENTAL_CHECKPOINT`
+disabled, ~56 minutes) and confirmed both live in the real build
+(`sys_clk_pin` constrained with the same 67,133/232 endpoints; the
+previously-worst CDC path reports "No timing paths found"; worst remaining
+margin 0.108ns). Programmed the real board (freshly repowered — restarted
+`openocd`, and had to pin the JTAG hardware target explicitly via
+`HW_TARGET`, since the default target resolution hit the same stale-
+registration issue this project's own reference notes already document
+after a repower/re-enumeration), reloaded the isolation-toggle firmware
+(`KEVGPT_FORCE_GREEDY=1`, `KEVGPT_PRINT_IDS_ONLY=1`, matching §2a exactly),
+resent weights, and reran the identical 5-prompt × 8-repeat greedy test.
+
+**Result: byte-for-byte identical to before either fix.** Same wrong
+tokens ("care"/"carefree" at token 0 for the same 3/5 prompts), same
+positions, same 100% determinism across all 8 repeats each. Two real,
+previously-completely-invisible timing gaps — fixed, verified, built into
+a genuinely fresh bitstream — changed nothing observable about the
+fixation-word symptom. §6's CDC-timing-constraint gap is definitively
+ruled out as the cause (§3's table updated accordingly).
+
+This also means §2a's own "build-dependent winner" finding needs a
+correction: it was written up as evidence *for* the CDC-timing hypothesis,
+reasoning that different builds' placement/routing could plausibly flip a
+thin margin. But the three builds compared there (isolation, baseline,
+logit-probe) all ran on the *same* FPGA bitstream — only firmware differed
+— so that explanation was never actually consistent with the evidence;
+firmware can't move a placement or a route. Corrected in §2a itself: that
+finding is still real evidence for *some* live runtime race, just not
+specifically for §6's static CDC margins.
+
+Raw report files (`timing_summary_after_fix.rpt`, `kevgpt_setup_audit.rpt`,
 `kevgpt_hold_audit.rpt`, `timing_new_domain.rpt`,
-`kevgpt_hold_audit_after_fix.rpt`, `worst_path_realfile_recheck.rpt`) are
+`kevgpt_hold_audit_after_fix.rpt`, `worst_path_realfile_recheck.rpt`,
+`worst_path_final_build.rpt`, `kevgpt_hold_audit_final_build.rpt`) are
 session scratch files, not committed — §9 has the exact queries to
 reproduce them.
 
@@ -814,17 +851,27 @@ original order below since item 4 was already next regardless.
    covering both the Gray-pointer synchronizer stages and the FIFO-memory-
    to-consumer data paths across all six real `async_fifo_gray` instances,
    verified in-memory two independent ways (including sourcing the exact
-   real file content via `read_xdc`) — see §6's status update. **Now
-   needed**: one more full clean resynthesis with both fixes present, and a
-   real-hardware re-test of §2/§2a's greedy-mode divergence test — the
-   actual verdict on whether this was the fixation-word cause.
+   real file content via `read_xdc`) — see §6's status update. **Both fixes
+   built into a genuinely fresh bitstream and re-tested on real hardware:
+   byte-for-byte identical wrong tokens, identical positions, identical
+   determinism.** §6/item 4 is closed — the CDC timing-constraint gap is
+   ruled out as the fixation-word cause, definitively, not just narrowed.
+   Both fixes are still correct and worth keeping (they close a genuine,
+   previously-total blind spot in this design's timing closure), but they
+   are not *the* answer here. §2a's own build-dependent-winner finding
+   needed a correction as a result — see §2a's own correction note; that
+   finding still points at *some* live runtime race, just not specifically
+   at §6's static margins, since it turned out to involve firmware-only
+   differences on one shared bitstream.
    One adjacent question not investigated here: `spi_slave_clk_pin` has no
    `set_clock_groups` of its own (only `jtag_clk_pin` does, line ~18) — now
    that `sys_clk_pin` and its derived clocks are real, Vivado derives *some*
    implicit relationship between spi_slave and that whole domain too, the
    same class of gap this section's own header comment already documents
-   for JTAG. Worth checking alongside the margin fix above.
-5. **If items 1–4 don't localize the defect**, build the full
+   for JTAG. Not investigated further given §6 is now closed as a
+   fixation-word candidate — worth doing someday purely for its own sake
+   (real timing hygiene), not as part of this investigation.
+5. **With items 1–4 now exhausted without localizing the defect**, build the full
    `tb_kevgpt_ddr_bundle_full.sv` contention testbench (weight + KV + CPU
    traffic simultaneously, randomized MIG return latency within whatever
    ordering guarantee the native UI actually provides, randomized `app_rdy`/
@@ -940,3 +987,25 @@ original order below since item 4 was already next regardless.
 - Diff: `constraints.xdc` (the CDC-margin `set_max_delay -datapath_only`
   fix, §6/§8 item 4) in `kevgpt-genesys2-soc`, same file as the
   `sys_clk_pin` fix above.
+- The real-hardware retest that closed §6: second full clean resynthesis
+  (both fixes present, `AUTO_INCREMENTAL_CHECKPOINT` disabled again,
+  ~56 minutes), confirmed live in the real build (`report_clock_networks`
+  shows `sys_clk_pin` constrained with the same 67,133/232 endpoints;
+  `report_timing -from [get_cells u_kevgpt_ddr_bundle/u_kv_rd_req_cdc/mem_reg_0_3_6_11]
+  -to [get_pins {u_kevgpt_ddr_bundle/u_rd_engine/cmd_addr_q_reg[11]/D}]` →
+  "No timing paths found"). Board was repowered mid-session; reprogrammed
+  via `vivado -mode batch -source <target>_pgm.tcl -tclargs
+  xc7k325tffg900-2 <bitstream>.bit`, using an absolute bitstream path and
+  `HW_TARGET=localhost:3121/xilinx_tcf/Digilent/200300B5E5AAB` pinned
+  explicitly — the default target resolution hit the exact stale-
+  registration issue this project's own reference notes already document
+  (two targets differing only by a trailing character; the one without the
+  trailing "B" is dead after a repower). `openocd` restarted fresh
+  afterward (old PID killed first). Firmware reloaded with
+  `KEVGPT_FORCE_GREEDY=1`/`KEVGPT_PRINT_IDS_ONLY=1` (matching §2a's
+  isolation build exactly), weights resent, same 5-prompt × 8-repeat
+  greedy test rerun via the same `isolation_test.py` harness. Result:
+  identical `hw_ids` to the pre-fix captures for all 5 prompts (e.g. "in
+  the forest" → `[2213, 5368, 607, 2213, 165, 9689, ...]`, byte-for-byte
+  the same id 2213 = "care" at position 0, matching every earlier capture
+  of this prompt in this document).

@@ -6135,3 +6135,72 @@ constructed Tcl strings could have missed -- identical result.
 (sys_clk_pin + these three exceptions), and a real-hardware re-test of the
 greedy-mode divergence test -- the actual answer to whether this was the
 fixation-word cause.
+
+## The real-hardware retest: CDC timing-constraint gap ruled out, definitively
+
+Direct continuation. Ran the second full clean resynthesis
+(`AUTO_INCREMENTAL_CHECKPOINT` disabled again, ~56 min, no `-jobs`) with
+both fixes present. Confirmed live in the real build before touching
+hardware: `report_clock_networks` shows `sys_clk_pin` constrained with the
+same 67,133/232 endpoints as the in-memory check; the previously-worst CDC
+path (`u_kv_rd_req_cdc/mem_reg_0_3_6_11` -> `u_rd_engine/cmd_addr_q_reg[11]/D`)
+now reports "No timing paths found"; `write_bitstream Complete!`.
+
+**Board was repowered mid-session by the user.** SRAM-based FPGA
+configuration is volatile, so this meant reprogramming from scratch, not
+just reloading firmware. Killed the now-stale `openocd` process first.
+Programming hit the exact stale-hw-target-registration issue this
+project's reference notes already document: the default target resolution
+tried `.../Digilent/200300B5E5AA` (dead post-repower) and failed with "no
+current hw_target." Probed `get_hw_targets` directly, found the live one
+differs only by a trailing "B" (`200300B5E5AAB`), pinned it via `HW_TARGET`
+env var, and it opened on the first try. Also needed an absolute path for
+the `.bit` file -- the pgm.tcl script's relative-path resolution didn't
+match my shell's cwd inside the Vivado batch session. Programmed clean.
+Restarted `openocd` fresh against the newly-programmed board -- connected
+immediately, JTAG tap found.
+
+Rebuilt firmware with `KEVGPT_FORCE_GREEDY=1`/`KEVGPT_PRINT_IDS_ONLY=1`
+(the exact isolation-build config from the earlier "care" discovery
+session), reloaded via the usual confirm-listener-then-trigger sequence,
+resent weights (~15 min), reran the identical 5-prompt x 8-repeat greedy
+test via the same `isolation_test.py` harness used before.
+
+**Result: byte-for-byte identical to every capture before either fix.**
+Same wrong tokens ("care"/id 2213, "carefree"/id 2216) at the same
+positions (token 0 for 4/5 prompts, token 49 for "once upon a time"),
+same 100% determinism across all 8 repeats each. Two real, previously-
+completely-invisible timing gaps -- found via live Vivado queries, fixed,
+verified multiple independent ways, built into a genuinely fresh bitstream
+with zero incremental-synthesis reuse -- changed nothing observable about
+the fixation-word symptom on real hardware. The CDC timing-constraint gap
+(both the missing root clock and the razor-thin async_fifo_gray margins)
+is ruled out as the fixation-word cause, definitively, not just narrowed.
+Both fixes are kept regardless -- they close a genuine, previously-total
+blind spot in this design's timing closure -- but they are not *the*
+answer.
+
+**A necessary correction to the earlier "care weight row" session's own
+conclusion**: that session attributed a build-dependent change in which
+wrong token won (isolation/baseline builds vs. the logit-probe build) to
+"placement/routing differences between builds," and used it as supporting
+evidence for the CDC-timing hypothesis. That reasoning doesn't survive
+scrutiny: those three builds differ only in *firmware*, all running on the
+*same* FPGA bitstream -- firmware cannot move a placement or a route on
+the fabric. Whatever changed the outcome between those builds, it has to
+be sensitive to firmware *execution timing* itself (e.g. exactly which
+cycle a DMA request gets issued on, relative to some other concurrent
+activity), not a static synchronizer margin. That finding is still real
+evidence for *some* live runtime race -- it just was never actually
+evidence for §6's CDC margins specifically, which this session's direct
+real-hardware test now rules out on its own terms.
+
+Firmware toggles (`KEVGPT_FORCE_GREEDY`, `KEVGPT_PRINT_IDS_ONLY`) reverted
+to off before committing, matching convention.
+
+Diagnostic infrastructure this closes out: §6/Hypothesis A (the CDC
+timing-constraint gap) is done as a fixation-word candidate. Remaining
+open leads: §4/Hypothesis B (owner-FIFO backpressure -- already fixed
+defensively, never confirmed as the active bug under real contention) and
+a full multi-master contention testbench (weight + KV + CPU traffic
+simultaneously, randomized timing) as the next real diagnostic step.
