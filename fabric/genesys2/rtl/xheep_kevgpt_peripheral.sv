@@ -64,6 +64,14 @@
 //       clear), then write 0 to resume normal monitoring. Deliberately
 //       NOT auto-clearing: a pulse can be missed crossing clock domains,
 //       a held level cannot.
+//  0x4C WEIGHT_STREAM_CRC (read-only): a free-running CRC32 (IEEE 802.3,
+//       matches Python zlib.crc32()) over every word weight_loader_ddr's
+//       REAL DMA path (weight_loader_ddr -> CDC -> mux -> arbiter -> MIG
+//       -> CDC) writes into weight_bank_tdp -- Sec8 item 1's own gap,
+//       never actually checked before this. Never resets on its own
+//       (free-running since power-on/reset); read it at a checkpoint of
+//       your choosing and compare against a host- or simulation-computed
+//       expected value for the identical run.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -188,6 +196,7 @@ module xheep_kevgpt_peripheral #(
     output logic                 health_clear_o
 );
     wire clk = clk_i;
+    wire [31:0] weight_stream_crc;  // Sec8 item 1 -- see u_seq's own port comment
     wire [5:0] windex = reg_req_i.addr[7:2];
     // tok_id/core_tok_out width: was hardcoded [8:0] (max 511), fine for
     // every char-level VOCAB (<=193) this project ever deployed but a real
@@ -275,6 +284,7 @@ module xheep_kevgpt_peripheral #(
             6'hB: rdata_mux = 32'h5351_5256;              // "SQRV"
             6'h10: rdata_mux = {23'b0, health_sticky_i};  // 0x40 DDR_HEALTH
             6'h11: rdata_mux = {24'b0, health_count_i};   // 0x44 DDR_ERR_COUNT
+            6'h13: rdata_mux = weight_stream_crc;         // 0x4C WEIGHT_STREAM_CRC
             default: rdata_mux = 32'b0;
         endcase
     end
@@ -324,6 +334,7 @@ module xheep_kevgpt_peripheral #(
         .wld_ld_start(wld_ld_start_r), .wld_ld_ddr_addr(wld_ld_ddr_addr_r),
         .wld_ld_words(wld_ld_words_r), .wld_ld_done(core_wld_done),
         .wl_rd_req_valid(wl_rd_req_valid), .wl_rd_req_ready(wl_rd_req_ready), .wl_rd_req_addr(wl_rd_req_addr),
-        .wl_rd_ret_valid(wl_rd_ret_valid), .wl_rd_ret_ready(wl_rd_ret_ready), .wl_rd_ret_data(wl_rd_ret_data)
+        .wl_rd_ret_valid(wl_rd_ret_valid), .wl_rd_ret_ready(wl_rd_ret_ready), .wl_rd_ret_data(wl_rd_ret_data),
+        .weight_stream_crc(weight_stream_crc)
     );
 endmodule

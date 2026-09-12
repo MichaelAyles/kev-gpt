@@ -831,7 +831,65 @@ original order below since item 4 was already next regardless.
    the defect immediately, far faster than waiting 50 generated tokens for
    a fixation word to appear. This is the single most direct fix for the
    corrected §3 claim ("write side is clean" never actually covered this
-   path) and should come first.
+   path) and should come first. **Built and deployed to real hardware; the
+   simulation half of the comparison is inconclusive for a mundane reason,
+   not a bug — see status update below.**
+
+   **Status update (2026-09-12):** Built `crc32_word.sv`, a single-cycle
+   (no dropped-word-risk) IEEE 802.3 CRC32 engine derived programmatically
+   by GF(2) superposition over an already-verified bit-serial reference,
+   verified standalone against `zlib.crc32()` (5 trials incl. back-to-back
+   every-cycle feeds). Tapped it onto `sequencer_vec.sv`'s real
+   `wld_ldb_we`/`wld_ldb_data` signals — the actual `weight_loader_ddr`
+   DMA write port, never the CPU-manual `wl_we`/`wl_data` boot-load path —
+   as a new `weight_stream_crc` output, threaded through
+   `xheep_kevgpt_peripheral.sv` as register `0x4C`, printed unconditionally
+   by firmware after each reply. Resynthesized clean (zero new timing
+   violations beyond the already-accepted baseline, zero new BRAM), deployed
+   to real hardware with `KEVGPT_FORCE_GREEDY=1` for a clean apples-to-apples
+   comparison, captured `KEVGPT_WEIGHT_CRC,0x0086427c` for prompt "once upon
+   a time" from a fresh boot.
+
+   Built a matching simulation (`tb_seq_vec_kv_stream.sv` +
+   `sequencer_vec.sv`, `PLEN=4 NGEN=20 SEEDVAL=0 VOCAB=16384 NLAYER=12
+   D=128`, real per-layer DDR streaming path) to compute an independent
+   expected value. First attempt was invalid (10 missing `.mem` ROM files,
+   X-propagated through the whole run). Fixed and reran: got `GEN
+   pos=3..22 tok=[...,10007,...]` (`WEIGHT_STREAM_CRC,0x639ea0f6`) —
+   19/20 tokens matched item 4409's documented gold (2026-08-30) bit-
+   exactly, but position 19 diverged (`14002` in the old gold vs. `10007`
+   here). Before treating that as a finding, ran a **pristine control**:
+   same command, but with `sequencer_vec.sv`/`tb_seq_vec_kv_stream.sv`
+   pulled via `git show HEAD:...` (i.e. byte-identical to what produced
+   item 4409's gold, with none of this item's CRC-tap changes) — **it
+   reproduced the exact same `10007` at position 19**, ruling out the CRC
+   tap and ruling out simulator-level nondeterminism (two independently
+   compiled `.vvp` binaries agreed with each other, disagreeing only with
+   the older documented gold). Also checked whether greedy mode could
+   still be influenced by `gumbel_lut.mem` content (which changed under
+   `af1c2c1`'s TEMP recalibration): confirmed via direct RTL read
+   (`sequencer_vec.sv` lines ~1479/1481) that the noise term is `smp_en ?
+   ... : 34'sd0`, i.e. structurally zeroed whenever `seed==0` — ruled out.
+
+   The real explanation: item 4409's gold predates a full checkpoint swap.
+   `data/ckpt_stepC_d128_v16384.pt` (2026-09-05 21:30) and
+   `fabric/export_stepC_d128_v16384/` (2026-09-05 21:46) postdate the
+   2026-08-30 gold capture by 6 days — this is the "Phase 2 Step 10 recipe
+   retargeted to D=128" checkpoint `af1c2c1` deployed (the same checkpoint
+   §9's real-hardware evidence trail already cites as this investigation's
+   subject: `fabric/export_stepC_d128_v16384/goformer.npz`). Same
+   VOCAB/NLAYER/D shape, genuinely different learned weights — entirely
+   sufficient to flip one near-tied argmax decision while leaving the
+   other 19, clearer-margin decisions unaffected. **Net result: no bug
+   found here — if anything, mild additional evidence of RTL determinism
+   (two independent compiles agreed bit-exactly given identical inputs).**
+   The CRC-vs-real-hardware comparison itself remains open: `0x639ea0f6`
+   (sim, NGEN=20) can't be compared directly against `0x0086427c` (real
+   hardware, 60+ generated tokens) since the register is free-running and
+   accumulates strictly more DMA traffic on the longer real run — this was
+   already a known gap before this update, still unresolved. Closing it
+   needs either a much longer/matching-length simulation or a firmware cap
+   on generation length, neither done yet.
 2. ~~Make the owner FIFOs' `in_ready_o` real backpressure, in both
    `mig_dual_master_arbiter.sv` and `mig_read_mux2.sv`~~ **DONE** — see §4's
    status update and §4a for the fix, the gate it was verified against, and

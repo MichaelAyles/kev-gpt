@@ -108,6 +108,11 @@ module tb;
     wire        wl_rd_ret_valid, wl_rd_ret_ready;
     wire [DATA_W-1:0] wl_rd_ret_data;
     wire        wld_ld_done;
+    // FIXATION-WORD-CDC-INVESTIGATION.md Sec8 item 1: same free-running
+    // CRC32 real hardware exposes via KEVGPT_REG_WEIGHT_STREAM_CRC --
+    // simulation's own value here, for a real captured seed, is the
+    // "expected" value to compare real hardware's own report against.
+    wire [31:0] weight_stream_crc;
 
     wire              rd_cmd_valid;
     wire [ADDR_W-1:0] rd_cmd_addr;
@@ -164,7 +169,8 @@ module tb;
         .wl_rd_req_valid(wl_rd_req_valid), .wl_rd_req_ready(wl_rd_req_ready),
         .wl_rd_req_addr(wl_rd_req_addr),
         .wl_rd_ret_valid(wl_rd_ret_valid), .wl_rd_ret_ready(wl_rd_ret_ready),
-        .wl_rd_ret_data(wl_rd_ret_data));
+        .wl_rd_ret_data(wl_rd_ret_data),
+        .weight_stream_crc(weight_stream_crc));
 
     reg [VIDXWP-1:0] prompt [0:PLEN-1];
     reg [VIDXWP-1:0] stream [0:PLEN+NGEN-1];
@@ -202,6 +208,7 @@ module tb;
         fs = $fopen("stream_stream.out", "w");
         for (i = PLEN; i < PLEN + NGEN; i = i + 1) $fwrite(fs, "%0d\n", stream[i]);
         $fclose(fs);
+        $display("WEIGHT_STREAM_CRC,0x%08x", weight_stream_crc);
         $display("TB_DONE");
         $finish;
     end

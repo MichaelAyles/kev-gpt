@@ -209,7 +209,19 @@ module sequencer_vec #(
     output wire [28:0]          wl_rd_req_addr,
     input  wire                 wl_rd_ret_valid,
     output wire                 wl_rd_ret_ready,
-    input  wire [255:0]         wl_rd_ret_data
+    input  wire [255:0]         wl_rd_ret_data,
+
+    // FIXATION-WORD-CDC-INVESTIGATION.md Sec8 item 1: running CRC32 over
+    // every word weight_loader_ddr's REAL DMA path writes into
+    // weight_bank_tdp (wld_ldb_we/wld_ldb_data below -- not the CPU-manual
+    // wl_we/wl_data boot-load path). Free-running since reset; firmware
+    // reads it at a checkpoint of its choosing and compares against a
+    // host/simulation-computed expected value for the identical run --
+    // the whole point is testing weight_loader_ddr -> CDC -> mux ->
+    // arbiter -> MIG -> CDC end to end, which no prior diagnostic covered
+    // (KEVGPT_DIAG_DUMP_HEAD reads DDR3 via a plain CPU load, bypassing
+    // this entire path).
+    output wire [31:0]          weight_stream_crc
 );
     localparam integer ROWS  = D    / P;
     localparam integer ROWS3 = D3   / P;
@@ -551,6 +563,20 @@ module sequencer_vec #(
         assign wl_rd_ret_ready = 1'b1;
     end
     endgenerate
+
+    // FIXATION-WORD-CDC-INVESTIGATION.md Sec8 item 1: taps the REAL
+    // DMA-streamed write port (wld_ldb_we/wld_ldb_data, driven by
+    // weight_loader_ddr's own u_wld instance above through its full
+    // CDC/mux/arbiter/MIG round trip when WEIGHT_DDR_BACKED=1), never the
+    // CPU-manual boot-load path (wl_we/wl_data). Accepts one word/cycle
+    // unconditionally -- weight_loader_ddr's own back-to-back sub-word
+    // writes (unpacking one DDR beat) never risk a dropped/missed word
+    // here, unlike a slower multi-cycle-per-word CRC design would.
+    crc32_word u_weight_stream_crc (
+        .clk(clk), .rst(rst),
+        .word_valid(wld_ldb_we), .word_data(wld_ldb_data),
+        .crc_out(weight_stream_crc)
+    );
 
 `ifndef SYNTHESIS
     // KV cache / weight-image DDR3 region overlap check -- see KV_DDR_BASE's
