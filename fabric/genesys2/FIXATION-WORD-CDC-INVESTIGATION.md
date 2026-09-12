@@ -36,6 +36,17 @@ toward §4/Hypothesis B (owner-FIFO contention, already fixed defensively
 but not confirmed active) or §8 item 5's full multi-master contention
 testbench as the next real leads.
 
+**§8 item 5 is now also done.** The full contention testbench found a real
+bug — but in the testbench itself, not the DUT: a stale-counter race in the
+gate's own read-completion detector that could let it sail past an
+unfinished read and then deadlock. Fixed; re-swept 11 random seeds
+(including the two that used to hang forever) and got a clean
+`KEVGPT_DDR_BUNDLE_FULL_VERDICT,PASS` on all of them. Hypothesis B's fix
+(§4/§8 item 2) held up under genuine sustained three-way contention with no
+new defect surfacing — see §8 item 5 and §3's table for the full account.
+With items 1–5 all exhausted, item 6 (ILA on architectural invariants on
+real hardware) is the next lead.
+
 Separately, §8 item 2's owner-FIFO backpressure gap is fixed in both
 `mig_dual_master_arbiter.sv` and `mig_read_mux2.sv` (§4's status update),
 and a testbench-only clock-domain bug found while verifying that fix is
@@ -206,6 +217,7 @@ per §8's updated priority list.
 | Sampling-methodology mismatch (my own earlier test artifact) | Ruled out | Reran with the *exact* algorithm the RTL implements (`gumbel.GumbelRng`), not an approximate PyTorch proxy: 1,500 tokens, zero fixation-word hits. |
 | Marginal/random real-silicon timing noise | Narrowed, not ruled out | The 40-trial repeated-greedy-decode test (above) is 100% deterministic *within one build*. This only rules out *pure random/probabilistic* noise. §2a's build-to-build wrong-token change is real evidence for a *live runtime race* in general (see §2a's correction — it can't be an FPGA placement effect, since those builds shared one bitstream) — it just isn't evidence specifically for §6's CDC margins, which the direct real-hardware retest below rules out. |
 | **CDC timing-constraint gap (§6) — both the missing root clock and the razor-thin `async_fifo_gray` margins** | **Ruled out, definitively** | Both real bugs (confirmed via live Vivado queries, not guesses) were fixed, verified in-memory two independent ways each, built into a completely fresh bitstream (`AUTO_INCREMENTAL_CHECKPOINT` disabled, full clean synth+impl+bitgen, no incremental reuse), and re-tested on real hardware against the exact same 5-prompt greedy test as §2a. **Result: byte-for-byte identical wrong tokens at the identical positions** — "care"/"carefree" at token 0 for the same 3/5 prompts, same 100% determinism across 8 repeats each. Fixing two real, previously-invisible timing gaps changed nothing observable. Whatever causes the fixation-word symptom, it is not a static CDC synchronizer margin or a missing top-level clock constraint. |
+| Owner-FIFO/backpressure defect surviving under genuine sustained contention (§8 item 5, Hypothesis B) | Ruled out (for the scenarios this gate covers) | Built `tb_kevgpt_ddr_bundle_full.sv` — three concurrent generators (KV, weight, synthetic CPU side-B) running continuously through a randomized-latency, randomized-backpressure MIG model, checked against reference on every transaction, not phased or end-of-test-only. A real bug did surface, but in the gate itself (a stale-counter race in the read-completion detector, fixed — see §8 item 5); after that fix, 11 random seeds (including the two that used to hang forever) all pass clean, 0 errors. §4/§8 item 2's owner-FIFO fix held up under sustained three-way contention; no new defect found. |
 
 ## 4. What IS implicated: modules, signals, and the traffic path
 
@@ -871,13 +883,56 @@ original order below since item 4 was already next regardless.
    for JTAG. Not investigated further given §6 is now closed as a
    fixation-word candidate — worth doing someday purely for its own sake
    (real timing hygiene), not as part of this investigation.
-5. **With items 1–4 now exhausted without localizing the defect**, build the full
-   `tb_kevgpt_ddr_bundle_full.sv` contention testbench (weight + KV + CPU
-   traffic simultaneously, randomized MIG return latency within whatever
-   ordering guarantee the native UI actually provides, randomized `app_rdy`/
-   `app_wdf_rdy` stalls, varied `gen_clk`/`ui_clk` phase) — this project's
-   biggest missing regression, and likely to expose owner-FIFO/backpressure
-   bugs quickly if any remain after item 2's fix.
+5. ~~With items 1–4 now exhausted without localizing the defect, build the
+   full `tb_kevgpt_ddr_bundle_full.sv` contention testbench~~ **DONE.** Built
+   `fabric/genesys2/tb/tb_kevgpt_ddr_bundle_full.sv` (three concurrent
+   `fork`/`join` generators — KV write+read vs. `kv_bank` reference, weight
+   loads vs. the source DDR image, and a synthetic side-B write/readback —
+   running continuously and checked against reference on every transaction,
+   not phased or checked only at the end like `tb_kevgpt_ddr_bundle.sv`) and
+   a new `fabric/genesys2/tb/mig_behav_model_rand.sv` (randomized-but-
+   strictly-in-order read latency, randomized `app_rdy`/`app_wdf_rdy`
+   backpressure, replacing the always-ready fixed-latency
+   `mig_behav_model.sv` every single-master gate up to this point used),
+   plus a randomized `gen_clk`/`ui_clk` startup phase offset swept via a
+   compile-time `-DSEEDVAL`.
+   **Result: found a real bug, in the gate itself, not in the DUT** — worth
+   recording in full because it is exactly the class of race this whole
+   investigation is chasing, just located one layer up from where expected.
+   A handful of `-DSEEDVAL` draws (e.g. `32'h7FFFFFFF`, `32'h13579BDF`) hung
+   forever (confirmed genuinely deadlocked, not merely slow, by re-running
+   at 15x the original timeout with no change). Root cause, isolated via a
+   schedule-neutral hierarchical monitor (appending signal probes without
+   touching any task body, since edits *inside* a task shift the relative
+   firing order of concurrent `fork`ed processes sharing one `$urandom`
+   stream and produce a non-representative timeline — learned the hard way
+   after two probing attempts gave mutually inconsistent traces for the
+   supposedly-same seed): the testbench's own read-completion detector,
+   `wait (rd_valid_count_ddr == pos + 9'd1)`, compares a derived counter
+   against a *repeatable* target (`pos+1`) that resets only on the read's
+   own start pulse. When `kv_worker` draws the same `pos` twice in a row
+   (pure chance in the random stream), the *stale* count left over from the
+   previous read already equals the new target the instant the new
+   `rd_start` pulse fires — the `wait()`'s level check races the DUT's
+   reset-on-`rd_start` against the counter's own NBA update, and can see
+   the stale match before a single new `rd_valid` has arrived. `kv_worker`
+   then sails past a read that has barely started, immediately issues the
+   *next* iteration's `rd_start`, `kv_bank_ddr` silently drops it (its read
+   FSM is still mid-stream on the read `kv_worker` just mis-timed — by
+   design, `RR_IDLE` is the only state that samples `rd_start`), and
+   `kv_worker` hangs forever waiting on a completion that can now never
+   come. **Fixed** by waiting on `rd_done`/`rd_done_ddr`'s own one-cycle
+   pulses instead (unconditionally cleared every cycle in
+   `kv_bank.sv`/`kv_bank_ddr.sv`'s own FSMs, so immune to this staleness),
+   and deleting the now-redundant `rd_valid_count`/`rd_valid_count_ddr`
+   registers. Re-swept 11 distinct `-DSEEDVAL` draws (including both
+   originally-hanging ones) after the fix: **`KEVGPT_DDR_BUNDLE_FULL_VERDICT,PASS`,
+   0 errors, on all 11** — no DUT-side defect surfaced (owner-FIFO/
+   backpressure, item 2's fix, held up under genuine sustained three-way
+   contention). Not yet wired into a `run_*.py` harness or committed to the
+   vendored `kevgpt-genesys2-soc` repo's own copy of `kv_bank_ddr.sv`/
+   `kevgpt_ddr_bundle.sv` (unmodified by this item — only the testbench
+   itself changed).
 6. **Only after 1–5 are clean should real ILA time be spent hunting
    metastability directly**, and even then, per §6a: trigger on architectural
    invariants (`owner_fifo_level != req_count - ret_count`, `owner_push &&

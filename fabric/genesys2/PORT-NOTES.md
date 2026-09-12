@@ -6204,3 +6204,85 @@ open leads: §4/Hypothesis B (owner-FIFO backpressure -- already fixed
 defensively, never confirmed as the active bug under real contention) and
 a full multi-master contention testbench (weight + KV + CPU traffic
 simultaneously, randomized timing) as the next real diagnostic step.
+
+## Full multi-master contention gate (§8 item 5) -- a real bug, but in the gate itself
+
+Built the testbench the previous section's own priority list called for:
+`fabric/genesys2/tb/tb_kevgpt_ddr_bundle_full.sv`, three concurrent
+`fork`/`join` generators (KV write+read vs. `kv_bank` reference, weight
+loads vs. the source DDR image, synthetic side-B write/readback) running
+continuously through a shared `mig_dual_master_arbiter` + a new
+`fabric/genesys2/tb/mig_behav_model_rand.sv` (randomized-but-strictly-in-
+order read latency, randomized `app_rdy`/`app_wdf_rdy` backpressure --
+`mig_behav_model.sv`'s always-ready/fixed-latency assumption never
+exercised either of those paths), each transaction checked against
+reference immediately, not phased or checked only at the end the way
+`tb_kevgpt_ddr_bundle.sv` is. Compiled via the same iverilog +
+`` `define SYNTHESIS ``/`` `undef SYNTHESIS `` shim-bracketing convention
+every other gate in this session uses (`mig_read_mux2.sv`,
+`mig_read_engine.sv`, `mig_rw_arbiter.sv`, `mig_dual_master_arbiter.sv`,
+`sync_fifo.sv`; `kv_bank.sv`/`weight_bank_tdp.sv`/`kv_bank_ddr.sv`/
+`weight_loader_ddr.sv` never see `SYNTHESIS`). Seeded via a compile-time
+`-DSEEDVAL` so re-running with a different value sweeps a different
+`$urandom` stream and a different `gen_clk`/`ui_clk` startup phase offset.
+
+First sweep found two real bugs, both in the *testbench*, not the DUT:
+
+1. The `ui_clk` startup-phase-offset expression, `#(3.5 + (seed % 5))`,
+   used `seed` as a signed `integer` -- some `-DSEEDVAL` bit patterns
+   (e.g. `32'hFEED0001`) are negative as a 32-bit signed value, and
+   `seed % 5` on a negative dividend can itself be negative (Verilog's `%`
+   follows the dividend's sign, same as C). A negative `#delay` silently
+   wraps to a huge unsigned time value -- reads exactly like a dead sim
+   hang (confirmed: that `-DSEEDVAL` never even reached the testbench's own
+   `SEED=` print). Fixed by computing the modulo against an explicit
+   unsigned view of the same bits (`reg [31:0] seed_u`) instead of the
+   signed `integer`.
+
+2. After that fix, two more `-DSEEDVAL` draws (`32'h7FFFFFFF`,
+   `32'h13579BDF`) still hung -- confirmed as a genuine deadlock, not just
+   slow, by re-running one at 15x the original sim-time budget with zero
+   change. Root cause took real effort to isolate: adding `$display` calls
+   *inside* a `fork`ed task changes that task's own relative scheduling at
+   each simulation time step, which can shift the interleaving order of
+   *other* concurrently-`fork`ed tasks' `$urandom` draws against a shared
+   global stream -- two successive debug probes gave mutually inconsistent
+   timelines for the nominally-same seed until this was recognized. Fix
+   was to add ONLY schedule-neutral, append-only hierarchical monitors
+   (new `always` blocks reading existing signals, touching no task body
+   and drawing no randomness) to get a trustworthy trace. That trace showed
+   the real mechanism: `kv_worker`'s own read-completion detector,
+   `wait (rd_valid_count_ddr == pos + 9'd1)`, compares a derived counter
+   against a *repeatable* target (`pos+1`) that only resets on the read's
+   own `rd_start` pulse. When two consecutive KV iterations draw the same
+   `pos` by chance (as they did here), the *stale* count left over from the
+   PREVIOUS read already equals the new target the instant the new
+   `rd_start` pulse fires -- the testbench's `wait()` races
+   `kv_bank_ddr`'s reset-on-`rd_start` against the counter's own
+   nonblocking-assignment update, and can observe the stale match before a
+   single new `rd_valid` has actually arrived. `kv_worker` then sails past
+   a read that barely started, immediately issues the *next* iteration's
+   `rd_start`, `kv_bank_ddr` silently drops it (its read FSM only samples
+   `rd_start` from its `RR_IDLE` state, and it's still mid-stream finishing
+   the read `kv_worker` just mis-timed), and `kv_worker` hangs forever
+   waiting on a completion that can now never come. Fixed by waiting on
+   `rd_done`/`rd_done_ddr`'s own one-cycle pulses instead of the derived
+   counters -- both are unconditionally cleared every cycle inside
+   `kv_bank.sv`/`kv_bank_ddr.sv`'s own read FSMs, so immune to this
+   staleness by construction. Deleted the now-dead `rd_valid_count`/
+   `rd_valid_count_ddr` registers.
+
+Re-swept 11 distinct `-DSEEDVAL` draws after both fixes, including the two
+that used to hang forever: **`KEVGPT_DDR_BUNDLE_FULL_VERDICT,PASS`, 0
+errors, on all 11.** §4/§8 item 2's owner-FIFO backpressure fix held up
+under genuinely sustained three-way contention (KV + weight + synthetic
+CPU, all continuously active, randomized latency and backpressure) with no
+new defect surfacing. §8 item 5 is done; per its own priority list, item 6
+(ILA on architectural invariants on real hardware) is next if a future
+lead points back at runtime contention specifically.
+
+Not yet done: a `run_*.py` wrapper for this gate (currently a manual
+iverilog invocation, documented in the testbench's own header comment);
+porting any of this to the vendored `kevgpt-genesys2-soc` repo (out of
+scope -- only the testbench changed here, `kv_bank_ddr.sv`/
+`kevgpt_ddr_bundle.sv`/`mig_dual_master_arbiter.sv` etc. are unmodified).
