@@ -15,6 +15,15 @@ on the KV-cache read-return path (unrelated to either weight-check
 tap) that was chased and resolved as a benign verification-bound
 recalibration, not a hardware bug.
 
+Then went past the weights entirely: item 10 checked layer 0's own
+*computation* (embed/LN1/QKV/attention/LN2/GELU/MLP/residual — all nine
+phases) against the Python golden reference, real hardware vs. real
+KV-cache state, for the exact "in the forest" forward pass that picks
+"care." **All nine matched exactly.** Layer 0 — weights and computation
+both — is now fully ruled out. The defect must be in one of layers 1-11
+(not reachable without new RTL, `dbg_stop`'s halts are hardcoded to
+block 0) or in the final `LN_f`/head activation computation.
+
 Status as of 2026-09-12: **open, not root-caused. The CDC timing-constraint
 gap (§6) has now been fully investigated, fixed, rebuilt from scratch, and
 retested on real hardware — and definitively ruled out.** Two real,
@@ -1306,6 +1315,60 @@ original order below since item 4 was already next regardless.
    the new sim check) and `main.c` (soc repo, the new diagnostic —
    `kevgpt_wbdiag_dump_channel()` generalizes item 8's own
    `kevgpt_wbdiag_dump_vocab()` past the head weight's fixed LANES/D).
+
+10. **"Check the hidden-state/activation computation next" — layer 0's
+    entire computation confirmed bit-exact correct, real hardware vs.
+    the Python golden reference, for the exact divergent case.** Weight
+    data was ruled out (items 8-9); this checks the remaining named
+    candidate — not the data, but the *computation itself*. Reuses the
+    existing `rd_sel`/`rd_addr`/`rd_data` readback port (the one
+    `KEVGPT_DIAG_LOGIT_PROBE` already used for head logits) — no new RTL.
+    Replayed the real prompt "in the forest" (ids 6915/14452/5384,
+    `data/word_v16384/meta.json`) via two genuine `kevgpt_step()` calls
+    (building real KV-cache state, not a synthetic boot-time probe like
+    items 8-9's own checks), then used `dbg_stop=1` ("after embed") and
+    `dbg_stop=3` ("after block 0") to capture all nine of block 0's own
+    phase signals — `x_in`, `ln1_out`, `qkv`, `ctx`, `attn_out`, `ln2_out`,
+    `gelu`, `mlp_out`, `x_out` — exactly matching
+    `model.goformer_kvq.IntKVQSequencer.block0_phase_signals()`'s own key
+    set, an existing golden-reference method built for this exact kind
+    of per-phase gate. `addr` is already the flat hidden-dimension index
+    (`row=addr>>$clog2(P)`, `lane=addr&(P-1)`, confirmed directly in
+    `sequencer_vec.sv`), so no translation was needed against golden's
+    own flat per-element lists.
+
+    One real firmware bug found and fixed along the way, not a hardware
+    finding: this toolchain's embedded `printf` doesn't support `%lld`
+    (64-bit) — silently printed the literal characters `"ld"` for the
+    three 64-bit Q.22 banks (`ln1_out`/`ln2_out`/`gelu`) instead of a
+    number, caught immediately by the host-side parser rejecting
+    non-numeric output rather than silently accepting garbage. Fixed by
+    printing the hi/lo 32-bit halves separately (`"%ld,%ld\n"`, both
+    already proven working) and reconstructing 64-bit host-side instead
+    of trusting the wider format specifier.
+
+    Also hit a real JTAG dropout mid-run (`LIBUSB_ERROR_NO_DEVICE`,
+    `dmi_scan failed`) — the USB devices stayed enumerated (`lsusb` still
+    showed both FTDI interfaces), so this was `openocd` holding a stale
+    libusb handle across a brief re-enumeration, not a real disconnect;
+    fixed the same way this project's own reference notes already
+    document for a repower/re-enumeration event — kill and restart
+    `openocd` fresh, matching the established recovery pattern rather
+    than treating it as a new class of failure.
+
+    **Result: all 9 of 9 phase banks matched the golden reference
+    exactly, zero differences**, for the specific forward pass (on
+    "forest") that picks "care" as the wrong next token. Combined with
+    items 8-9's weight-data results, **layer 0 is now fully ruled out —
+    both its weights and its entire computation are bit-exact correct**
+    for this divergent case. The defect, whatever it is, must live in a
+    later layer (1-11, not reachable this way — `dbg_stop`'s halt points
+    are hardcoded to `blk==0` specifically, so checking a later layer
+    would need new RTL, not just new firmware) or in the final `LN_f` +
+    head activation computation (the head *weight* is already confirmed
+    correct, but the *activation* feeding into it, post-layer-11, has
+    not been checked this way). Diff: `main.c` only (soc repo) — no RTL
+    changed, reusing an already-deployed, already-proven readback port.
 
 ## 9. Evidence trail / artifacts
 

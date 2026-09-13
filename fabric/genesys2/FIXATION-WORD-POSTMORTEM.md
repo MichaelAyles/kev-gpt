@@ -321,8 +321,14 @@ isn't a timing or ordering bug.
    four load in one single per-layer DMA reload, so the design's own
    never-before-used `dbg_stop` debug halt exposes all four
    simultaneously, no new RTL needed. **All four match their
-   known-correct source exactly, zero differences.** Full account in
-   `FIXATION-WORD-CDC-INVESTIGATION.md` §8 items 8-9.
+   known-correct source exactly, zero differences.** Went further still:
+   checked layer 0's entire *computation* (not just its weights) — all
+   nine phases (embed through the final residual) against the Python
+   golden reference, for the exact real prompt/KV-state that produces
+   "care." **All nine matched exactly.** Layer 0 is now fully ruled out,
+   weights and computation both — the defect must be in a later layer
+   (1-11) or the final head activation stage. Full account in
+   `FIXATION-WORD-CDC-INVESTIGATION.md` §8 items 8-10.
 2. **Isolate §2a's firmware-timing sensitivity on its own terms.** The one
    still-unexplained build-dependent result (a diagnostic-only firmware
    change shifting which wrong token wins, same bitstream) was folded into
