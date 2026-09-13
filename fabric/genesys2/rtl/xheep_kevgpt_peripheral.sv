@@ -92,6 +92,22 @@
 //       bits [255:224]). Valid one cycle after WBDIAG_ADDR is written --
 //       always true by the time firmware's own register-bus round trip
 //       reaches a subsequent read, same as every other bank readback here.
+//  0x74 DBG_STOP_BLOCK (write-only, held not pulsed): which transformer
+//       block (0..NLAYER-1) CTRL's own dbg_stop==2/3 halt points apply
+//       to -- FIXATION-WORD-CDC-INVESTIGATION.md Sec8 item 10's own
+//       follow-up ("extend dbg_stop to check layer 1"). 0 (the reset
+//       value) reproduces every prior dbg_stop use exactly (block 0
+//       only); write e.g. 1 before a GO with dbg_stop=2/3 to halt after
+//       block 1 instead, then rd_sel/rd_addr/WBDIAG read back that
+//       block's own activations/weights the same way item 8-10's own
+//       block-0 diagnostics already do. dbg_stop==1 ("after embed") is
+//       NOT affected by this register -- it's block-independent by
+//       construction; a later block's own "x_in" is simply the
+//       previous block's own x_out, already reachable via dbg_stop=3 at
+//       block N-1. Added as a new register rather than extending CTRL's
+//       own dbg_stop field, matching this file's own established
+//       convention (see the header note on 0x00-0x30 above) of keeping
+//       CTRL's bit layout identical to the KV260 AXI shell's.
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 
@@ -247,6 +263,7 @@ module xheep_kevgpt_peripheral #(
 
     reg          go_pulse, wl_rst, soft_reset, wl_we;
     reg [1:0]    dbg_stop;
+    reg [3:0]    dbg_stop_block;
     reg [31:0]   wl_data;
     reg [VIDXW-1:0] tok_id;
     reg [8:0]    pos;
@@ -266,7 +283,7 @@ module xheep_kevgpt_peripheral #(
     always @(posedge clk) begin
         if (!rst_ni) begin
             go_pulse<=0; wl_rst<=0; soft_reset<=0; wl_we<=0; wl_data<=0;
-            tok_id<=0; pos<=0; rd_sel<=0; rd_addr<=0; dbg_stop<=0;
+            tok_id<=0; pos<=0; rd_sel<=0; rd_addr<=0; dbg_stop<=0; dbg_stop_block<=0;
             seed<=0; seed_we<=0;
             wld_ld_start_r<=0; wld_ld_ddr_addr_r<=0; wld_ld_words_r<=0;
             wbdiag_addr_r<=0;
@@ -285,6 +302,7 @@ module xheep_kevgpt_peripheral #(
                 6'hE: wld_ld_words_r    <= reg_req_i.wdata;                // 0x38 WLD_WORDS
                 6'hF: wld_ld_start_r    <= reg_req_i.wdata[0];             // 0x3C WLD_CTRL
                 6'h14: wbdiag_addr_r    <= reg_req_i.wdata[$clog2(WWORDS)-1:0]; // 0x50 WBDIAG_ADDR
+                6'h1D: dbg_stop_block   <= reg_req_i.wdata[3:0];           // 0x74 DBG_STOP_BLOCK
                 default: ;
             endcase
         end else begin
@@ -375,6 +393,7 @@ module xheep_kevgpt_peripheral #(
         .tok_id(tok_id), .pos(pos), .done(core_done_w), .tok_out(core_tok_out),
         .rd_sel(rd_sel), .rd_addr(rd_addr), .rd_data(core_rd_data),
         .wl_rst(wl_rst), .wl_we(wl_we), .wl_data(wl_data), .dbg_stop(dbg_stop),
+        .dbg_stop_block(dbg_stop_block),
         .seed(seed), .seed_we(seed_we),
         .kv_wr_pkt_valid(kv_wr_pkt_valid), .kv_wr_pkt_ready(kv_wr_pkt_ready),
         .kv_wr_pkt_addr(kv_wr_pkt_addr), .kv_wr_pkt_data(kv_wr_pkt_data), .kv_wr_pkt_mask(kv_wr_pkt_mask),

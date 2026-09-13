@@ -92,6 +92,7 @@ module tb;
     reg [VIDXWP-1:0] tok;
     reg [8:0] pos;
     reg [1:0] dbg_stop_r;
+    reg [3:0] dbg_stop_block_r;
     reg [3:0]  rsel;
     reg [10:0] raddr;
     wire done;
@@ -160,6 +161,7 @@ module tb;
         .clk(clk), .rst(rst), .go(go), .tok_id(tok), .pos(pos), .done(done),
         .tok_out(tok_out), .rd_sel(rsel), .rd_addr(raddr), .rd_data(rdata),
         .wl_rst(1'b0), .wl_we(1'b0), .wl_data(32'd0), .dbg_stop(dbg_stop_r),
+        .dbg_stop_block(dbg_stop_block_r),
         .seed(seed_r), .seed_we(seed_we_r),
         // KV cache stays resident (kv_bank.sv) -- unrelated to this gate,
         // KV_DDR_BACKED defaults to 0, these ports go unused same as
@@ -188,6 +190,7 @@ module tb;
     initial begin
         rst = 1'b1; go = 1'b0; tok = 0; pos = 9'd0; rsel = 0; raddr = 0;
         seed_r = 32'b0; seed_we_r = 1'b0; wbdiag_addr_tb = 0; dbg_stop_r = 2'd0;
+        dbg_stop_block_r = 4'd0;
         // stage the FULL weight image into the simulated DDR3 directly --
         // WBITS(=LANES*4)=256=DATA_W at LANES=64, so one wrom.mem line is
         // exactly one DMA beat; no unpacking arithmetic of its own here,
@@ -316,6 +319,63 @@ module tb;
                 endcase
             end
             dbg_stop_r = 2'd0;  // restore normal operation
+        end
+
+        // ---- "extend dbg_stop to check layer 1" -- verifies the new
+        // dbg_stop_block port halts at BLOCK 1 instead of block 0 (never
+        // exercised before this), and that rd_sel/rd_addr correctly expose
+        // block 1's own activations at that halt. Real prompt "in the
+        // forest" (ids 6915/14452/5384, data/word_v16384/meta.json) --
+        // same scenario item 10's own block-0 check used. Values are
+        // $display'd, not compared in-Verilog (no convenient in-memory
+        // golden source the way wrom.mem served the weight checks) --
+        // diffed externally against a Python golden reference
+        // (model.goformer_kvq.IntKVQSequencer, same bi=1 _attn_step/
+        // _mlp_step calls, sink-captured) after the run.
+        if (VOCABP > 14452) begin : dbg_stop_block1_check
+            integer bi;
+            rst <= 1'b1; @(posedge clk); #1; rst <= 1'b0; @(posedge clk); #1;
+            tok = 6915; pos = 9'd0; go = 1'b1; @(posedge clk); #1; go = 1'b0;
+            wait (done == 1'b1); @(posedge clk); #1;
+            tok = 14452; pos = 9'd1; go = 1'b1; @(posedge clk); #1; go = 1'b0;
+            wait (done == 1'b1); @(posedge clk); #1;
+
+            dbg_stop_r = 2'd3; dbg_stop_block_r = 4'd1;  // stop after block 1
+            tok = 5384; pos = 9'd2; go = 1'b1; @(posedge clk); #1; go = 1'b0;
+            wait (done == 1'b1); @(posedge clk); #1;
+            $display("DBG_STOP_BLOCK1_CHECK_START");
+            for (bi = 0; bi < 8; bi = bi + 1) begin
+                integer n, k;
+                case (bi)
+                    0: n = 128; 1: n = 384; 2: n = 128; 3: n = 128;
+                    4: n = 128; 5: n = 512; 6: n = 128; 7: n = 128;
+                    default: n = 0;
+                endcase
+                case (bi)
+                    0: $display("ACT1_START,bank=ln1_out_q22,n=%0d", n);
+                    1: $display("ACT1_START,bank=qkv_q16,n=%0d", n);
+                    2: $display("ACT1_START,bank=ctx_q25,n=%0d", n);
+                    3: $display("ACT1_START,bank=attn_out_q25,n=%0d", n);
+                    4: $display("ACT1_START,bank=ln2_out_q22,n=%0d", n);
+                    5: $display("ACT1_START,bank=gelu_q22,n=%0d", n);
+                    6: $display("ACT1_START,bank=mlp_out_q25,n=%0d", n);
+                    7: $display("ACT1_START,bank=x_out_q25,n=%0d", n);
+                endcase
+                rsel = bi[3:0];
+                for (k = 0; k < n; k = k + 1) begin
+                    // rd_sel/rd_addr -> rd_data is a genuine 2-cycle pipe
+                    // (rd_lane registers from rd_addr on cycle 1, rd_data
+                    // registers from rd_lane on cycle 2 -- see
+                    // sequencer_vec.sv's own readback always block) --
+                    // firmware's kevgpt_read_bank() handles this with an
+                    // explicit dummy read; here, two clock edges.
+                    raddr = k[10:0];
+                    @(posedge clk); @(posedge clk); #1;
+                    $display("%0d", rdata);
+                end
+                $display("ACT1_END");
+            end
+            dbg_stop_r = 2'd0; dbg_stop_block_r = 4'd0;  // restore normal operation
         end
 
         $display("TB_DONE");

@@ -169,6 +169,15 @@ module sequencer_vec #(
     // seq_ref.block0_phase_signals): 1=after embed (xres=x_in), 2=after LN2 (xres=x_res1,
     // lnout2=ln2), 3=after block0 (xres=x_out). 0 = no stop (normal forward).
     input  wire [1:0]  dbg_stop,
+    // FIXATION-WORD-CDC-INVESTIGATION.md Sec8 item 10 follow-up ("extend
+    // dbg_stop to check layer 1"): which block dbg_stop==2/3 apply to --
+    // 0 (default, matches every prior use of dbg_stop exactly) checks
+    // block 0 as before; any other value (0..NLAYER-1) checks that block
+    // instead. dbg_stop==1 (after embed) is intentionally NOT gated by
+    // this -- it's block-independent by construction (embed happens once,
+    // before the block loop), and block N's own "x_in" is simply block
+    // (N-1)'s own x_out, already reachable via dbg_stop=3 at block N-1.
+    input  wire [3:0]  dbg_stop_block,
     // on-chip Gumbel-max sampling: seed_we loads the persistent xorshift state and
     // enables sampling (state != 0). The argmax over the VOCAB head logits then adds
     // a per-logit Gumbel noise (precomputed into gumbel_bank during the head GEMV).
@@ -1344,7 +1353,7 @@ module sequencer_vec #(
                     end
                 end
                 // mlp_fc GEMV setup (after LN2) --------------------------------
-                S_FCRET: if (dbg_stop==2'd2 && blk==4'd0) st<=S_FIN;  // DEBUG: stop after LN2
+                S_FCRET: if (dbg_stop==2'd2 && blk==dbg_stop_block) st<=S_FIN;  // DEBUG: stop after LN2
                   else begin
                     g_wbase<=WEIGHT_STREAM_PER_LAYER ? WB_FC : (blk*GW_BLK + WB_FC);
                     g_m<=D_MLP[BUSW-1:0]; g_k<=D[BUSW-1:0]; g_asrc<=2'd2;
@@ -1386,7 +1395,7 @@ module sequencer_vec #(
                         ln_x <= sw;
                         if (cid==ROWS-1) begin
                             ci<=0; civ<=0;
-                            if (dbg_stop==2'd3 && blk==4'd0) st<=S_FIN; // DEBUG: stop after block 0
+                            if (dbg_stop==2'd3 && blk==dbg_stop_block) st<=S_FIN; // DEBUG: stop after block N (dbg_stop_block)
                             else begin
                                 if (blk != NLAYER-1) blk<=blk+1'b1;
                                 orow<=0; st<=L_COLL;
