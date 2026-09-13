@@ -91,6 +91,7 @@ module tb;
     reg rst, go;
     reg [VIDXWP-1:0] tok;
     reg [8:0] pos;
+    reg [1:0] dbg_stop_r;
     reg [3:0]  rsel;
     reg [10:0] raddr;
     wire done;
@@ -158,7 +159,7 @@ module tb;
                      .WEIGHT_STREAM_PER_LAYER(1), .WEIGHTS_DDR_BASE(0)) dut (
         .clk(clk), .rst(rst), .go(go), .tok_id(tok), .pos(pos), .done(done),
         .tok_out(tok_out), .rd_sel(rsel), .rd_addr(raddr), .rd_data(rdata),
-        .wl_rst(1'b0), .wl_we(1'b0), .wl_data(32'd0), .dbg_stop(2'b0),
+        .wl_rst(1'b0), .wl_we(1'b0), .wl_data(32'd0), .dbg_stop(dbg_stop_r),
         .seed(seed_r), .seed_we(seed_we_r),
         // KV cache stays resident (kv_bank.sv) -- unrelated to this gate,
         // KV_DDR_BACKED defaults to 0, these ports go unused same as
@@ -186,7 +187,7 @@ module tb;
 
     initial begin
         rst = 1'b1; go = 1'b0; tok = 0; pos = 9'd0; rsel = 0; raddr = 0;
-        seed_r = 32'b0; seed_we_r = 1'b0; wbdiag_addr_tb = 0;
+        seed_r = 32'b0; seed_we_r = 1'b0; wbdiag_addr_tb = 0; dbg_stop_r = 2'd0;
         // stage the FULL weight image into the simulated DDR3 directly --
         // WBITS(=LANES*4)=256=DATA_W at LANES=64, so one wrom.mem line is
         // exactly one DMA beat; no unpacking arithmetic of its own here,
@@ -260,6 +261,61 @@ module tb;
                       (wbd_fail == 0), wbd_fail);
         end else begin
             $display("WBDIAG_CHECK_SKIPPED,LANES=%0d (only meaningful at LANES=64)", LANES);
+        end
+
+        // ---- "check QKV/attention/MLP weights the same way" -- verifies
+        // dbg_stop's own real behavior for the first time (never exercised
+        // by any application before) AND that the whole block's weight
+        // image (QKV+proj+FC+MP, one single per-layer reload under
+        // WEIGHT_STREAM_PER_LAYER=1 -- confirmed by reading sequencer_vec.sv
+        // directly: g_wbase for each matrix is just an offset selector into
+        // an already-loaded image, S_STRW only fires once per layer, before
+        // QKV) is ALL simultaneously resident at a single dbg_stop halt, so
+        // one stop checks all four matrix types, not just the one dbg_stop
+        // happens to name in its own comment ("stop after LN2" halts with
+        // PROJ's own weights the freshest-used, but QKV/FC/MP are still
+        // resident from the same one-time block-0 reload). Fresh reset first
+        // (matching a real diagnostic run at boot, before any real
+        // generation) so this doesn't depend on/disturb the run above.
+        if (LANES == 64) begin : dbg_stop_check
+            integer k, wbd_fail2, cyc_before, cyc_after;
+            reg [255:0] expect_row, got_row;
+            // {name, w_base, K} for QKV/PROJ/FC/MP, blk=0 (base offset 0 in
+            // wrom.mem -- blk*GW_BLK*WBYTES_STRM=0 for blk=0), channel 0 of each.
+            reg [31:0] wbase_list [0:3];
+            reg [31:0] k_list     [0:3];
+            wbase_list[0] = dut.WB_QKV;  k_list[0] = dut.D;
+            wbase_list[1] = dut.WB_PROJ; k_list[1] = dut.D;
+            wbase_list[2] = dut.WB_FC;   k_list[2] = dut.D;
+            wbase_list[3] = dut.WB_MP;   k_list[3] = dut.D_MLP;
+
+            rst <= 1'b1; @(posedge clk); #1; rst <= 1'b0; @(posedge clk); #1;
+            dbg_stop_r = 2'd2;  // stop after LN2 (after proj; QKV/FC/MP still resident from the one block-0 reload)
+            cyc_before = dbgcyc;
+            tok = prompt[0]; pos = 9'd0;
+            go = 1'b1; @(posedge clk); #1; go = 1'b0;
+            wait (done == 1'b1); @(posedge clk); #1;
+            cyc_after = dbgcyc;
+            $display("DBG_STOP_CHECK,halted_early=%0d,cyc=%0d", (cyc_after-cyc_before) < 10000, cyc_after-cyc_before);
+
+            for (pi = 0; pi < 4; pi = pi + 1) begin
+                wbd_fail2 = 0;
+                for (k = 0; k < k_list[pi]; k = k + 1) begin
+                    wbdiag_addr_tb = wbase_list[pi] + k;  // channel 0: group=0, row = w_base + 0*K + k
+                    @(posedge clk); #1;
+                    got_row    = wbdiag_addr_tb[0] ? wbdiag_pair_tb[LANES*8-1:LANES*4]
+                                                    : wbdiag_pair_tb[LANES*4-1:0];
+                    expect_row = u_mem.mem[wbdiag_addr_tb];  // blk=0 -> word offset 0 base in wrom.mem
+                    if (got_row !== expect_row) wbd_fail2 = wbd_fail2 + 1;
+                end
+                case (pi)
+                    0: $display("BLOCK_CHECK,matrix=QKV,channel=0,rows=%0d,mismatches=%0d", k_list[pi], wbd_fail2);
+                    1: $display("BLOCK_CHECK,matrix=PROJ,channel=0,rows=%0d,mismatches=%0d", k_list[pi], wbd_fail2);
+                    2: $display("BLOCK_CHECK,matrix=FC,channel=0,rows=%0d,mismatches=%0d", k_list[pi], wbd_fail2);
+                    3: $display("BLOCK_CHECK,matrix=MP,channel=0,rows=%0d,mismatches=%0d", k_list[pi], wbd_fail2);
+                endcase
+            end
+            dbg_stop_r = 2'd0;  // restore normal operation
         end
 
         $display("TB_DONE");
