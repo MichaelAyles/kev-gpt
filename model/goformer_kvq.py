@@ -258,22 +258,29 @@ class IntKVQSequencer(IntSequencer):
         kr = hadamard_rotate_q16(k_q16) if self.rotate else list(k_q16)
         vr = hadamard_rotate_q16(v_q16) if self.rotate else list(v_q16)
 
+        # Genesys2 port: nh is this instance's real trained n_head (self.p["n_head"]),
+        # not the deployed-KV260 global NHEAD -- head_dim stays derived (== len/nh)
+        # rather than the global HEAD_DIM, matching the "vary n_head, keep head_dim=64
+        # fixed" sizing decision (see fabric/genesys2/PORT-NOTES.md).
+        nh = self.p["n_head"]
+        hd = len(kr) // nh
+
         # full-precision (16-bit) channel keeps the rotated value verbatim (no pack)
         if self.kbits >= 16:
             k_row, k_heads = None, None
             k_stored = kr
         else:
-            k_row, k_heads = position_ddr_row(kr, self.kbits, divfree=self.divfree)
+            k_row, k_heads = position_ddr_row(kr, self.kbits, nh=nh, hd=hd, divfree=self.divfree)
             k_stored = []
-            for h in range(NHEAD):
+            for h in range(nh):
                 k_stored += dequant_head(*k_heads[h])
         if self.vbits >= 16:
             v_row, v_heads = None, None
             v_stored = vr
         else:
-            v_row, v_heads = position_ddr_row(vr, self.vbits, divfree=self.divfree)
+            v_row, v_heads = position_ddr_row(vr, self.vbits, nh=nh, hd=hd, divfree=self.divfree)
             v_stored = []
-            for h in range(NHEAD):
+            for h in range(nh):
                 v_stored += dequant_head(*v_heads[h])
 
         self.kv_ddr[bi].append({
@@ -291,7 +298,7 @@ class IntKVQSequencer(IntSequencer):
         ix = self._act_quant(y_q22, self.layers[(bi, "qkv")]["s_act"])
         y_int = self._gemv_int(self.layers[(bi, "qkv")], ix)
         qkv_q16 = self._dequant_to_q(self.layers[(bi, "qkv")], y_int, VFRAC)
-        C = 256
+        C = len(qkv_q16) // 3     # d_model, derived (was hardcoded 256)
         q = [int(v) for v in qkv_q16[:C]]
         k = [int(v) for v in qkv_q16[C:2 * C]]
         v = [int(v) for v in qkv_q16[2 * C:]]
@@ -316,7 +323,15 @@ class IntKVQSequencer(IntSequencer):
                 sink["kv_ddr_row"] = self.kv_ddr[bi][-1]
 
         T = len(self.k_cache[bi])
-        nh, hd = NHEAD, HEAD_DIM
+        # head_dim (hd) is held fixed at the deployed HEAD_DIM=64 by the sizing
+        # decision (see PORT-NOTES.md) so ISQRT/SCORE_SH's hardcoded /sqrt(64)
+        # shift stays exact; only nh (this instance's real n_head) varies.
+        nh, hd = self.p["n_head"], C // self.p["n_head"]
+        assert hd == HEAD_DIM, (
+            f"head_dim={hd} != HEAD_DIM={HEAD_DIM}: this port keeps head_dim fixed "
+            "at 64 (vary n_head instead) so ISQRT/SCORE_SH's hardcoded /sqrt(64) "
+            "shift stays exact -- see PORT-NOTES.md before changing n_embd/n_head "
+            "in a way that changes head_dim")
         from fabric.stage3.run_softmax import int_softmax_q
         from fabric.stage3.seq_ref import ISQRT, SCORE_FRAC, PROB_FRAC_A, RESID_FRAC
         ctx_q25 = np.zeros(C, dtype=object)

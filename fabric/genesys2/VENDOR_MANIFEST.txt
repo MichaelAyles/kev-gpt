@@ -1,0 +1,30 @@
+# Genesys2 port — RTL vendoring manifest
+#
+# Files to sync verbatim into the SoC/board-build repo (a fork of
+# ~/RVchatbot/Genesys2AiChatbot) at hw/vendor/esl_epfl_x_heep/hw/ip/kevgpt_seq/,
+# as of kev-gpt commit: (fill in at sync time, `git rev-parse HEAD`).
+#
+# These are the exact RTL_FILES fabric/stage3/run_vec_kv.py gates against
+# (model-correctness, bit-exact vs model.goformer_kvq.IntKVQSequencer) plus
+# the new X-HEEP-facing adapter. Do not sync a subset -- sequencer_vec.sv's
+# instantiation closure requires all of them.
+
+fabric/stage3/rtl/sequencer_vec.sv
+fabric/stage3/rtl/kv_bank.sv
+fabric/stage3/rtl/vec_attn_w.sv
+fabric/stage3/rtl/layernorm_vec.sv
+fabric/stage3/rtl/vec_dequant.sv
+fabric/stage3/rtl/vec_gelu.sv
+fabric/stage3/rtl/gelu_lut.sv
+fabric/stage3/rtl/gelu_lut2.sv
+fabric/stage3/rtl/softmax_f.sv
+fabric/stage3/rtl/gemv_banked_resident_vec.sv
+fabric/stage3/rtl/weight_bank_tdp.sv
+
+# The new adapter (not part of the gated core -- see tb/tb_kevgpt_peripheral.sv
+# for its own protocol-conformance test instead):
+fabric/genesys2/rtl/xheep_kevgpt_peripheral.sv
+
+# Sync as: MEM_PRIMITIVE="block" for the SoC build (Genesys2 has no URAM);
+# the KV260 gate (fabric/stage3/run_vec_kv.py) always exercises the parameter's
+# default "ultra" and is unaffected by this port -- see PORT-NOTES.md.

@@ -25,6 +25,26 @@ class GPTConfig:
     n_embd: int = 256
     dropout: float = 0.0
     bias: bool = False           # RMSNorm-style: no biases, cheaper in fabric
+    attn_fp32: bool = False      # diagnostic: do QK^T + softmax in explicit fp32
+                                  # instead of trusting SDPA's opaque autocast-dtype
+                                  # path, matching GPT-Neo's own precision convention
+                                  # (transformers' GPTNeoSelfAttention._attn upcasts
+                                  # q/k to fp32 before the matmul, casts back after
+                                  # softmax). Tests whether kev-gpt's width-scaling
+                                  # AdamW divergence (see model/SCALE-UP-LOG.md) is
+                                  # partly a precision-path artifact of the fused
+                                  # SDPA call rather than purely an Adam-eps issue.
+                                  # 0.0/False = off, unchanged SDPA behavior.
+    z_loss_coef: float = 0.0     # penalizes logsumexp(logits)^2 -- see forward().
+                                  # 0.0 = off (unchanged default behavior); PaLM/
+                                  # ST-MoE use ~1e-4. Added while investigating a
+                                  # width-scaling training instability where logit
+                                  # scale grew unboundedly (unchecked by anything
+                                  # in this architecture) throughout training,
+                                  # amplifying wrong predictions once ranking
+                                  # accuracy plateaued -- see model/train.py's
+                                  # weight-decay param-grouping comment for the
+                                  # fuller investigation.
 
 
 class Block(nn.Module):
@@ -53,6 +73,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = cfg.n_head
         self.n_embd = cfg.n_embd
         self.dropout = cfg.dropout
+        self.attn_fp32 = cfg.attn_fp32
         self.qkv = nn.Linear(cfg.n_embd, 3 * cfg.n_embd, bias=cfg.bias)
         self.proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
         self.resid_drop = nn.Dropout(cfg.dropout)
@@ -63,11 +84,29 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        y = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=True,
-        )
+        if self.attn_fp32:
+            # Manual attention, explicit fp32 QK^T + softmax regardless of the
+            # active autocast dtype (mirrors GPT-Neo's GPTNeoSelfAttention._attn:
+            # query/key upcast to fp32 before the matmul, attn_weights cast back
+            # to value's dtype after softmax). Still scales by 1/sqrt(head_dim)
+            # -- GPT-Neo itself omits that scaling, but that's a separate
+            # architectural choice, not the precision-path variable under test.
+            head_dim = C // self.n_head
+            qf = q.float()
+            kf = k.float()
+            att = (qf @ kf.transpose(-2, -1)) * (1.0 / math.sqrt(head_dim))
+            causal_mask = torch.triu(torch.ones(T, T, dtype=torch.bool, device=x.device), diagonal=1)
+            att = att.masked_fill(causal_mask, float("-inf"))
+            att = F.softmax(att, dim=-1).to(v.dtype)
+            if self.training and self.dropout > 0:
+                att = F.dropout(att, p=self.dropout)
+            y = att @ v
+        else:
+            y = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=True,
+            )
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_drop(self.proj(y))
 
@@ -86,6 +125,20 @@ class GPT(nn.Module):
         # at this scale) and a touch of on-chip memory later.
         self.head.weight = self.tok_emb.weight
         self.apply(self._init)
+        # GPT-2-paper residual-projection scaling: the two matrices that write
+        # DIRECTLY into the residual stream (attn.proj, the second MLP Linear)
+        # get std scaled by 1/sqrt(2*n_layer) instead of the flat 0.02 every
+        # other Linear uses -- without it, residual-stream variance grows
+        # with depth AND width uncontrolled, since nothing here dampens each
+        # block's addition to the running sum. Missing this is a real,
+        # previously-undocumented gap in this codebase: every prior
+        # scale-up (D=256 char-level, D=384 word-level) hit the SAME
+        # train+val-climb-together instability signature shortly after
+        # warmup ends, at multiple different peak LR/warmup combos --
+        # pointing at an architectural cause, not just a tuning miss.
+        for pn, p in self.named_parameters():
+            if pn.endswith("attn.proj.weight") or pn.endswith("mlp.2.weight"):
+                nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * cfg.n_layer))
 
     def _init(self, m):
         if isinstance(m, nn.Linear):
@@ -110,9 +163,14 @@ class GPT(nn.Module):
         logits = self.head(x)
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), targets.view(-1)
-            )
+            flat_logits = logits.view(-1, logits.size(-1))
+            loss = F.cross_entropy(flat_logits, targets.view(-1))
+            if self.cfg.z_loss_coef > 0:
+                # caps logit scale directly (log-sum-exp = the log-normalizer
+                # cross-entropy already computes internally) instead of hoping
+                # weight decay controls it indirectly -- see GPTConfig.z_loss_coef.
+                z = torch.logsumexp(flat_logits, dim=-1)
+                loss = loss + self.cfg.z_loss_coef * z.pow(2).mean()
         return logits, loss
 
     @torch.no_grad()

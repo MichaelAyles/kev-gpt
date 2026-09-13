@@ -95,6 +95,88 @@ ceiling **~5.6× (1k → 5,600 tok/s)** while keeping the fabric record bit-exac
 (greedy 3/3, sampling 8/8 unique). The public number (~1,658 tok/s through the
 Cloudflare tunnel) is the remaining WAN+tunnel RTT, not fabric.
 
+## Kevin outgrows the chip (the Genesys2 port)
+
+A second, harder board: a [Digilent Genesys2](https://digilent.com/reference/programmable-logic/genesys-2/start)
+(Kintex-7, `xc7k325tffg900-2`) with X-HEEP + a `cv32e40px` RISC-V core instead
+of the Kria's Arm cores, and **no URAM primitive at all** — the resident
+weight/KV storage that makes the KV260 build fast has to fit in an ordinary
+BRAM tile budget instead. Full engineering log:
+[`fabric/genesys2/PORT-NOTES.md`](fabric/genesys2/PORT-NOTES.md).
+
+**Option A (fully on-chip)**: d=128, 2 layers, 2 heads, the 57-char Kevin-speak
+vocab (0.40M params), weights and KV cache both BRAM-resident — the same
+"everything on-chip, zero DRAM in the token loop" bet as the KV260 build, on a
+part with no URAM to make it easy. Measured on real Genesys2 hardware, 50MHz,
+bit-exact against the integer golden reference: **~11,930-11,985 tok/s**.
+
+**Option B (DDR3-streamed, 2x the depth)**: Option A's own ceiling turned out
+to be BRAM, not compute — its DSP usage sits at 95.6% and (verified
+empirically across five different model shapes, from RTL inspection through
+real synthesis) stays there regardless of depth or width, since it's bounded
+by the fixed per-lane pipeline, not by layer count. So the
+KV cache and the weight image now stream through the board's DDR3 instead of
+sitting resident, via two new modules (`kv_bank_ddr.sv`, `weight_loader_ddr.sv`)
+riding the fork's existing DMA infrastructure. Result: d=128, 4 layers (2x
+Option A's depth), 0.79M params — a genuinely bigger model than a BRAM-only
+build on this chip could ever hold. Real hardware, bit-exact, weights staged
+into DDR3 over JTAG and loaded entirely through the DMA path (the model's
+492KB weight image doesn't even fit in the 384KB on-chip RAM the boot-time
+register stream would otherwise use): **~3,120 tok/s** — honestly ~3.8x
+slower than Option A, the real cost of two DDR3 round-trips a token instead
+of zero. The point isn't speed; it's that streaming buys a model this board
+couldn't host any other way, at a bounded, measured price.
+
+Getting both variants right surfaced real, previously-unknown RTL bugs, each
+caught by the same bit-exact-before-synthesis discipline as the KV260
+build — not found on real silicon after the fact: a clock-domain-crossing
+gap in the DDR arbiter's first draft (every earlier sim gate shared one
+clock, hiding it), a 4-bit progress counter that silently wrapped and
+deadlocked any GEMV needing 16+ output groups, and three ROM-capacity
+constants hardcoded to fit exactly the original reference shape, silently
+corrupting anything deeper with no error at all.
+
+**Per-layer weight streaming (breaking the BRAM depth ceiling)**: Option B's
+own DDR3 streaming still loaded the *whole* weight image once and kept it
+resident — depth was still capped by BRAM. The real fix: stop keeping any
+of it resident at all. `sequencer_vec.sv`'s own FSM now reloads just the
+*current* block's window (or the embed tables, or the head's window) from
+DDR3 on demand, once per block per token, via `weight_loader_ddr.sv` —
+making weight-bank BRAM cost independent of depth for the first time. That
+unlocked real depth growth on real hardware: NLAYER 4 → 8 → 12, the last
+sourced by finding and fixing a genuinely data-limited training bug (the
+~19M-char validation-split corpus was too small for a 12-layer model;
+switching to the full ~1.9GB TinyStories train split fixed it) — best val
+loss **0.772 FP / 0.785 QAT**, the best quality this project has produced,
+confirmed on real hardware with coherent multi-sentence completions at
+**~130 tok/s** (~385k cycles/token, 50MHz). Two further attempts (NLAYER=16,
+D=256 width instead of depth) were tried and reported honestly as dead
+ends — NLAYER=16 showed no real quality gain over NLAYER=12, and D=256 hit
+a genuine training instability (not overfitting, not a learning-rate issue)
+that wasn't chased further. The board also grew a real **untethered
+interactive chat mode** (`kevgpt_interactive`): weights load over the same
+UART cable a chat session uses (`fabric/genesys2/send_weights.py`), no
+JTAG/GDB session needed to drive a run.
+
+**Word-level vocabulary (current)**: char-level spends most of every reply's
+token budget spelling words out one character at a time. Swapping in a
+fixed ~1900-word tokenizer (`model/word_data.py` — plain regex split, no
+BPE) lets the same `TMAX=128` context cover many more *words* instead of
+many more *characters*, at the cost of a much bigger embed/head table
+(`VOCAB` 57 → 1900, `WWORDS` 3,072 → 32,768 words to cover the new reload
+window). Real synth stayed clean at the bigger vocab — LUTs 47.9%, Block
+RAM 89.4% (still inside the same BRAM-bucket boundary the char-level build
+used), DSPs 95.7% (vocab-independent, as expected), timing positive
+(WNS=1.65ns) — and real hardware chat works end-to-end (weight stream,
+tokenized encode, on-chip sampling, word-level decode). Stated honestly,
+not swept under "it works": the sampled real-hardware text is rougher and
+more repetitive than the char-level build's own sampled chat, and
+per-token throughput at this shape hasn't been measured on real hardware
+yet — open questions, not yet resolved. Full engineering log, including
+every RTL bug found sizing a much bigger VOCAB into registers that were
+only ever sized for the char-level range:
+[`fabric/genesys2/PORT-NOTES.md`](fabric/genesys2/PORT-NOTES.md).
+
 ## What works today
 
 - **Keviniser**: POS-based so it keeps main-verb "do" and drops auxiliary "do".

@@ -12,7 +12,6 @@ import argparse
 
 import torch
 
-from .data import decode
 from .gpt import GPT, GPTConfig
 from .train import pick_device
 
@@ -44,9 +43,18 @@ def main(argv=None):
     stoi, itos = meta["stoi"], meta["itos"]
     print(f"# {args.ckpt}  (iter {it}, val {val:.3f})\n")
 
+    # Dispatch to the word-level tokeniser (whole-word tokens, space-joined
+    # decode) or char-level (from .data, one id per character) based on how
+    # this checkpoint was trained -- mirrors model.train.sample()'s dispatch.
+    if meta.get("tokenizer") == "word":
+        from .word_data import decode, tokenize, UNK
+        prompt_ids = [stoi.get(t, stoi[UNK]) for t in (tokenize(args.prompt.lower()) or [UNK])]
+    else:
+        from .data import decode
+        prompt_ids = [stoi.get(c, 0) for c in args.prompt]
+
     for _ in range(args.count):
-        ids = torch.tensor([[stoi.get(c, 0) for c in args.prompt]],
-                           dtype=torch.long, device=device)
+        ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
         out = model.generate(ids, args.n_tokens, temperature=args.temperature,
                              top_k=args.top_k)[0].tolist()
         print(decode(out, itos))

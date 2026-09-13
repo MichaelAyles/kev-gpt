@@ -1,0 +1,349 @@
+<title>Silicon Fidelity</title>
+<style>
+:root{
+  --bg:#F5F6F8; --surface:#FFFFFF; --surface-2:#EEF0F3;
+  --ink:#1C2129; --ink-muted:#5B6472; --ink-faint:#88909B;
+  --border:#DDE1E7; --border-soft:#E8EAED;
+  --accent-hw:#1E7F72; --accent-hw-bg:rgba(30,127,114,0.10); --accent-hw-bg-strong:rgba(30,127,114,0.16);
+  --accent-sw:#A23B5C; --accent-sw-bg:rgba(162,59,92,0.08); --accent-sw-bg-strong:rgba(162,59,92,0.14);
+  --flag-mark-bg:rgba(201,138,31,0.28); --flag-mark-fg:#5C3F06;
+  --fix-mark-fg:#5B4B8A; --fix-underline:#8B72C4;
+  --clean:#2E7D4F;
+  --shadow: 0 1px 2px rgba(28,33,41,0.05), 0 4px 14px rgba(28,33,41,0.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#14171C; --surface:#1B1F26; --surface-2:#20252D;
+    --ink:#E7EAEF; --ink-muted:#9AA3B2; --ink-faint:#6C7684;
+    --border:#2A2F38; --border-soft:#242932;
+    --accent-hw:#4FD1C0; --accent-hw-bg:rgba(79,209,192,0.12); --accent-hw-bg-strong:rgba(79,209,192,0.20);
+    --accent-sw:#E88AA6; --accent-sw-bg:rgba(232,138,166,0.10); --accent-sw-bg-strong:rgba(232,138,166,0.18);
+    --flag-mark-bg:rgba(240,180,41,0.30); --flag-mark-fg:#FCE3A6;
+    --fix-mark-fg:#C9B8F2; --fix-underline:#B7A3EC;
+    --clean:#5FBE86;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 20px rgba(0,0,0,0.35);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#14171C; --surface:#1B1F26; --surface-2:#20252D;
+  --ink:#E7EAEF; --ink-muted:#9AA3B2; --ink-faint:#6C7684;
+  --border:#2A2F38; --border-soft:#242932;
+  --accent-hw:#4FD1C0; --accent-hw-bg:rgba(79,209,192,0.12); --accent-hw-bg-strong:rgba(79,209,192,0.20);
+  --accent-sw:#E88AA6; --accent-sw-bg:rgba(232,138,166,0.10); --accent-sw-bg-strong:rgba(232,138,166,0.18);
+  --flag-mark-bg:rgba(240,180,41,0.30); --flag-mark-fg:#FCE3A6;
+  --fix-mark-fg:#C9B8F2; --fix-underline:#B7A3EC;
+  --clean:#5FBE86;
+  --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 20px rgba(0,0,0,0.35);
+}
+
+*{box-sizing:border-box;}
+body{ background:var(--bg); color:var(--ink); font-family:'IBM Plex Sans',system-ui,-apple-system,sans-serif; line-height:1.5; }
+::selection{ background:var(--flag-mark-bg); }
+.wrap{ max-width:1180px; margin:0 auto; padding:56px 28px 80px; }
+
+header.top{ margin-bottom:40px; }
+.eyebrow{ font-family:'IBM Plex Mono',monospace; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:var(--ink-faint); margin:0 0 10px; }
+h1{ font-family:'Fraunces',Georgia,serif; font-weight:600; font-size:clamp(32px,4.2vw,46px); margin:0 0 14px; letter-spacing:-0.01em; text-wrap:balance; color:var(--ink); }
+.dek{ font-size:16px; color:var(--ink-muted); max-width:68ch; margin:0 0 18px; }
+.provenance{ font-family:'IBM Plex Mono',monospace; font-size:12.5px; color:var(--ink-faint); display:flex; flex-wrap:wrap; gap:6px 18px; border-top:1px solid var(--border-soft); padding-top:16px; }
+.provenance b{ color:var(--ink-muted); font-weight:500; }
+
+.caveat{
+  background:var(--surface-2); border:1px solid var(--border); border-left:3px solid var(--accent-sw);
+  border-radius:8px; padding:14px 18px; font-size:13.5px; color:var(--ink-muted); margin-bottom:32px; max-width:78ch;
+}
+.caveat b{ color:var(--ink); }
+
+.modeltag{ display:inline-flex; align-items:center; gap:6px; font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:600; padding:3px 9px; border-radius:5px; letter-spacing:0.01em; }
+.modeltag.hw{ background:var(--accent-hw-bg); color:var(--accent-hw); }
+.modeltag.sw{ background:var(--accent-sw-bg); color:var(--accent-sw); }
+.dot{ width:7px; height:7px; border-radius:50%; display:inline-block; }
+.dot.hw{ background:var(--accent-hw); }
+.dot.sw{ background:var(--accent-sw); }
+
+.stats-grid{ display:grid; grid-template-columns:repeat(2,1fr); gap:1px; background:var(--border); border:1px solid var(--border); border-radius:12px; overflow:hidden; margin-bottom:18px; box-shadow:var(--shadow); }
+.stat-tile{ background:var(--surface); padding:22px 20px; }
+.stat-tile .sweep-label{ font-family:'IBM Plex Mono',monospace; font-size:11px; text-transform:uppercase; letter-spacing:0.1em; color:var(--ink-faint); margin-bottom:10px; }
+.stat-tile .num{ font-family:'Fraunces',serif; font-size:34px; font-weight:600; line-height:1; font-variant-numeric:tabular-nums; margin-bottom:6px; }
+.stat-tile .num small{ font-size:16px; font-weight:500; color:var(--ink-faint); }
+.stat-tile.hw .num{ color:var(--accent-hw); }
+.stat-tile.sw .num{ color:var(--accent-sw); }
+.stat-tile .pct{ font-size:13px; color:var(--ink-muted); font-family:'IBM Plex Mono',monospace; }
+
+.fixation-panel{
+  background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px 22px; margin-bottom:44px; box-shadow:var(--shadow);
+}
+.fixation-panel .flabel{ font-family:'IBM Plex Mono',monospace; font-size:11px; text-transform:uppercase; letter-spacing:0.1em; color:var(--ink-faint); margin-bottom:4px; }
+.fixation-panel h2{ font-family:'Fraunces',serif; font-size:19px; font-weight:600; margin:0 0 8px; }
+.fixation-panel p{ font-size:13.5px; color:var(--ink-muted); max-width:74ch; margin:0 0 16px; }
+.fix-terms{ display:flex; flex-wrap:wrap; gap:10px; }
+.fix-term{
+  display:flex; align-items:baseline; gap:8px; background:var(--surface-2); border:1px solid var(--border-soft);
+  border-radius:8px; padding:8px 12px; font-family:'IBM Plex Mono',monospace; font-size:12.5px;
+}
+.fix-term .word{ color:var(--fix-mark-fg); font-weight:600; text-decoration:underline; text-decoration-style:dashed; text-decoration-color:var(--fix-underline); text-underline-offset:3px; }
+.fix-term .count{ color:var(--ink-faint); }
+
+.controls{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:14px; margin-bottom:22px; position:sticky; top:0; background:var(--bg); padding:14px 0; border-bottom:1px solid var(--border-soft); z-index:5; }
+.toggle{ display:inline-flex; align-items:center; gap:8px; font-size:13.5px; color:var(--ink-muted); cursor:pointer; user-select:none; }
+.toggle input{ accent-color:var(--fix-mark-fg); width:15px; height:15px; }
+.legend-strip{ display:flex; gap:16px; align-items:center; font-size:12.5px; color:var(--ink-faint); flex-wrap:wrap; }
+.legend-strip mark.flag{ background:var(--flag-mark-bg); color:var(--flag-mark-fg); padding:0 2px; border-radius:2px; }
+.legend-strip mark.fix{ background:transparent; color:var(--fix-mark-fg); text-decoration:underline; text-decoration-style:dashed; text-decoration-color:var(--fix-underline); text-underline-offset:3px; }
+
+.rowgroup{ margin-bottom:14px; }
+.rowmeta{ font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--ink-faint); margin:22px 0 8px; display:flex; gap:14px; align-items:baseline; }
+.rowmeta .seedno{ color:var(--ink-muted); font-weight:600; }
+
+.pair{ display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--border-soft); border:1px solid var(--border-soft); border-radius:10px; overflow:hidden; }
+@media (max-width:760px){ .pair{ grid-template-columns:1fr; } }
+
+.panel{ background:var(--surface); padding:18px 20px 20px; display:flex; flex-direction:column; }
+.panel.hidden{ display:none; }
+.panel-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; gap:10px; }
+.flagpill{ font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:600; letter-spacing:0.02em; padding:3px 8px; border-radius:20px; white-space:nowrap; }
+.flagpill.clean{ background:rgba(46,125,79,0.12); color:var(--clean); }
+.flagpill.flagged{ background:var(--flag-mark-bg); color:var(--flag-mark-fg); }
+.reason{ font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:var(--flag-mark-fg); margin-bottom:10px; line-height:1.4; }
+.story{ font-family:'Literata',Georgia,serif; font-size:14.5px; line-height:1.68; color:var(--ink); flex:1; }
+.story mark.flag{ background:var(--flag-mark-bg); color:var(--flag-mark-fg); padding:0 1px; border-radius:2px; }
+.story mark.fix{ background:transparent; color:var(--fix-mark-fg); font-weight:600; text-decoration:underline; text-decoration-style:dashed; text-decoration-color:var(--fix-underline); text-underline-offset:3px; }
+.panel-foot{ margin-top:12px; padding-top:10px; border-top:1px solid var(--border-soft); font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--ink-faint); display:flex; justify-content:space-between; }
+
+footer.endnote{ margin-top:56px; padding-top:20px; border-top:1px solid var(--border-soft); font-size:12.5px; color:var(--ink-faint); max-width:72ch; }
+#empty-state{ display:none; padding:60px 0; text-align:center; color:var(--ink-faint); font-size:14px; }
+</style>
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=Literata:opsz,wght@6..72,400;6..72,500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<div class="wrap">
+
+  <header class="top">
+    <p class="eyebrow">Genesys2 &middot; real silicon vs. software proxy</p>
+    <h1>Silicon Fidelity</h1>
+    <p class="dek">Checkpoint C's actual deployed weights
+      (<span class="modeltag hw"><span class="dot hw"></span>real Genesys2 board</span>), chatted over UART,
+      set against a <span class="modeltag sw"><span class="dot sw"></span>software proxy</span> at the board's own
+      calibrated sampling config. Every draw, not a curated subset &mdash; with a second thing marked
+      that the bigram detector alone doesn't catch.</p>
+    <div class="provenance">
+      <span><b>Detector</b> model.filter_synth_corpus.is_degenerate, min_bigram_recurrence=3</span>
+      <span><b>Draws</b> 5 &times; 5 prompts, 25 total each side</span>
+      <span><b>Hardware sampling</b> on-chip Gumbel-max, TEMP=0.45, full vocab, no seed control</span>
+      <span><b>Software sampling</b> matched config: temp=0.45, top_k=None</span>
+      <span><b>Board weights</b> data/ckpt_stepC_d128_v16384.qat.pt (INT4/INT8)</span>
+    </div>
+  </header>
+
+  <div class="caveat">
+    <b>Root cause found, closed as real-silicon-only.</b> Every hardware panel below shows its <b>real
+    captured seed</b> (firmware instrumentation added specifically for this), not an approximation &mdash;
+    replaying that exact seed through the Python golden reference AND the real per-layer-DDR3-streaming RTL
+    simulation both reproduce the board's own trajectory almost everywhere they've been checked, diverging
+    only at rare, razor-thin near-ties (~0.1% logit margins) that no simulation reproduces. Not an RTL bug,
+    not a firmware bug, not a checkpoint issue &mdash; see <code>model/SCALE-UP-LOG.md</code> for the full
+    chain. Separately: <b>not an apples-to-apples weight comparison</b> &mdash; the board runs the QAT/INT4
+    checkpoint; the plain <code>GPT.generate()</code> class can't load that quantized state dict, so the
+    software side runs the pre-QAT FP checkpoint (<code>ckpt_stepC_d128_v16384.pt</code>) at the board's
+    calibrated temperature instead, the closest practical proxy, not a bit-exact one.
+  </div>
+
+  <div class="stats-grid" id="stats-grid"></div>
+
+  <div class="fixation-panel">
+    <div class="flabel">Found by eye, then counted</div>
+    <h2>A pattern the bigram detector doesn't catch</h2>
+    <p>The flagged-rate score alone makes the real board look <em>cleaner</em> than its own software proxy &mdash;
+      but reading the samples shows the board substituting odd, non-sequitur words as story subjects/objects,
+      a different failure mode than bigram looping, and one that <code>is_degenerate</code> mostly can't see
+      (single-word insertions, not repeated pairs). Counted across all 25 draws each side:</p>
+    <div class="fix-terms" id="fix-terms"></div>
+  </div>
+
+  <div class="controls">
+    <div style="width:1px"></div>
+    <label class="toggle"><input type="checkbox" id="flagged-only"> flagged or fixation-word only</label>
+    <div class="legend-strip">
+      <span><mark class="flag">flag</mark> = detector-flagged span</span>
+      <span><mark class="fix">fixation</mark> = known non-sequitur token</span>
+    </div>
+  </div>
+
+  <div id="rows"></div>
+  <div id="empty-state">No samples match this filter.</div>
+
+  <footer class="endnote">
+    Generated fresh via <code>fabric.genesys2.chat_over_uart</code> against the board's live weights
+    (loaded via <code>fabric.genesys2.send_weights</code> from <code>fabric/export_stepC_d128_v16384/</code>)
+    and a matched-config software rerun of the same checkpoint's pre-QAT weights. Rows pair the Nth hardware
+    draw against the Nth software draw of the same prompt for reading convenience only &mdash; see the caveat
+    above on what "matched" does and doesn't mean here.
+  </footer>
+
+</div>
+
+<script id="report-data" type="application/json">{"hardware": [{"seed": 1, "real_seed": "0xd21ce875", "prompt": "once upon a time", "text": "once upon a time, there was a little boy named timmy. timmy loved to play with his toys and eat snacks. one day, timmy's mom made him a sandwich with a big bite. timmy was so happy and ate the sandwich. but then, a cube came and made a loud noise. timmy accidentally dropped the ball", "reason": null, "elapsed_s": 1.054, "rate_tok_s": 50.3}, {"seed": 1, "real_seed": "0x1ff80dbb", "prompt": "the sun was", "text": "the sun was shining brightly and the girl was so excited. she quickly ran to the field and started running around. she ran around the garden, laughing and having so much fun. she even found a little field of flowers and some flowers. she was a bit scared at first, but then she noticed something strange.", "reason": null, "elapsed_s": 1.007, "rate_tok_s": 52.6}, {"seed": 1, "real_seed": "0x08c974ce", "prompt": "the dog ran", "text": "the dog ran away, but the dog was too fast. the big dog chased the ball and ran away. the cube was sad. the cube saw a big hole in the ground. the cube bush was stuck. the big, and the cube broke. the cube broke into pieces. the little dog and all the", "reason": "bigram recurred 5x: ('the', 'cube')", "elapsed_s": 1.152, "rate_tok_s": 44.3}, {"seed": 1, "real_seed": "0x5b5ba720", "prompt": "a little girl", "text": "a little girl named lily care about her favorite toy. one day, she went to the park to play with her friend, sam. they played together and had lots of fun. while they were playing, lily accidentally dropped a ball on the ground. she asked sam,\" what is that?\" sam said,", "reason": null, "elapsed_s": 1.009, "rate_tok_s": 47.6}, {"seed": 1, "real_seed": "0xb6c77d08", "prompt": "she found a", "text": "she found a big, juicy apple. she picked it up and took a bite. it was sweet and tasted yummy. lily was so happy and ate the apple. she ate it all up chug and felt very happy. from that day on, lily always made sure to eat her apple and the sweet taste there.", "reason": null, "elapsed_s": 1.009, "rate_tok_s": 51.5}, {"seed": 2, "real_seed": "0x36232134", "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play outside and explore. one day, she found a big, shiny rock. it was so pretty and shiny. lily picked it up and showed it to her mom.\" look, mommy! i found careful not to touch it.\"", "reason": null, "elapsed_s": 1.023, "rate_tok_s": 46.9}, {"seed": 2, "real_seed": "0x398c080d", "prompt": "the sun was", "text": "the sun was very cold and he couldn't get to the beach anymore. he was so sad he started to cry. he felt like he belonged to his friends and always put his toys away. the bear was alone and alone, until he became alone chug and alone. he asked his best friends,\" what is wrong", "reason": null, "elapsed_s": 1.103, "rate_tok_s": 48.0}, {"seed": 2, "real_seed": "0xbd0fd8fe", "prompt": "the dog ran", "text": "the dog ran to the fence and jumped in the water. he jumped and splashed and made a big splash. he did not like the big dog that swam away. he was not happy. he barked and bit the ball. he bit ben and lily. they were scared and hurt. they ran away and hid.", "reason": null, "elapsed_s": 1.041, "rate_tok_s": 50.0}, {"seed": 2, "real_seed": "0x578a7f4d", "prompt": "a little girl", "text": "a little girl care about what she had. she loved it and always wanted to see it. one day, she found a pretty necklace in the park. it was pink and had a picture of a flower on it. she was so happy with her necklace and she wanted a new one. she took the necklace from", "reason": null, "elapsed_s": 1.025, "rate_tok_s": 52.7}, {"seed": 2, "real_seed": "0x4bbf4ab1", "prompt": "she found a", "text": "she found a big box care of animals. she was so excited to open the box! she opened the desired, and inside was a big, soft, shiny toy. she bounced it around the house, feeling so happy and excited. but, when she tried to break the toy, it broke. the bear was", "reason": null, "elapsed_s": 1.057, "rate_tok_s": 46.4}, {"seed": 3, "real_seed": "0x983b19b6", "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play with her toys and sing songs. one day, lily was playing with a ball when she accidentally dropped it and it broke. she was very sad and started to cry. her mommy came to help her up and saw her crying. she", "reason": null, "elapsed_s": 1.025, "rate_tok_s": 52.7}, {"seed": 3, "real_seed": "0x06799761", "prompt": "the sun was", "text": "the sun was gone care of them. buster's was sad, but she knew she had to hurry to get a new dress. she went to the store to buy a blue dress. she found a dat dress that she wanted. she was so excited! the girl asked her mum if she could buy the dress. her", "reason": null, "elapsed_s": 1.04, "rate_tok_s": 51.0}, {"seed": 3, "real_seed": "0xcb6f1a42", "prompt": "the dog ran", "text": "the dog ran away, but he was too fast. the dog chased the ball and chased it. the ball went into a big hole in the ground. the ball was very angry and wanted to play with the contains ball. but the ball and the sheep were too close to the ball. they tried to catch it", "reason": "bigram recurred 5x: ('the', 'ball')", "elapsed_s": 1.071, "rate_tok_s": 50.4}, {"seed": 3, "real_seed": "0x65f1c642", "prompt": "a little girl", "text": "a little girl named lily care about her favorite candy. one day, her mom asked her to help with a special candy. lily was so excited to add some candy to her collection. as she was walking to the store, she saw a little girl crying.\" what's wrong, lily?\" she asked care for", "reason": null, "elapsed_s": 1.024, "rate_tok_s": 48.8}, {"seed": 3, "real_seed": "0x1b2c0256", "prompt": "she found a", "text": "she found a big, shiny stone on the ground. she picked it up and showed it to her mom. her brother said,\" look, i found a stone!\" lily was so happy and said cardinal. they played together and had fun. after a while, they found careful not to bury the stone.", "reason": null, "elapsed_s": 1.04, "rate_tok_s": 46.2}, {"seed": 4, "real_seed": "0x60f50847", "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play outside in the sun. one day, she went to the park with her mom. they played on the swings and the slide. lily had so much fun that she forgot to bring a special bracelet. she ran home and told her brother", "reason": null, "elapsed_s": 1.024, "rate_tok_s": 52.7}, {"seed": 4, "real_seed": "0x9911fbf4", "prompt": "the sun was", "text": "the sun was getting hot care drops. she said goodbye to the dog and went home. buster's never forgot the fun she had in the park. buster's smiled and waved goodbye as she walked away. buster's was so happy that she became a good friend and she always remembered the beautiful flowers that belonged to her. buster's and", "reason": null, "elapsed_s": 1.135, "rate_tok_s": 48.5}, {"seed": 4, "real_seed": "0xc785a5d1", "prompt": "the dog ran", "text": "the dog ran away, but the dog was faster. the big dog saw the ball and wanted it. the cube rolled up and down, and the ball rolled back and forth. the big, happy dog and all had fun together. buster's was glad that the cube was gone, chug. buster's and all the other", "reason": null, "elapsed_s": 1.152, "rate_tok_s": 44.3}, {"seed": 4, "real_seed": "0xcfb8f60b", "prompt": "a little girl", "text": "a little girl called lucy care about the world. she loved to explore and learn new things. every day, she would go to the park and ask for help from the big tree. one day cardinal was walking near a big bush. she saw a cube on the ground. she thought it was so pretty and wanted", "reason": null, "elapsed_s": 1.073, "rate_tok_s": 50.3}, {"seed": 4, "real_seed": "0x81e480e6", "prompt": "she found a", "text": "she found a big, round rock. she picked it up and showed it to her mom.\" look, mommy!\" she said care.\" this rock is so pretty!\" bustled said drops the rock.\" can i keep it?\"\" sure, but be careful,\" her brother said.", "reason": "exact doubling: '\"' '\"'", "elapsed_s": 1.056, "rate_tok_s": 36.9}, {"seed": 5, "real_seed": "0x76d17eeb", "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play outside in the park with her friends. one day, they found a big tree with a picture of a rainbow. lily said,\" wow, that is a beautiful rainbow!\" but then, a cube came to the backyard. it", "reason": null, "elapsed_s": 1.04, "rate_tok_s": 47.1}, {"seed": 5, "real_seed": "0x229d55b3", "prompt": "the sun was", "text": "the sun was getting hot and the sun was shining. the rain made the grass wet and blue. it was so soft and warm. the little girl was a bit scared, but she was also brave. she put her hands on the bench and went to the crocodile's house. she saw the big tree and asked her", "reason": null, "elapsed_s": 1.073, "rate_tok_s": 50.3}, {"seed": 5, "real_seed": "0x0d06cc70", "prompt": "the dog ran", "text": "the dog ran away, but the little girl was never seen again. buster's never found her again. buster's was so happy that she was able to escape the big, scary dog that all the way home was to be free. buster's and she always kept the cube safe and never forgot the fun she had ever had.", "reason": null, "elapsed_s": 1.089, "rate_tok_s": 49.6}, {"seed": 5, "real_seed": "0x9221a604", "prompt": "a little girl", "text": "a little girl named lily care about her special wand. she loved to try and make her dreams come true. one day, she went to the park and saw a little girl playing with her pretty wand. she asked her mom what she was doing and her\" i want to play with you, lily!\" lily", "reason": null, "elapsed_s": 1.025, "rate_tok_s": 50.7}, {"seed": 5, "real_seed": "0x46a7aab4", "prompt": "she found a", "text": "she found a big rock in the grass. she picked it up and showed it to her mom.\" look, mommy! i found a rock!\" said lily care and asked her,\" i saw a big, shiny rock!\" her brother smiled and said, bustled.\" wow, that's cool!\"", "reason": null, "elapsed_s": 1.073, "rate_tok_s": 39.1}], "software": [{"seed": 1, "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play outside and pick flowers. one day, she found a big, pretty flower. it was very pretty and had lots of colors on it. lily thought it was so pretty and wanted to pick it. she went to her mom and said", "reason": null}, {"seed": 1, "prompt": "the sun was", "text": "the sun was shining brightly in the bright blue sky. as they walked around, lily saw something strange in the sky. she knew it was a magical place. she wanted to find out what it was. lily found a big tree and started to climb. she climbed up high and higher until she was almost at the", "reason": null}, {"seed": 1, "prompt": "the dog ran", "text": "the dog ran away. lily and ben were sad. they cried. they wanted their ball back. they wished they had played with the ball. they wished they had not played with the ball. they wished they had not played with the ball. they wished they had played with the ball. they wished they had played", "reason": "bigram recurred 5x: ('they', 'wished')"}, {"seed": 1, "prompt": "a little girl", "text": "a little girl named lily. she loved to play outside in the garden. one day, she saw a butterfly flying in the sky. she wanted to catch it, but it was too high for her. lily asked her friend,\" can i catch the butterfly?\" her friend said,\" no, lily.", "reason": null}, {"seed": 1, "prompt": "she found a", "text": "she found a shiny rock that she had never seen before. she picked it up and looked at it closely. it was so pretty and shiny. she wanted to take it home with her. she took the rock home and put it in her room. she was so happy to have her rock back. she put it", "reason": null}, {"seed": 2, "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play outside and eat yummy food. one day, she went to the park with her mommy and saw a boy playing with a ball. lily asked the boy,\" can i play with you?\" the boy said,\" sure, but", "reason": null}, {"seed": 2, "prompt": "the sun was", "text": "the sun was shining brightly and the sun was shining brightly. the little girl was so excited to go back to the park and play with her friends. she couldn't wait to come back to the park and play with her new friend. once upon a time, there was a little girl named lily. she loved to", "reason": null}, {"seed": 2, "prompt": "the dog ran", "text": "the dog ran away. lily and ben were sad and angry. they wanted their ball back. they wished they could have played with the ball. they wished they had not played with the ball. they wished they had not played with the ball. they wished they had played with the ball. they wished they had their", "reason": "bigram recurred 5x: ('they', 'wished')"}, {"seed": 2, "prompt": "a little girl", "text": "a little girl named lily. she loved to play outside and explore the world around her. one day, lily and her friends were playing with a ball in the park. lily said,\" i want to play with you, but i don't want to play with you.\" her friend said,\" i know you", "reason": "bigram recurred 3x: ('to', 'play')"}, {"seed": 2, "prompt": "she found a", "text": "she found a key on the shelf. she picked it up and looked at it. she was so happy to find the key. she put the key in the drawer and it looked like new. she smiled and went to play with her new toy. once upon a time, there was a little girl named lily", "reason": null}, {"seed": 3, "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play outside and explore the world around her. one day, she found a big, colorful rock on the ground. she picked it up and started to admire it. suddenly, she heard a voice. it said,\" don't touch it,", "reason": null}, {"seed": 3, "prompt": "the sun was", "text": "the sun was shining brightly. the little girl was so excited to see the sun and she couldn't wait to go. she grabbed her shoes and ran back to the park. the little girl was sad to see the sun shining brightly. she wanted to go back to the park and play with her friends. the sun was", "reason": "bigram recurred 4x: ('the', 'sun')"}, {"seed": 3, "prompt": "the dog ran", "text": "the dog ran away. lily and ben were sad. they said,\" we are sorry, dog. we are sorry. we did not know. we did not know. we did not know. we were curious. we did not know. we did not know. we did not know. we will be good", "reason": "bigram recurred 6x: ('we', 'did')"}, {"seed": 3, "prompt": "a little girl", "text": "a little girl named lily. she loved to play outside and explore. one day, she went to a big field with lots of grass and flowers. while she was there, she saw a big, colorful flower. it was so pretty and pretty. lily wanted to pick the flower, but she didn't have a little", "reason": null}, {"seed": 3, "prompt": "she found a", "text": "she found a shiny rock. she picked it up and showed it to her mom.\" look, a rock!\" her mom said.\" it is so pretty!\" lily was so happy and hugged her mom. from that day on, lily and her mom played with the rock every day and had lots of", "reason": "bigram recurred 4x: ('her', 'mom')"}, {"seed": 4, "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play outside and pick flowers. one day, she found a shiny rock on the ground. she picked it up and showed it to her friend, timmy.\" look, timmy! this rock is shiny and shiny. can i play with it", "reason": null}, {"seed": 4, "prompt": "the sun was", "text": "the sun was shining brightly and the birds were singing. it was the perfect day, and the sun was shining brightly. the little girl was so happy to have such a new friend. she hugged it tight and smiled. she was so happy to have her own special friend back. once upon a time, there", "reason": null}, {"seed": 4, "prompt": "the dog ran", "text": "the dog ran away. it was not a good dog. it was a bad dog. it was a bad dog. it did not care. it only barked and barked. it wanted to play with lily and ben. lily was sad. she did not know what to do. she wanted to be friends with ben", "reason": "bigram recurred 3x: ('it', 'was')"}, {"seed": 4, "prompt": "a little girl", "text": "a little girl named lily. she loved to play with her toys and run around outside. one day, lily's friend came over to play. her friend said,\" don't be sad, lily. i don't want to play with you.\" lily felt sad and didn't want to share her toys with her friend. suddenly", "reason": "bigram recurred 3x: ('to', 'play')"}, {"seed": 4, "prompt": "she found a", "text": "she found a coin on the ground. she was so happy and hugged her mom. from that day on, lily learned to always be kind to her brother and not be sad. once upon a time, there was a little girl named lily. she loved to play outside and explore. one day, she found", "reason": null}, {"seed": 5, "prompt": "once upon a time", "text": "once upon a time, there was a little girl named lily. she loved to play outside and look at the flowers. one day, she went to the park and saw a big, scary dog. the dog was scared and couldn't run away. lily wanted to help the dog, so she ran to her mom and said", "reason": null}, {"seed": 5, "prompt": "the sun was", "text": "the sun was shining and it was time to go home. once upon a time, there was a little girl named lily. she loved to play with her toys and her favorite one was a teddy bear. one day, lily's mommy asked her to help clean up her room. lily didn't want to help, so", "reason": null}, {"seed": 5, "prompt": "the dog ran", "text": "the dog ran away and never came to the park. the end. once upon a time, there was a little girl named lily. she had a big, colorful ball that she loved to play with. one day, lily's friend, tim, came over to play. tim said,\" i want to play", "reason": "bigram recurred 3x: ('to', 'play')"}, {"seed": 5, "prompt": "a little girl", "text": "a little girl named lucy. she was a very good girl. one day, lucy went to the park with her mom. she saw a big, pretty slide and she wanted to try it. she said to her mom,\" mom, can i go to the slide?\" her mom said,\" no,", "reason": "bigram recurred 3x: ('her', 'mom')"}, {"seed": 5, "prompt": "she found a", "text": "she found a big, scary dog. the dog was scared and ran away. lily felt bad for the dog, but she knew she was brave and smart. she hugged the dog and said sorry to the dog. from that day on, lily learned to be more careful and not be too scared of the dog.", "reason": "bigram recurred 5x: ('the', 'dog')"}]}</script>
+<script>
+const DATA = JSON.parse(document.getElementById('report-data').textContent);
+const FIXATION_TERMS = ['cardinal', "buster's", 'buster', 'bustled', "spidey's", 'spidey', 'contains', 'cube'];
+
+function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function flagSpan(text, reason){
+  if (!reason) return null;
+  let m = reason.match(/^exact doubling: (['"])(.*?)\1 (['"])(.*?)\3$/);
+  if (m) return {w1: m[2], w2: m[4]};
+  m = reason.match(/^bigram recurred \d+x: \((['"])(.*?)\1,\s*(['"])(.*?)\3\)$/);
+  if (m) return {w1: m[2], w2: m[4]};
+  return null;
+}
+
+function findSpans(text, reason){
+  const spans = [];
+  const fs = flagSpan(text, reason);
+  if (fs){
+    const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(esc(fs.w1) + '\\s?' + esc(fs.w2), 'gi');
+    let mm;
+    while ((mm = re.exec(text))){
+      spans.push({start: mm.index, end: mm.index + mm[0].length, type: 'flag'});
+      if (mm[0].length === 0) re.lastIndex++;
+    }
+  }
+  FIXATION_TERMS.forEach(term => {
+    const re = new RegExp('\\b' + term.replace(/'/g, "['’]") + '\\b', 'gi');
+    let mm;
+    while ((mm = re.exec(text))){
+      spans.push({start: mm.index, end: mm.index + mm[0].length, type: 'fix'});
+      if (mm[0].length === 0) re.lastIndex++;
+    }
+  });
+  spans.sort((a, b) => a.start - b.start || b.end - a.end);
+  const merged = [];
+  let lastEnd = -1;
+  for (const s of spans){
+    if (s.start < lastEnd) continue; // drop overlaps, first (flag) wins since sorted stably before fix at same start
+    merged.push(s);
+    lastEnd = s.end;
+  }
+  return merged;
+}
+
+function highlight(text, reason){
+  const spans = findSpans(text, reason);
+  if (spans.length === 0) return escapeHtml(text);
+  let out = '', last = 0;
+  spans.forEach(s => {
+    out += escapeHtml(text.slice(last, s.start));
+    out += `<mark class="${s.type}">${escapeHtml(text.slice(s.start, s.end))}</mark>`;
+    last = s.end;
+  });
+  out += escapeHtml(text.slice(last));
+  return out;
+}
+
+function hasFixation(text){
+  return FIXATION_TERMS.some(term => new RegExp('\\b' + term.replace(/'/g, "['’]") + '\\b', 'i').test(text));
+}
+
+function wordCount(t){ return t.trim().split(/\s+/).length; }
+
+function computeStats(samples){
+  const total = samples.length;
+  const flagged = samples.filter(s => s.reason).length;
+  return {total, flagged};
+}
+
+function renderStats(){
+  const groups = [
+    {key:'hardware', label:'Real Genesys2 board', cls:'hw'},
+    {key:'software', label:'Software proxy (matched config)', cls:'sw'},
+  ];
+  document.getElementById('stats-grid').innerHTML = groups.map(g => {
+    const s = computeStats(DATA[g.key]);
+    const pct = Math.round(100 * s.flagged / s.total);
+    return `<div class="stat-tile ${g.cls}">
+      <div class="sweep-label">${g.label}</div>
+      <div class="num">${s.flagged}<small>/${s.total} flagged</small></div>
+      <div class="pct">${pct}% of samples</div>
+    </div>`;
+  }).join('');
+
+  const counts = {};
+  ['hardware', 'software'].forEach(key => {
+    counts[key] = {};
+    FIXATION_TERMS.forEach(t => counts[key][t] = 0);
+    DATA[key].forEach(s => {
+      const low = s.text.toLowerCase();
+      FIXATION_TERMS.forEach(t => {
+        const re = new RegExp('\\b' + t.replace(/'/g, "['’]") + '\\b', 'g');
+        const m = low.match(re);
+        if (m) counts[key][t] += m.length;
+      });
+    });
+  });
+  const uniqueTerms = ['cardinal', "buster's/buster", 'bustled', "spidey's", 'contains', 'cube'];
+  const termKeyMap = {"buster's/buster": ['buster', "buster's"]};
+  document.getElementById('fix-terms').innerHTML = uniqueTerms.map(t => {
+    const keys = termKeyMap[t] || [t];
+    const hw = keys.reduce((a,k) => a + (counts.hardware[k]||0), 0);
+    const sw = keys.reduce((a,k) => a + (counts.software[k]||0), 0);
+    return `<div class="fix-term"><span class="word">${t}</span>
+      <span class="count" style="color:var(--accent-hw)">hw ${hw}</span>
+      <span class="count" style="color:var(--accent-sw)">sw ${sw}</span></div>`;
+  }).join('');
+}
+
+let flaggedOnly = false;
+
+function panelHtml(sample, cls, label){
+  const flagged = !!sample.reason;
+  const fix = hasFixation(sample.text);
+  const badge = flagged ? `<span class="flagpill flagged">flagged</span>` : `<span class="flagpill clean">clean</span>`;
+  const reasonHtml = flagged ? `<div class="reason">${escapeHtml(sample.reason)}</div>` : '';
+  const hide = (flaggedOnly && !flagged && !fix) ? ' hidden' : '';
+  const extra = (sample.rate_tok_s !== undefined) ? `<span>${sample.rate_tok_s} tok/s</span>` : '';
+  const seedTag = sample.real_seed ? `<span>seed ${sample.real_seed}</span>` : '';
+  return `<div class="panel${hide}">
+    <div class="panel-head">
+      <span class="modeltag ${cls}"><span class="dot ${cls}"></span>${label}</span>
+      ${badge}
+    </div>
+    ${reasonHtml}
+    <div class="story">${highlight(sample.text, sample.reason)}</div>
+    <div class="panel-foot">
+      <span>prompt: &ldquo;${escapeHtml(sample.prompt)}&rdquo;</span>
+      <span style="display:flex;gap:10px">${seedTag}<span>${wordCount(sample.text)} words</span>${extra}</span>
+    </div>
+  </div>`;
+}
+
+function render(){
+  const hw = DATA.hardware, sw = DATA.software;
+  const container = document.getElementById('rows');
+  let html = '', visibleRows = 0;
+  for (let i = 0; i < hw.length; i++){
+    const h = hw[i], s = sw[i];
+    const anyMatch = h.reason || s.reason || hasFixation(h.text) || hasFixation(s.text);
+    if (flaggedOnly && !anyMatch) continue;
+    visibleRows++;
+    html += `<div class="rowgroup">
+      <div class="rowmeta"><span class="seedno">draw ${h.seed}</span><span>condition ${i+1} of ${hw.length}</span></div>
+      <div class="pair">
+        ${panelHtml(h, 'hw', 'real board')}
+        ${panelHtml(s, 'sw', 'software proxy')}
+      </div>
+    </div>`;
+  }
+  container.innerHTML = html;
+  document.getElementById('empty-state').style.display = visibleRows === 0 ? 'block' : 'none';
+}
+
+document.getElementById('flagged-only').addEventListener('change', e => {
+  flaggedOnly = e.target.checked;
+  render();
+});
+
+renderStats();
+render();
+</script>

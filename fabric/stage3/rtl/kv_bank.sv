@@ -30,7 +30,14 @@ module kv_bank #(
     parameter integer NLAYER   = 4,
     parameter integer TMAX     = 256,
     parameter integer KBITS    = 8,
-    parameter integer INV_SH   = 24
+    parameter integer INV_SH   = 24,
+    // Genesys2 (Kintex-7) port: no URAM primitive exists on that part at all,
+    // so the code bank must fall back to ordinary BRAM TDP. "block" is a
+    // strictly synthesizable XPM_MEMORY_TDPRAM choice, not a capability
+    // downgrade (7-series BRAM36 is natively true-dual-port); only the
+    // KV260 default is left at "ultra" so its own gates/bitstream are
+    // untouched.
+    parameter               MEM_PRIMITIVE = "ultra"
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -257,7 +264,7 @@ module kv_bank #(
     xpm_memory_tdpram #(
         .ADDR_WIDTH_A($clog2(HROWS)), .ADDR_WIDTH_B($clog2(HROWS)),
         .BYTE_WRITE_WIDTH_A(HEAD_DIM*KBITS), .BYTE_WRITE_WIDTH_B(HEAD_DIM*KBITS),
-        .CLOCKING_MODE("common_clock"), .MEMORY_PRIMITIVE("ultra"),
+        .CLOCKING_MODE("common_clock"), .MEMORY_PRIMITIVE(MEM_PRIMITIVE),
         .MEMORY_SIZE(HEAD_DIM*KBITS*HROWS),
         .READ_DATA_WIDTH_A(HEAD_DIM*KBITS), .READ_DATA_WIDTH_B(HEAD_DIM*KBITS),
         .READ_LATENCY_A(1), .READ_LATENCY_B(1),

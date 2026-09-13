@@ -1,0 +1,383 @@
+{
+  "hardware": [
+    {
+      "seed": 1,
+      "real_seed": "0xd21ce875",
+      "prompt": "once upon a time",
+      "text": "once upon a time, there was a little boy named timmy. timmy loved to play with his toys and eat snacks. one day, timmy's mom made him a sandwich with a big bite. timmy was so happy and ate the sandwich. but then, a cube came and made a loud noise. timmy accidentally dropped the ball",
+      "reason": null,
+      "elapsed_s": 1.054,
+      "rate_tok_s": 50.3
+    },
+    {
+      "seed": 1,
+      "real_seed": "0x1ff80dbb",
+      "prompt": "the sun was",
+      "text": "the sun was shining brightly and the girl was so excited. she quickly ran to the field and started running around. she ran around the garden, laughing and having so much fun. she even found a little field of flowers and some flowers. she was a bit scared at first, but then she noticed something strange.",
+      "reason": null,
+      "elapsed_s": 1.007,
+      "rate_tok_s": 52.6
+    },
+    {
+      "seed": 1,
+      "real_seed": "0x08c974ce",
+      "prompt": "the dog ran",
+      "text": "the dog ran away, but the dog was too fast. the big dog chased the ball and ran away. the cube was sad. the cube saw a big hole in the ground. the cube bush was stuck. the big, and the cube broke. the cube broke into pieces. the little dog and all the",
+      "reason": "bigram recurred 5x: ('the', 'cube')",
+      "elapsed_s": 1.152,
+      "rate_tok_s": 44.3
+    },
+    {
+      "seed": 1,
+      "real_seed": "0x5b5ba720",
+      "prompt": "a little girl",
+      "text": "a little girl named lily care about her favorite toy. one day, she went to the park to play with her friend, sam. they played together and had lots of fun. while they were playing, lily accidentally dropped a ball on the ground. she asked sam,\" what is that?\" sam said,",
+      "reason": null,
+      "elapsed_s": 1.009,
+      "rate_tok_s": 47.6
+    },
+    {
+      "seed": 1,
+      "real_seed": "0xb6c77d08",
+      "prompt": "she found a",
+      "text": "she found a big, juicy apple. she picked it up and took a bite. it was sweet and tasted yummy. lily was so happy and ate the apple. she ate it all up chug and felt very happy. from that day on, lily always made sure to eat her apple and the sweet taste there.",
+      "reason": null,
+      "elapsed_s": 1.009,
+      "rate_tok_s": 51.5
+    },
+    {
+      "seed": 2,
+      "real_seed": "0x36232134",
+      "prompt": "once upon a time",
+      "text": "once upon a time, there was a little girl named lily. she loved to play outside and explore. one day, she found a big, shiny rock. it was so pretty and shiny. lily picked it up and showed it to her mom.\" look, mommy! i found careful not to touch it.\"",
+      "reason": null,
+      "elapsed_s": 1.023,
+      "rate_tok_s": 46.9
+    },
+    {
+      "seed": 2,
+      "real_seed": "0x398c080d",
+      "prompt": "the sun was",
+      "text": "the sun was very cold and he couldn't get to the beach anymore. he was so sad he started to cry. he felt like he belonged to his friends and always put his toys away. the bear was alone and alone, until he became alone chug and alone. he asked his best friends,\" what is wrong",
+      "reason": null,
+      "elapsed_s": 1.103,
+      "rate_tok_s": 48.0
+    },
+    {
+      "seed": 2,
+      "real_seed": "0xbd0fd8fe",
+      "prompt": "the dog ran",
+      "text": "the dog ran to the fence and jumped in the water. he jumped and splashed and made a big splash. he did not like the big dog that swam away. he was not happy. he barked and bit the ball. he bit ben and lily. they were scared and hurt. they ran away and hid.",
+      "reason": null,
+      "elapsed_s": 1.041,
+      "rate_tok_s": 50.0
+    },
+    {
+      "seed": 2,
+      "real_seed": "0x578a7f4d",
+      "prompt": "a little girl",
+      "text": "a little girl care about what she had. she loved it and always wanted to see it. one day, she found a pretty necklace in the park. it was pink and had a picture of a flower on it. she was so happy with her necklace and she wanted a new one. she took the necklace from",
+      "reason": null,
+      "elapsed_s": 1.025,
+      "rate_tok_s": 52.7
+    },
+    {
+      "seed": 2,
+      "real_seed": "0x4bbf4ab1",
+      "prompt": "she found a",
+      "text": "she found a big box care of animals. she was so excited to open the box! she opened the desired, and inside was a big, soft, shiny toy. she bounced it around the house, feeling so happy and excited. but, when she tried to break the toy, it broke. the bear was",
+      "reason": null,
+      "elapsed_s": 1.057,
+      "rate_tok_s": 46.4
+    },
+    {
+      "seed": 3,
+      "real_seed": "0x983b19b6",
+      "prompt": "once upon a time",
+      "text": "once upon a time, there was a little girl named lily. she loved to play with her toys and sing songs. one day, lily was playing with a ball when she accidentally dropped it and it broke. she was very sad and started to cry. her mommy came to help her up and saw her crying. she",
+      "reason": null,
+      "elapsed_s": 1.025,
+      "rate_tok_s": 52.7
+    },
+    {
+      "seed": 3,
+      "real_seed": "0x06799761",
+      "prompt": "the sun was",
+      "text": "the sun was gone care of them. buster's was sad, but she knew she had to hurry to get a new dress. she went to the store to buy a blue dress. she found a dat dress that she wanted. she was so excited! the girl asked her mum if she could buy the dress. her",
+      "reason": null,
+      "elapsed_s": 1.04,
+      "rate_tok_s": 51.0
+    },
+    {
+      "seed": 3,
+      "real_seed": "0xcb6f1a42",
+      "prompt": "the dog ran",
+      "text": "the dog ran away, but he was too fast. the dog chased the ball and chased it. the ball went into a big hole in the ground. the ball was very angry and wanted to play with the contains ball. but the ball and the sheep were too close to the ball. they tried to catch it",
+      "reason": "bigram recurred 5x: ('the', 'ball')",
+      "elapsed_s": 1.071,
+      "rate_tok_s": 50.4
+    },
+    {
+      "seed": 3,
+      "real_seed": "0x65f1c642",
+      "prompt": "a little girl",
+      "text": "a little girl named lily care about her favorite candy. one day, her mom asked her to help with a special candy. lily was so excited to add some candy to her collection. as she was walking to the store, she saw a little girl crying.\" what's wrong, lily?\" she asked care for",
+      "reason": null,
+      "elapsed_s": 1.024,
+      "rate_tok_s": 48.8
+    },
+    {
+      "seed": 3,
+      "real_seed": "0x1b2c0256",
+      "prompt": "she found a",
+      "text": "she found a big, shiny stone on the ground. she picked it up and showed it to her mom. her brother said,\" look, i found a stone!\" lily was so happy and said cardinal. they played together and had fun. after a while, they found careful not to bury the stone.",
+      "reason": null,
+      "elapsed_s": 1.04,
+      "rate_tok_s": 46.2
+    },
+    {
+      "seed": 4,
+      "real_seed": "0x60f50847",
+      "prompt": "once upon a time",
+      "text": "once upon a time, there was a little girl named lily. she loved to play outside in the sun. one day, she went to the park with her mom. they played on the swings and the slide. lily had so much fun that she forgot to bring a special bracelet. she ran home and told her brother",
+      "reason": null,
+      "elapsed_s": 1.024,
+      "rate_tok_s": 52.7
+    },
+    {
+      "seed": 4,
+      "real_seed": "0x9911fbf4",
+      "prompt": "the sun was",
+      "text": "the sun was getting hot care drops. she said goodbye to the dog and went home. buster's never forgot the fun she had in the park. buster's smiled and waved goodbye as she walked away. buster's was so happy that she became a good friend and she always remembered the beautiful flowers that belonged to her. buster's and",
+      "reason": null,
+      "elapsed_s": 1.135,
+      "rate_tok_s": 48.5
+    },
+    {
+      "seed": 4,
+      "real_seed": "0xc785a5d1",
+      "prompt": "the dog ran",
+      "text": "the dog ran away, but the dog was faster. the big dog saw the ball and wanted it. the cube rolled up and down, and the ball rolled back and forth. the big, happy dog and all had fun together. buster's was glad that the cube was gone, chug. buster's and all the other",
+      "reason": null,
+      "elapsed_s": 1.152,
+      "rate_tok_s": 44.3
+    },
+    {
+      "seed": 4,
+      "real_seed": "0xcfb8f60b",
+      "prompt": "a little girl",
+      "text": "a little girl called lucy care about the world. she loved to explore and learn new things. every day, she would go to the park and ask for help from the big tree. one day cardinal was walking near a big bush. she saw a cube on the ground. she thought it was so pretty and wanted",
+      "reason": null,
+      "elapsed_s": 1.073,
+      "rate_tok_s": 50.3
+    },
+    {
+      "seed": 4,
+      "real_seed": "0x81e480e6",
+      "prompt": "she found a",
+      "text": "she found a big, round rock. she picked it up and showed it to her mom.\" look, mommy!\" she said care.\" this rock is so pretty!\" bustled said drops the rock.\" can i keep it?\"\" sure, but be careful,\" her brother said.",
+      "reason": "exact doubling: '\"' '\"'",
+      "elapsed_s": 1.056,
+      "rate_tok_s": 36.9
+    },
+    {
+      "seed": 5,
+      "real_seed": "0x76d17eeb",
+      "prompt": "once upon a time",
+      "text": "once upon a time, there was a little girl named lily. she loved to play outside in the park with her friends. one day, they found a big tree with a picture of a rainbow. lily said,\" wow, that is a beautiful rainbow!\" but then, a cube came to the backyard. it",
+      "reason": null,
+      "elapsed_s": 1.04,
+      "rate_tok_s": 47.1
+    },
+    {
+      "seed": 5,
+      "real_seed": "0x229d55b3",
+      "prompt": "the sun was",
+      "text": "the sun was getting hot and the sun was shining. the rain made the grass wet and blue. it was so soft and warm. the little girl was a bit scared, but she was also brave. she put her hands on the bench and went to the crocodile's house. she saw the big tree and asked her",
+      "reason": null,
+      "elapsed_s": 1.073,
+      "rate_tok_s": 50.3
+    },
+    {
+      "seed": 5,
+      "real_seed": "0x0d06cc70",
+      "prompt": "the dog ran",
+      "text": "the dog ran away, but the little girl was never seen again. buster's never found her again. buster's was so happy that she was able to escape the big, scary dog that all the way home was to be free. buster's and she always kept the cube safe and never forgot the fun she had ever had.",
+      "reason": null,
+      "elapsed_s": 1.089,
+      "rate_tok_s": 49.6
+    },
+    {
+      "seed": 5,
+      "real_seed": "0x9221a604",
+      "prompt": "a little girl",
+      "text": "a little girl named lily care about her special wand. she loved to try and make her dreams come true. one day, she went to the park and saw a little girl playing with her pretty wand. she asked her mom what she was doing and her\" i want to play with you, lily!\" lily",
+      "reason": null,
+      "elapsed_s": 1.025,
+      "rate_tok_s": 50.7
+    },
+    {
+      "seed": 5,
+      "real_seed": "0x46a7aab4",
+      "prompt": "she found a",
+      "text": "she found a big rock in the grass. she picked it up and showed it to her mom.\" look, mommy! i found a rock!\" said lily care and asked her,\" i saw a big, shiny rock!\" her brother smiled and said, bustled.\" wow, that's cool!\"",
+      "reason": null,
+      "elapsed_s": 1.073,
+      "rate_tok_s": 39.1
+    }
+  ],
+  "software": [
+    {
+      "seed": 1,
+      "prompt": "once upon a time",
+      "text": "once upon a time, there was a little girl named lily. she loved to play outside and pick flowers. one day, she found a big, pretty flower. it was very pretty and had lots of colors on it. lily thought it was so pretty and wanted to pick it. she went to her mom and said",
+      "reason": null
+    },
+    {
+      "seed": 1,
+      "prompt": "the sun was",
+      "text": "the sun was shining brightly in the bright blue sky. as they walked around, lily saw something strange in the sky. she knew it was a magical place. she wanted to find out what it was. lily found a big tree and started to climb. she climbed up high and higher until she was almost at the",
+      "reason": null
+    },
+    {
+      "seed": 1,
+      "prompt": "the dog ran",
+      "text": "the dog ran away. lily and ben were sad. they cried. they wanted their ball back. they wished they had played with the ball. they wished they had not played with the ball. they wished they had not played with the ball. they wished they had played with the ball. they wished they had played",
+      "reason": "bigram recurred 5x: ('they', 'wished')"
+    },
+    {
+      "seed": 1,
+      "prompt": "a little girl",
+      "text": "a little girl named lily. she loved to play outside in the garden. one day, she saw a butterfly flying in the sky. she wanted to catch it, but it was too high for her. lily asked her friend,\" can i catch the butterfly?\" her friend said,\" no, lily.",
+      "reason": null
+    },
+    {
+      "seed": 1,
+      "prompt": "she found a",
+      "text": "she found a shiny rock that she had never seen before. she picked it up and looked at it closely. it was so pretty and shiny. she wanted to take it home with her. she took the rock home and put it in her room. she was so happy to have her rock back. she put it",
+      "reason": null
+    },
+    {
+      "seed": 2,
+      "prompt": "once upon a time",
+      "text": "once upon a time, there was a little girl named lily. she loved to play outside and eat yummy food. one day, she went to the park with her mommy and saw a boy playing with a ball. lily asked the boy,\" can i play with you?\" the boy said,\" sure, but",
+      "reason": null
+    },
+    {
+      "seed": 2,
+      "prompt": "the sun was",
+      "text": "the sun was shining brightly and the sun was shining brightly. the little girl was so excited to go back to the park and play with her friends. she couldn't wait to come back to the park and play with her new friend. once upon a time, there was a little girl named lily. she loved to",
+      "reason": null
+    },
+    {
+      "seed": 2,
+      "prompt": "the dog ran",
+      "text": "the dog ran away. lily and ben were sad and angry. they wanted their ball back. they wished they could have played with the ball. they wished they had not played with the ball. they wished they had not played with the ball. they wished they had played with the ball. they wished they had their",
+      "reason": "bigram recurred 5x: ('they', 'wished')"
+    },
+    {
+      "seed": 2,
+      "prompt": "a little girl",
+      "text": "a little girl named lily. she loved to play outside and explore the world around her. one day, lily and her friends were playing with a ball in the park. lily said,\" i want to play with you, but i don't want to play with you.\" her friend said,\" i know you",
+      "reason": "bigram recurred 3x: ('to', 'play')"
+    },
+    {
+      "seed": 2,
+      "prompt": "she found a",
+      "text": "she found a key on the shelf. she picked it up and looked at it. she was so happy to find the key. she put the key in the drawer and it looked like new. she smiled and went to play with her new toy. once upon a time, there was a little girl named lily",
+      "reason": null
+    },
+    {
+      "seed": 3,
+      "prompt": "once upon a time",
+      "text": "once upon a time, there was a little girl named lily. she loved to play outside and explore the world around her. one day, she found a big, colorful rock on the ground. she picked it up and started to admire it. suddenly, she heard a voice. it said,\" don't touch it,",
+      "reason": null
+    },
+    {
+      "seed": 3,
+      "prompt": "the sun was",
+      "text": "the sun was shining brightly. the little girl was so excited to see the sun and she couldn't wait to go. she grabbed her shoes and ran back to the park. the little girl was sad to see the sun shining brightly. she wanted to go back to the park and play with her friends. the sun was",
+      "reason": "bigram recurred 4x: ('the', 'sun')"
+    },
+    {
+      "seed": 3,
+      "prompt": "the dog ran",
+      "text": "the dog ran away. lily and ben were sad. they said,\" we are sorry, dog. we are sorry. we did not know. we did not know. we did not know. we were curious. we did not know. we did not know. we did not know. we will be good",
+      "reason": "bigram recurred 6x: ('we', 'did')"
+    },
+    {
+      "seed": 3,
+      "prompt": "a little girl",
+      "text": "a little girl named lily. she loved to play outside and explore. one day, she went to a big field with lots of grass and flowers. while she was there, she saw a big, colorful flower. it was so pretty and pretty. lily wanted to pick the flower, but she didn't have a little",
+      "reason": null
+    },
+    {
+      "seed": 3,
+      "prompt": "she found a",
+      "text": "she found a shiny rock. she picked it up and showed it to her mom.\" look, a rock!\" her mom said.\" it is so pretty!\" lily was so happy and hugged her mom. from that day on, lily and her mom played with the rock every day and had lots of",
+      "reason": "bigram recurred 4x: ('her', 'mom')"
+    },
+    {
+      "seed": 4,
+      "prompt": "once upon a time",
+      "text": "once upon a time, there was a little girl named lily. she loved to play outside and pick flowers. one day, she found a shiny rock on the ground. she picked it up and showed it to her friend, timmy.\" look, timmy! this rock is shiny and shiny. can i play with it",
+      "reason": null
+    },
+    {
+      "seed": 4,
+      "prompt": "the sun was",
+      "text": "the sun was shining brightly and the birds were singing. it was the perfect day, and the sun was shining brightly. the little girl was so happy to have such a new friend. she hugged it tight and smiled. she was so happy to have her own special friend back. once upon a time, there",
+      "reason": null
+    },
+    {
+      "seed": 4,
+      "prompt": "the dog ran",
+      "text": "the dog ran away. it was not a good dog. it was a bad dog. it was a bad dog. it did not care. it only barked and barked. it wanted to play with lily and ben. lily was sad. she did not know what to do. she wanted to be friends with ben",
+      "reason": "bigram recurred 3x: ('it', 'was')"
+    },
+    {
+      "seed": 4,
+      "prompt": "a little girl",
+      "text": "a little girl named lily. she loved to play with her toys and run around outside. one day, lily's friend came over to play. her friend said,\" don't be sad, lily. i don't want to play with you.\" lily felt sad and didn't want to share her toys with her friend. suddenly",
+      "reason": "bigram recurred 3x: ('to', 'play')"
+    },
+    {
+      "seed": 4,
+      "prompt": "she found a",
+      "text": "she found a coin on the ground. she was so happy and hugged her mom. from that day on, lily learned to always be kind to her brother and not be sad. once upon a time, there was a little girl named lily. she loved to play outside and explore. one day, she found",
+      "reason": null
+    },
+    {
+      "seed": 5,
+      "prompt": "once upon a time",
+      "text": "once upon a time, there was a little girl named lily. she loved to play outside and look at the flowers. one day, she went to the park and saw a big, scary dog. the dog was scared and couldn't run away. lily wanted to help the dog, so she ran to her mom and said",
+      "reason": null
+    },
+    {
+      "seed": 5,
+      "prompt": "the sun was",
+      "text": "the sun was shining and it was time to go home. once upon a time, there was a little girl named lily. she loved to play with her toys and her favorite one was a teddy bear. one day, lily's mommy asked her to help clean up her room. lily didn't want to help, so",
+      "reason": null
+    },
+    {
+      "seed": 5,
+      "prompt": "the dog ran",
+      "text": "the dog ran away and never came to the park. the end. once upon a time, there was a little girl named lily. she had a big, colorful ball that she loved to play with. one day, lily's friend, tim, came over to play. tim said,\" i want to play",
+      "reason": "bigram recurred 3x: ('to', 'play')"
+    },
+    {
+      "seed": 5,
+      "prompt": "a little girl",
+      "text": "a little girl named lucy. she was a very good girl. one day, lucy went to the park with her mom. she saw a big, pretty slide and she wanted to try it. she said to her mom,\" mom, can i go to the slide?\" her mom said,\" no,",
+      "reason": "bigram recurred 3x: ('her', 'mom')"
+    },
+    {
+      "seed": 5,
+      "prompt": "she found a",
+      "text": "she found a big, scary dog. the dog was scared and ran away. lily felt bad for the dog, but she knew she was brave and smart. she hugged the dog and said sorry to the dog. from that day on, lily learned to be more careful and not be too scared of the dog.",
+      "reason": "bigram recurred 5x: ('the', 'dog')"
+    }
+  ],
+  "gumbel_temp": 0.45,
+  "checkpoint": "data/ckpt_stepC_d128_v16384.qat.pt (hardware) / .pt (software proxy)"
+}

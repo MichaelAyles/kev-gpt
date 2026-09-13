@@ -23,13 +23,20 @@ module gemv_banked_resident_vec #(
     parameter integer P      = 8,         // boundary width (P divides LANES, KMAX, MMAX)
     parameter integer MMAX   = 1024,      // max output rows of any single layer
     parameter integer KMAX   = 1024,      // max reduction length of any single layer
+    // width of gdone (below): must hold 0..GROUPS inclusive (GROUPS=ceil(MMAX/
+    // LANES)) -- see gdone's own comment. Derived, not hardcoded, so it scales
+    // automatically with whatever MMAX/LANES a caller instantiates.
+    parameter integer GDONE_W = $clog2((MMAX + LANES - 1) / LANES + 1),
     parameter integer WWORDS = 25600,     // resident capacity in wide words
     parameter integer RLAT   = 2,         // read->mac pipeline depth (cycles)
-    parameter integer K2     = 0          // doc-7 R3: 2 K-steps/cycle via the URAM's
+    parameter integer K2     = 0,         // doc-7 R3: 2 K-steps/cycle via the URAM's
                                           // SECOND read port (free at N=1; the TDP claim
                                           // is silicon-proven by split-brain). Integer
                                           // associativity keeps the accumulate BIT-EXACT
                                           // (lane sums peak ~2^20, no mid-sum saturation).
+    // Passed straight through to weight_bank_tdp -- see that module for why
+    // "block" (Genesys2, no URAM on that part) is not a capability downgrade.
+    parameter               MEM_PRIMITIVE = "ultra"
 ) (
     input  wire                          clk,
     input  wire                          rst,
@@ -48,8 +55,16 @@ module gemv_banked_resident_vec #(
     output reg                           done,
     // committed-group count (groupwise RB overlap): increments the cycle group
     // g's ymem word commits, so the host may drain rows of groups < gdone while
-    // the MAC computes the next group. Reset on start.
-    output reg  [3:0]                    gdone,
+    // the MAC computes the next group. Reset on start. Width is GDONE_W (below,
+    // derived from GROUPS=ceil(MMAX/LANES)) -- a hardcoded 4 bits (max 15) here
+    // silently wrapped and deadlocked the consumer's row-issue gate (sequencer_
+    // vec.sv's G_RB, "ci>>GRPSH < gv_gdone") for any single GEMV call needing
+    // >=16 groups (e.g. D_MLP=1024 at LANES=64 needs exactly 16) -- found via a
+    // real hang while gating weight_loader_ddr against a larger candidate
+    // checkpoint; never triggered by the KV260 deployment (LANES=128, <=8
+    // groups) or Genesys2 Option A's real shape (D_MLP=512, <=8 groups at
+    // LANES=64) -- see fabric/genesys2/PORT-NOTES.md.
+    output reg  [GDONE_W-1:0]            gdone,
     // readback: P INT32 outputs per address (2-cycle latency)
     input  wire [$clog2(MMAX/P)-1:0]     rd_addr,
     output reg  [P*32-1:0]               y_out,
@@ -63,7 +78,28 @@ module gemv_banked_resident_vec #(
     // at LANES=256. The sequencer addresses embeds from even pair bases.
     input  wire                          emb_sel,
     input  wire [$clog2(WWORDS)-1:0]     emb_addr,
-    output wire [LANES*8-1:0]            emb_pair
+    output wire [LANES*8-1:0]            emb_pair,
+    // ---- weight-bank diagnostic readback (fixation-word investigation, item 6:
+    // "snapshot the suspect rows directly" -- see FIXATION-WORD-POSTMORTEM.md).
+    // weight_bank_tdp's port A is otherwise COMPLETELY UNUSED for reading in
+    // this instantiation (tied to raddr_a=0, rword_a left unconnected below) --
+    // nothing in the compute path (MAC accumulation reads port B only, via
+    // waddr/wword_rd) ever touches port A's read side. That makes it a free,
+    // zero-risk tap: driving it from a CPU-controlled address and observing
+    // the result can never perturb inference, at any time, running or idle.
+    //
+    // K2=1 (this design's own deployed config) puts weight_bank_tdp in DP=1
+    // column-parity-split mode: raddr_a's LSB is IGNORED by the memory --
+    // rword_a always returns the EVEN-indexed bank, rword1_a always the ODD
+    // one, at the pair index raddr_a[WAW-1:1], regardless of raddr_a[0].
+    // Exposing only rword_a (as an earlier version of this port did) silently
+    // returns the wrong row's data for every odd address -- caught by item
+    // 6's own simulation gate before real hardware (see
+    // FIXATION-WORD-POSTMORTEM.md item 6's verification note). Fixed the
+    // same way emb_pair (above) already solves this exact problem: expose
+    // BOTH halves, let the consumer pick by address parity.
+    input  wire [$clog2(WWORDS)-1:0]     wbdiag_addr,
+    output wire [LANES*8-1:0]            wbdiag_pair   // {odd(rword1_a), even(rword_a)}
 );
     localparam integer WBITS  = LANES*4;
     localparam integer YBITS  = LANES*32;
@@ -107,11 +143,12 @@ module gemv_banked_resident_vec #(
     // (rword_b) and kc+1 (rword1_b); grp_base and k_count are always even here.
     wire [$clog2(WWORDS)-1:0] waddr;
     wire [WBITS-1:0] wword_rd, wword2_rd;
-    weight_bank_tdp #(.LANES(LANES), .WWORDS(WWORDS), .DP((K2 != 0) ? 1 : 0)) u_wb (
+    weight_bank_tdp #(.LANES(LANES), .WWORDS(WWORDS), .DP((K2 != 0) ? 1 : 0),
+                       .MEM_PRIMITIVE(MEM_PRIMITIVE)) u_wb (
         .clk(clk), .clk2x(clk),
         .ld_rst(ld_rst), .w_we(w_we), .w_data(w_data),
         .raddr_b(waddr), .rword_b(wword_rd), .rword1_b(wword2_rd),
-        .raddr_a({$clog2(WWORDS){1'b0}}), .rword_a(), .rword1_a());
+        .raddr_a(wbdiag_addr), .rword_a(wbdiag_pair[WBITS-1:0]), .rword1_a(wbdiag_pair[2*WBITS-1:WBITS]));
 
     // ---- run FSM + RLAT-deep read/mac pipeline -------------------------------
     localparam [1:0] IDLE = 2'd0, RUN = 2'd1, FIN = 2'd2;
@@ -204,7 +241,7 @@ module gemv_banked_resident_vec #(
         end
 
         if (rst) begin
-            state <= IDLE; done <= 1'b0; gdone <= 4'd0;
+            state <= IDLE; done <= 1'b0; gdone <= {GDONE_W{1'b0}};
             g <= 0; kc <= 0; kmac <= 0; accb <= {YBITS{1'b0}}; grp_base <= 0;
             for (i = 0; i < RLAT; i = i + 1) begin v_p[i] <= 1'b0; v2_p[i] <= 1'b0; end
             add_v <= 1'b0; add_v2 <= 1'b0;
@@ -214,7 +251,7 @@ module gemv_banked_resident_vec #(
                     done <= 1'b0;
                     if (start) begin
                         g <= 0; kc <= 0; kmac <= 0; accb <= {YBITS{1'b0}};
-                        gdone <= 4'd0;
+                        gdone <= {GDONE_W{1'b0}};
                         grp_base <= w_base;
                         for (i = 0; i < RLAT; i = i + 1) begin
                             v_p[i] <= 1'b0; v2_p[i] <= 1'b0;
@@ -237,7 +274,7 @@ module gemv_banked_resident_vec #(
                     end
                     if (kmac == k_count) begin
                         ymem[g[$clog2(GROUPS)-1:0]] <= accb;
-                        gdone <= gdone + 4'd1;
+                        gdone <= gdone + 1'b1;
                         if (g == gcount - 1) state <= FIN;
                         else begin
                             g <= g + 1'b1; kc <= 0; kmac <= 0;
