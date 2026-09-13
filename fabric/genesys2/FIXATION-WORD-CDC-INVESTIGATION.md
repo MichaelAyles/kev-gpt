@@ -6,11 +6,14 @@ possibility ruled out.** A new direct readback tap (§8 item 8, from
 "care"'s (vocab id 2213) real DMA-streamed head-weight data is
 bit-exact correct at the exact moment real hardware produced "care" as
 the fixation word — the wrong weights are not the mechanism, at least
-for this specific implicated row. See §8 item 8 for the full account,
-including a newly-surfaced setup-timing violation on the KV-cache
-read-return path (unrelated to the new tap itself) that was chased and
-resolved as a benign verification-bound recalibration, not a hardware
-bug.
+for this specific implicated row. Extended to all four per-block matrix
+types (QKV/PROJ/FC/MP): all match their known-correct source exactly,
+zero differences, using the design's own never-before-exercised
+`dbg_stop` debug halt (no new RTL/bitstream needed). See §8 items 8-9
+for the full account, including a newly-surfaced setup-timing violation
+on the KV-cache read-return path (unrelated to either weight-check
+tap) that was chased and resolved as a benign verification-bound
+recalibration, not a hardware bug.
 
 Status as of 2026-09-12: **open, not root-caused. The CDC timing-constraint
 gap (§6) has now been fully investigated, fixed, rebuilt from scratch, and
@@ -1251,6 +1254,58 @@ original order below since item 4 was already next regardless.
    original hypothesis from early in `model/SCALE-UP-LOG.md`, deprioritized
    in favor of the CDC/FIFO hypotheses months ago and never conclusively
    ruled back in or out.
+
+9. **Extended to QKV/attention(proj)/MLP(FC+MP) weights, all four
+   real-hardware-verified clean.** Item 8's own remaining gap — only the
+   head/classifier weight had been checked this directly — closed
+   without any new RTL or bitstream rebuild. Read `sequencer_vec.sv`
+   directly: under `WEIGHT_STREAM_PER_LAYER=1`, the *whole* per-layer
+   weight block (QKV+proj+FC+MP, `GW_BLK` words) loads in **one** DMA
+   reload at the very start of each layer (`S_STRW` fires once, before
+   QKV) — every subsequent `g_wbase` update before proj/FC/MP's own GEMV
+   just selects an offset into the already-loaded image, not a fresh
+   reload. That means a single halt anywhere after the block-0 reload
+   leaves all four matrices simultaneously resident, so the existing
+   (never-before-exercised-by-any-application) `dbg_stop=2` debug halt
+   ("stop after LN2," CTRL bits `[4:3]`) — reached after QKV+attention+
+   proj — is enough to read back all four, no new stop points needed.
+   Verified in simulation first: `dbg_stop`'s own real halt behavior had
+   never been exercised before, so a new check in
+   `tb_seq_vec_kv_stream.sv` (fresh reset, one `dbg_stop=2`-truncated
+   step, WBDIAG readback for channel 0 of each matrix against `wrom.mem`
+   directly) confirmed 0 mismatches across QKV/PROJ/FC/MP before trusting
+   real hardware. New firmware only (`KEVGPT_DIAG_WBDIAG_BLOCK0`, off by
+   default): one partial step at boot with `dbg_stop=2`, dump each
+   matrix's channel 0, then the same `soft_reset` `chat_turn()` already
+   uses before every normal prompt (a full `sequencer_vec` reset) to
+   recover — `dbg_stop` itself isn't cleared by `soft_reset` (only by the
+   global reset), but the immediate follow-up `CTRL=0` write clears it as
+   a side effect of writing the whole register, not a separate step.
+
+   Two real-hardware bring-up hiccups along the way, neither a hardware
+   finding: (1) `fabric.genesys2.send_weights`'s own script closes the
+   serial port immediately after `SEND_WEIGHTS_PASS`, before the board's
+   subsequent boot output (this diagnostic fires right after) could be
+   captured — lost the first attempt's dump entirely; fixed with a small
+   wrapper script that keeps the port open to also capture post-boot
+   output. (2) A `monitor reset halt`/`monitor resume` reboot *without*
+   reissuing `load` first (skipped since the ELF hadn't changed, to save
+   time) left the board stuck never reprinting `KEVGPT_UART_READY` —
+   reverted to the fully proven reload sequence (`load` every time,
+   redundant or not) and it worked on the first retry.
+
+   **Real-hardware result: all four matrices match their known-correct
+   source exactly, zero differences** — `QKV`, `PROJ`, `FC`, `MP`
+   (channel 0 of each, 128/128/128/512 nibbles respectively). Confirmed
+   the recovery itself is clean too: a normal prompt run immediately
+   after produced a normal reply with a nonzero sampled seed, no
+   lingering diagnostic state. This substantially reinforces item 8's
+   own conclusion — it isn't just the head weight; every weight matrix
+   type in the transformer block is being delivered correctly through
+   the real DMA-streamed path. Diffs: `tb_seq_vec_kv_stream.sv` (kev-gpt,
+   the new sim check) and `main.c` (soc repo, the new diagnostic —
+   `kevgpt_wbdiag_dump_channel()` generalizes item 8's own
+   `kevgpt_wbdiag_dump_vocab()` past the head weight's fixed LANES/D).
 
 ## 9. Evidence trail / artifacts
 

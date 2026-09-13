@@ -316,8 +316,13 @@ isn't a timing or ordering bug.
    (4.04–4.25ns) simply outgrew its 4ns bound as the design scaled up
    (VOCAB 1900→16384), and still fits comfortably inside a full clock
    period — a verification-bound recalibration (widened to 6ns, verified
-   clean), not a hardware bug. Full account in `FIXATION-WORD-CDC-INVESTIGATION.md`
-   §8 item 8.
+   clean), not a hardware bug. Extended the same check to the other
+   three per-block matrix types (QKV, PROJ, FC, MP) — turned out all
+   four load in one single per-layer DMA reload, so the design's own
+   never-before-used `dbg_stop` debug halt exposes all four
+   simultaneously, no new RTL needed. **All four match their
+   known-correct source exactly, zero differences.** Full account in
+   `FIXATION-WORD-CDC-INVESTIGATION.md` §8 items 8-9.
 2. **Isolate §2a's firmware-timing sensitivity on its own terms.** The one
    still-unexplained build-dependent result (a diagnostic-only firmware
    change shifting which wrong token wins, same bitstream) was folded into
