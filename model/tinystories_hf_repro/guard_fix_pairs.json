@@ -1,0 +1,141 @@
+{
+  "pair1": {
+    "title": "Bug 1 -- last_tok not excluded (\"new new new new new\")",
+    "fix_commit": "57ce25a",
+    "prompt": "a little girl",
+    "real_seed": "0x2d7acf1a",
+    "before": {
+      "text": "a little girl named lily who loved to play outside. one day, she found a shiny penny on the ground. she picked it up and showed it to her mom.\" look, mommy! i found this penny!\" she said,\" wow, that's great!\" her mommy smiled and said\" yes, it is a new penny. it must be a special penny.\" lily was so happy and thanked her mom. from that day on, lily loved her new new new new new magnet. she knew that it's important to think of something, so she went to the store to buy some new ones. she brought the shiny",
+      "word_count": 103,
+      "rate_tok_s": 42.0,
+      "build": "pre-any-fix"
+    },
+    "after": {
+      "text": "a little girl named lily who loved to play outside. one day, she found a shiny penny on the ground. she picked it up and showed it to her mom.\" look, mommy! i found this penny!\" she said,\" wow, that's great!\" her mommy smiled and said\" yes, it is a new penny. it must be a special penny.\" lily was so happy and thanked her mommy. from that day on, lily loved her new magnet and her mommy's love. the end, they continued to the park together every day. the moral of the story is to always be kind to others and to",
+      "word_count": 103,
+      "rate_tok_s": null,
+      "build": "post-fix-1 (KEVGPT_FORCE_SEED replay)"
+    },
+    "mechanism": {
+      "before_event": {
+        "pos": 84,
+        "raw_tok": 9055,
+        "raw_word": "mommy",
+        "fired": [
+          {
+            "guard": "bigram_recur",
+            "sub_tok": 9044,
+            "sub_word": "mom"
+          }
+        ],
+        "final_tok": 9044,
+        "final_word": "mom"
+      },
+      "after_event": {
+        "pos": 84,
+        "raw_tok": 9055,
+        "raw_word": "mommy",
+        "fired": [
+          {
+            "guard": "bigram_recur",
+            "sub_tok": 9044,
+            "sub_word": "mom"
+          },
+          {
+            "guard": "bigram_recur",
+            "sub_tok": 9055,
+            "sub_word": "mommy"
+          },
+          {
+            "guard": "bigram_recur",
+            "sub_tok": 9044,
+            "sub_word": "mom"
+          },
+          {
+            "guard": "bigram_recur",
+            "sub_tok": 9055,
+            "sub_word": "mommy"
+          }
+        ],
+        "final_tok": 9055,
+        "final_word": "mommy"
+      },
+      "divergence_word_index": 65,
+      "before_source": "guardtrace_full3.log (pre-fix-1 capture)",
+      "after_source": "guardtrace_fixed.log (post-fix-1 capture)"
+    },
+    "note": "This particular word ends up unchanged in the end (\u201cmommy\u201d in both the model's own raw pick and the post-fix-1 build's final output) \u2014 but for different reasons, and that's the real story here. The pre-fix build (838058e) had no re-validation loop at all: one guard check, one substitution, accepted immediately \u2014 it takes the first alternative (\u201cmom\u201d) and moves on. The post-fix-1 build (57ce25a) added a 4-pass re-validation loop as part of the same commit, but that loop didn't yet accumulate exclusions across passes (the bug 4c3a398 later fixed) \u2014 so it oscillates between \u201cmom\u201d and \u201cmommy\u201d for all 4 passes and, purely by landing on an even pass at the cap, ends up back on \u201cmommy\u201d. The word looks unchanged, but the mechanism that produced it already differs: this is the still-unfixed oscillation bug firing for the first time in this replay, several words before the visible \u201cnew new new new new\u201d symptom \u2014 it just happens not to change the output here."
+  },
+  "pair2": {
+    "title": "Bug 2 -- retry loop oscillation (\"the dog\" x10)",
+    "fix_commit": "4c3a398",
+    "prompt": "the dog ran",
+    "real_seed": "0x4361ec7e",
+    "before": {
+      "text": "the dog ran away, but the dog was too fast. the owner of the cat saw the dog and tried to comfort him. the owner came back and took the dog away. the dog felt sorry for the dog, so he ran away. the owner was happy to help and gave the dog a big hug. the dog wagged his tail and licked his face. the owner gave him a hug and a treat. the dog was so happy! he thanked the owner for helping the dog. from that day on, the owner always made sure to be careful and never let him go too far. the end, and the owner would never",
+      "word_count": 113,
+      "rate_tok_s": 34.8,
+      "build": "post-fix-1-only"
+    },
+    "after": {
+      "text": "the dog ran away, but the dog was too fast. the owner of the cat saw the dog's collar and thought it was a toy. he picked it up and put it in his mouth. he was happy to be free. the next day, the teacher came back and saw what happened. she was very angry. she said,\" you are a bad dog. you did not mean to scare the ball. you have to go to the hospital.\" the lady was surprised and scared. she did as the dog's owner said\" yes, please. i am not a dog. i do not know how to play.\" she",
+      "word_count": 106,
+      "rate_tok_s": null,
+      "build": "post-both-fixes (KEVGPT_FORCE_SEED replay)"
+    },
+    "mechanism": {
+      "before_event": {
+        "pos": 19,
+        "raw_tok": 4055,
+        "raw_word": "dog",
+        "fired": [
+          {
+            "guard": "bigram_recur",
+            "sub_tok": 2297,
+            "sub_word": "cat"
+          },
+          {
+            "guard": "bigram_recur",
+            "sub_tok": 4055,
+            "sub_word": "dog"
+          },
+          {
+            "guard": "bigram_recur",
+            "sub_tok": 2297,
+            "sub_word": "cat"
+          },
+          {
+            "guard": "bigram_recur",
+            "sub_tok": 4055,
+            "sub_word": "dog"
+          }
+        ],
+        "final_tok": 4055,
+        "final_word": "dog"
+      },
+      "after_event": {
+        "pos": 19,
+        "raw_tok": 4055,
+        "raw_word": "dog",
+        "fired": [
+          {
+            "guard": "bigram_recur",
+            "sub_tok": 2297,
+            "sub_word": "cat"
+          },
+          {
+            "guard": "bigram_recur",
+            "sub_tok": 4056,
+            "sub_word": "dog's"
+          }
+        ],
+        "final_tok": 4056,
+        "final_word": "dog's"
+      },
+      "divergence_word_index": 17,
+      "before_source": "dogtrace.log (post-fix-1-only capture)",
+      "after_source": "dogtrace_fixed.log (post-both-fixes capture)"
+    },
+    "note": "Before the second fix, <code>remask_pick_excluding()</code> only ever excludes the single most recent offender each pass, so across 4 passes it oscillates dog \u2192 cat \u2192 dog \u2192 cat and, at the pass cap, lands back on \u201cdog\u201d \u2014 reproducing the exact recurring bigram the guard exists to prevent. After the fix, the same guard call accumulates every rejected candidate across passes: pass 1 excludes \u201cdog\u201d and finds \u201ccat\u201d, which itself re-collides (the story already used \u201cthe cat\u201d), so pass 2 excludes both \u201cdog\u201d and \u201ccat\u201d together and lands on a genuinely new word, \u201cdog's\u201d. Same collision, same first two candidates tried, but only the accumulated exclusion set lets the loop actually converge instead of cycling."
+  }
+}

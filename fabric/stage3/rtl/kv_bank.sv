@@ -30,7 +30,14 @@ module kv_bank #(
     parameter integer NLAYER   = 4,
     parameter integer TMAX     = 256,
     parameter integer KBITS    = 8,
-    parameter integer INV_SH   = 24
+    parameter integer INV_SH   = 24,
+    // Genesys2 (Kintex-7) port: no URAM primitive exists on that part at all,
+    // so the code bank must fall back to ordinary BRAM TDP. "block" is a
+    // strictly synthesizable XPM_MEMORY_TDPRAM choice, not a capability
+    // downgrade (7-series BRAM36 is natively true-dual-port); only the
+    // KV260 default is left at "ultra" so its own gates/bitstream are
+    // untouched.
+    parameter               MEM_PRIMITIVE = "ultra"
 ) (
     input  wire        clk,
     input  wire        rst,
@@ -39,7 +46,7 @@ module kv_bank #(
     input  wire        wq_start,            // pulse; selectors sampled here
     input  wire [3:0]  wq_layer,
     input  wire        wq_kv,               // 0 = K, 1 = V
-    input  wire [1:0]  wq_head,
+    input  wire [$clog2(NHEAD)-1:0]  wq_head,
     input  wire [8:0]  wq_pos,
     input  wire        wq_valid,            // HR beats of P Q.16 lanes follow
     input  wire [P*32-1:0] wq_data,
@@ -49,7 +56,7 @@ module kv_bank #(
     input  wire        rd_start,            // pulse; selectors sampled here
     input  wire [3:0]  rd_layer,
     input  wire        rd_kv,
-    input  wire [1:0]  rd_head,
+    input  wire [$clog2(NHEAD)-1:0]  rd_head,
     input  wire [8:0]  rd_tcount,           // positions to stream (1..TMAX)
     output reg         rd_valid,            // a dequantised wide row is on rd_data
     output reg  [HEAD_DIM*32-1:0] rd_data,  // ONE POSITION's head row, dequantised
@@ -59,7 +66,7 @@ module kv_bank #(
     input  wire        rd2_start,
     input  wire [3:0]  rd2_layer,
     input  wire        rd2_kv,
-    input  wire [1:0]  rd2_head,
+    input  wire [$clog2(NHEAD)-1:0]  rd2_head,
     input  wire [8:0]  rd2_tcount,
     output reg         rd2_valid,
     output reg  [HEAD_DIM*32-1:0] rd2_data,
@@ -91,7 +98,7 @@ module kv_bank #(
     wire [47:0]               hdr_rd,  hdr_rd2;
 
     // ---- write-side state ------------------------------------------------------
-    reg [3:0]  w_layer; reg w_kv; reg [1:0] w_head; reg [8:0] w_pos;
+    reg [3:0]  w_layer; reg w_kv; reg [$clog2(NHEAD)-1:0] w_head; reg [8:0] w_pos;
     reg [HEAD_DIM*32-1:0] vecbuf;            // plain reg: the head vector, collected
     reg signed [31:0] minv, maxv;
     reg [$clog2(HR+1)-1:0] w_vi;             // collect beat counter
@@ -247,8 +254,14 @@ module kv_bank #(
     // PORT DISCIPLINE: the quant-write (W_CWR) is FOLDED INTO port A — it commits
     // only when stream A is idle (W_CWR stalls on rst_st, see the write FSM), so
     // each memory is exactly write-else-read on A plus read on B = two ports.
-    wire [$clog2(HROWS)-1:0] pos_ra  = r_pbase  + {{($clog2(HROWS)-9){1'b0}}, r_rowi};
-    wire [$clog2(HROWS)-1:0] pos_ra2 = r2_pbase + {{($clog2(HROWS)-9){1'b0}}, r2_rowi};
+    // r_rowi/r2_rowi are unsigned regs; Verilog's context-determined
+    // arithmetic zero-extends (or, for a small HROWS, correctly truncates a
+    // provably-in-range sum) them to pos_ra/pos_ra2's own width automatically
+    // -- no manual pad-width computation needed, and none that can go negative
+    // when $clog2(HROWS) is SMALLER than r_rowi's own declared width (small
+    // NLAYER*NHEAD*TMAX products; this used to require $clog2(HROWS)>=9).
+    wire [$clog2(HROWS)-1:0] pos_ra  = r_pbase  + r_rowi;
+    wire [$clog2(HROWS)-1:0] pos_ra2 = r2_pbase + r2_rowi;
     wire cwr_fire = (wst == W_CWR) && (rst_st == R_IDLE);
     // ONE ADDRESS NET PER PORT (the URAM contract): write and read share port A's
     // muxed address; port B is the second read stream.
@@ -257,7 +270,7 @@ module kv_bank #(
     xpm_memory_tdpram #(
         .ADDR_WIDTH_A($clog2(HROWS)), .ADDR_WIDTH_B($clog2(HROWS)),
         .BYTE_WRITE_WIDTH_A(HEAD_DIM*KBITS), .BYTE_WRITE_WIDTH_B(HEAD_DIM*KBITS),
-        .CLOCKING_MODE("common_clock"), .MEMORY_PRIMITIVE("ultra"),
+        .CLOCKING_MODE("common_clock"), .MEMORY_PRIMITIVE(MEM_PRIMITIVE),
         .MEMORY_SIZE(HEAD_DIM*KBITS*HROWS),
         .READ_DATA_WIDTH_A(HEAD_DIM*KBITS), .READ_DATA_WIDTH_B(HEAD_DIM*KBITS),
         .READ_LATENCY_A(1), .READ_LATENCY_B(1),
@@ -326,8 +339,8 @@ module kv_bank #(
             case (wst)
                 W_IDLE: if (wq_start) begin
                     w_layer <= wq_layer; w_kv <= wq_kv; w_head <= wq_head; w_pos <= wq_pos;
-                    w_pbase <= ((wq_layer*2 + {3'b0,wq_kv})*NHEAD + {2'b0,wq_head})*TMAX
-                                + {3'b0,wq_pos};
+                    w_pbase <= ((wq_layer*2 + {3'b0,wq_kv})*NHEAD + wq_head)*TMAX
+                                + wq_pos;
                     minv <= 32'sh7FFFFFFF; maxv <= 32'sh80000000;
                     qm_v <= 1'b0;
                     w_vi <= 0; wst <= W_COLL;
@@ -408,7 +421,7 @@ module kv_bank #(
                     r_ecnt  <= 0;
                     r_v0    <= 1'b0;
                     r_pbase <= ((rd_layer*2 + {3'b0,rd_kv})*NHEAD
-                                 + {2'b0,rd_head})*TMAX;
+                                 + rd_head)*TMAX;
                     rst_st <= R_RUN;
                 end
                 R_RUN: begin
@@ -438,7 +451,7 @@ module kv_bank #(
                     r2_ecnt  <= 0;
                     r2_v0    <= 1'b0;
                     r2_pbase <= ((rd2_layer*2 + {3'b0,rd2_kv})*NHEAD
-                                  + {2'b0,rd2_head})*TMAX;
+                                  + rd2_head)*TMAX;
                     rst2_st <= R_RUN;
                 end
                 R_RUN: begin

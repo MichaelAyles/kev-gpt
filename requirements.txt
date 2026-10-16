@@ -13,3 +13,7 @@ tiktoken>=0.5
 
 # Dev/test only.
 pytest>=7.0
+
+# Genesys2 board tooling: sends the weight image over the UART loader
+# (fabric/genesys2/send_weights.py). Only needed for real-hardware bring-up.
+pyserial>=3.5

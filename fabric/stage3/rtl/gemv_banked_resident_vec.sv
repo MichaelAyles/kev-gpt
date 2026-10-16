@@ -1,11 +1,27 @@
 // -----------------------------------------------------------------------------
 // gemv_banked_resident_vec — gemv_banked_resident with a P-WIDE boundary.
 //
-// The resident MAC core is untouched (one wide URAM word = LANES nibbles/cycle).
-// What changes is the BOUNDARY: act feed accepts P INT8 lanes per write, and
-// readback returns P INT32 outputs per address. With the boundary the sequencer's
-// G_AQ (act-quant) feeds in ceil(K/P) cycles and G_RB drains in ceil(M/P) — the
-// boundary phases were ~16k of the 50,324 cyc/token at P=8.
+// The resident MAC core's STRUCTURE is untouched (one wide URAM word = LANES
+// weight lanes/cycle); its LANE WIDTH is now a parameter (WBW, default 4 —
+// every existing NLAYER=4/D=128/.../checkpoint-C build instantiates this
+// module without overriding WBW, so every one of those builds is byte-for-
+// byte unchanged). Generalized for the ASR accelerator work (gen2asr/
+// ASR-ACCELERATOR-OP-SEQUENCE.md's "INT4-specific compute, not just
+// storage" finding): none of ASR's transformer weights are INT4-QAT'd like
+// checkpoint C's, so a real accelerator build needs this core to also do
+// INT8 weight x INT8 activation MACs, not only INT4 x INT8. WBW=8 doubles
+// WBITS (and therefore weight_bank_tdp's real BRAM/URAM footprint per
+// LANES-group — an honest resource cost, not free) in exchange for holding
+// full INT8 weight precision instead of scale-and-clip-to-INT4. See
+// fabric/stage3/run_resident_banked_vec.py for the bit-exact gate (both
+// WBW=4 regression and the new WBW=8 case) before trusting either in real
+// hardware.
+//
+// What changes vs. gemv_banked_resident is the BOUNDARY: act feed accepts P
+// INT8 lanes per write, and readback returns P INT32 outputs per address.
+// With the boundary the sequencer's G_AQ (act-quant) feeds in ceil(K/P)
+// cycles and G_RB drains in ceil(M/P) — the boundary phases were ~16k of the
+// 50,324 cyc/token at P=8.
 //
 // Activations are banked wide-word, like every sequencer scratch:
 //     xmem row r holds P consecutive INT8 acts (lane l = bits [l*8 +: 8])
@@ -19,24 +35,34 @@
 `timescale 1ns / 1ps
 
 module gemv_banked_resident_vec #(
-    parameter integer LANES  = 128,       // PE lanes = nibbles per wide word (pow2)
+    parameter integer LANES  = 128,       // PE lanes = weight elements per wide word (pow2)
+    parameter integer WBW    = 4,         // weight bit-width per lane (4=INT4, checkpoint C's
+                                          // scheme; 8=INT8, new -- see header). Activations
+                                          // stay INT8 either way (xsel/xrow width unchanged).
     parameter integer P      = 8,         // boundary width (P divides LANES, KMAX, MMAX)
     parameter integer MMAX   = 1024,      // max output rows of any single layer
     parameter integer KMAX   = 1024,      // max reduction length of any single layer
+    // width of gdone (below): must hold 0..GROUPS inclusive (GROUPS=ceil(MMAX/
+    // LANES)) -- see gdone's own comment. Derived, not hardcoded, so it scales
+    // automatically with whatever MMAX/LANES a caller instantiates.
+    parameter integer GDONE_W = $clog2((MMAX + LANES - 1) / LANES + 1),
     parameter integer WWORDS = 25600,     // resident capacity in wide words
     parameter integer RLAT   = 2,         // read->mac pipeline depth (cycles)
-    parameter integer K2     = 0          // doc-7 R3: 2 K-steps/cycle via the URAM's
+    parameter integer K2     = 0,         // doc-7 R3: 2 K-steps/cycle via the URAM's
                                           // SECOND read port (free at N=1; the TDP claim
                                           // is silicon-proven by split-brain). Integer
                                           // associativity keeps the accumulate BIT-EXACT
                                           // (lane sums peak ~2^20, no mid-sum saturation).
+    // Passed straight through to weight_bank_tdp -- see that module for why
+    // "block" (Genesys2, no URAM on that part) is not a capability downgrade.
+    parameter               MEM_PRIMITIVE = "ultra"
 ) (
     input  wire                          clk,
     input  wire                          rst,
     input  wire [$clog2(MMAX+1)-1:0]     m_count,
     input  wire [$clog2(KMAX+1)-1:0]     k_count,
     input  wire [$clog2(WWORDS)-1:0]     w_base,
-    // one-time load: 32-bit chunks assembled into LANES*4-bit wide words
+    // one-time load: 32-bit chunks assembled into LANES*WBW-bit wide words
     input  wire                          ld_rst,
     input  wire                          w_we,
     input  wire [31:0]                   w_data,
@@ -48,8 +74,16 @@ module gemv_banked_resident_vec #(
     output reg                           done,
     // committed-group count (groupwise RB overlap): increments the cycle group
     // g's ymem word commits, so the host may drain rows of groups < gdone while
-    // the MAC computes the next group. Reset on start.
-    output reg  [3:0]                    gdone,
+    // the MAC computes the next group. Reset on start. Width is GDONE_W (below,
+    // derived from GROUPS=ceil(MMAX/LANES)) -- a hardcoded 4 bits (max 15) here
+    // silently wrapped and deadlocked the consumer's row-issue gate (sequencer_
+    // vec.sv's G_RB, "ci>>GRPSH < gv_gdone") for any single GEMV call needing
+    // >=16 groups (e.g. D_MLP=1024 at LANES=64 needs exactly 16) -- found via a
+    // real hang while gating weight_loader_ddr against a larger candidate
+    // checkpoint; never triggered by the KV260 deployment (LANES=128, <=8
+    // groups) or Genesys2 Option A's real shape (D_MLP=512, <=8 groups at
+    // LANES=64) -- see fabric/genesys2/PORT-NOTES.md.
+    output reg  [GDONE_W-1:0]            gdone,
     // readback: P INT32 outputs per address (2-cycle latency)
     input  wire [$clog2(MMAX/P)-1:0]     rd_addr,
     output reg  [P*32-1:0]               y_out,
@@ -60,12 +94,37 @@ module gemv_banked_resident_vec #(
     // port-B reads emb_addr instead of grp_base+kc. The DP=1 column-parity bank
     // returns the (even,odd) word PAIR of emb_addr's column one cycle later on
     // emb_pair = {word@(addr|1), word@(addr&~1)} — 2*WBITS bits = 8 embed rows
-    // at LANES=256. The sequencer addresses embeds from even pair bases.
+    // at LANES=256/WBW=4 (2*WBITS = 2*LANES*WBW; the embed table's own row
+    // width is fixed at 8 bits/element regardless of WBW — a WBW=8 GEMV
+    // weight core still stores 8-bit embed rows the same way, so this port's
+    // width scales with WBW purely because it's a straight passthrough of
+    // two WBITS-wide weight_bank_tdp words, not because embed rows changed).
     input  wire                          emb_sel,
     input  wire [$clog2(WWORDS)-1:0]     emb_addr,
-    output wire [LANES*8-1:0]            emb_pair
+    output wire [2*LANES*WBW-1:0]        emb_pair,
+    // ---- weight-bank diagnostic readback (fixation-word investigation, item 6:
+    // "snapshot the suspect rows directly" -- see FIXATION-WORD-POSTMORTEM.md).
+    // weight_bank_tdp's port A is otherwise COMPLETELY UNUSED for reading in
+    // this instantiation (tied to raddr_a=0, rword_a left unconnected below) --
+    // nothing in the compute path (MAC accumulation reads port B only, via
+    // waddr/wword_rd) ever touches port A's read side. That makes it a free,
+    // zero-risk tap: driving it from a CPU-controlled address and observing
+    // the result can never perturb inference, at any time, running or idle.
+    //
+    // K2=1 (this design's own deployed config) puts weight_bank_tdp in DP=1
+    // column-parity-split mode: raddr_a's LSB is IGNORED by the memory --
+    // rword_a always returns the EVEN-indexed bank, rword1_a always the ODD
+    // one, at the pair index raddr_a[WAW-1:1], regardless of raddr_a[0].
+    // Exposing only rword_a (as an earlier version of this port did) silently
+    // returns the wrong row's data for every odd address -- caught by item
+    // 6's own simulation gate before real hardware (see
+    // FIXATION-WORD-POSTMORTEM.md item 6's verification note). Fixed the
+    // same way emb_pair (above) already solves this exact problem: expose
+    // BOTH halves, let the consumer pick by address parity.
+    input  wire [$clog2(WWORDS)-1:0]     wbdiag_addr,
+    output wire [2*LANES*WBW-1:0]        wbdiag_pair   // {odd(rword1_a), even(rword_a)}
 );
-    localparam integer WBITS  = LANES*4;
+    localparam integer WBITS  = LANES*WBW;
     localparam integer YBITS  = LANES*32;
     localparam integer LSH    = $clog2(LANES);
     localparam integer LSHP   = $clog2(P);
@@ -107,11 +166,17 @@ module gemv_banked_resident_vec #(
     // (rword_b) and kc+1 (rword1_b); grp_base and k_count are always even here.
     wire [$clog2(WWORDS)-1:0] waddr;
     wire [WBITS-1:0] wword_rd, wword2_rd;
-    weight_bank_tdp #(.LANES(LANES), .WWORDS(WWORDS), .DP((K2 != 0) ? 1 : 0)) u_wb (
+    // WBITS passed explicitly (was implicit/default before WBW existed) --
+    // weight_bank_tdp's own WBITS default is LANES*4, which only matches
+    // this module's WBITS=LANES*WBW by coincidence at WBW=4. Without this,
+    // WBW=8 would declare wword_rd/wword2_rd at LANES*8 bits while the bank
+    // still drove only LANES*4 -- a real width mismatch, not a style choice.
+    weight_bank_tdp #(.LANES(LANES), .WBITS(WBITS), .WWORDS(WWORDS), .DP((K2 != 0) ? 1 : 0),
+                       .MEM_PRIMITIVE(MEM_PRIMITIVE)) u_wb (
         .clk(clk), .clk2x(clk),
         .ld_rst(ld_rst), .w_we(w_we), .w_data(w_data),
         .raddr_b(waddr), .rword_b(wword_rd), .rword1_b(wword2_rd),
-        .raddr_a({$clog2(WWORDS){1'b0}}), .rword_a(), .rword1_a());
+        .raddr_a(wbdiag_addr), .rword_a(wbdiag_pair[WBITS-1:0]), .rword1_a(wbdiag_pair[2*WBITS-1:WBITS]));
 
     // ---- run FSM + RLAT-deep read/mac pipeline -------------------------------
     localparam [1:0] IDLE = 2'd0, RUN = 2'd1, FIN = 2'd2;
@@ -149,16 +214,26 @@ module gemv_banked_resident_vec #(
     wire                 mac_v  = v_p[RLAT-1];
     wire                 mac_v2 = v2_p[RLAT-1];
 
-    // ---- addend stage (timing): the MAC front-end (act lane-mux, INT4xINT8
-    // nibble products, K2 mux) was 13 logic levels feeding the accb carry chain
+    // ---- addend stage (timing): the MAC front-end (act lane-mux, WBWxINT8
+    // lane products, K2 mux) was 13 logic levels feeding the accb carry chain
     // — the @5ns worst path. Register the per-lane addend (prodL + prod2L) one
     // cycle ahead so the accumulate cycle is ONLY accb <= accb + sext(addend_r).
     // Bit-exact: same addends, same order, one cycle later in absolute time —
     // kmac now counts in the ADD stage, so the end-of-group sample of accb into
     // ymem (kmac == k_count) shifts with it automatically (+1 cyc per group).
-    // |w*x| <= 1024 each, so prodL + prod2L is in [-2032, 2048] — ADW=14 holds
-    // it exactly (two's-complement truncate then sign-extend is lossless).
-    localparam integer ADW = 14;
+    //
+    // ADW derivation (generalized from the original WBW=4-only "|w*x| <= 1024
+    // each, so prodL + prod2L is in [-2032, 2048] -- ADW=14 holds it exactly"):
+    // signed WBW-bit weight has max magnitude 2^(WBW-1); signed INT8 act has
+    // max magnitude 2^7=128; one product's max magnitude is therefore
+    // 2^(WBW-1)*2^7 = 2^(WBW+6); K2 sums two such products, doubling the bound
+    // to 2^(WBW+7); representing a signed value of that max magnitude exactly
+    // needs WBW+8 bits. +2 bits of margin (matching the original WBW=4 choice
+    // of 14 over the tight bound of 12) gives WBW+10 -- reproduces ADW=14 at
+    // WBW=4 exactly, so this is a generalization, not a behavior change, for
+    // every existing build. Two's-complement truncate then sign-extend stays
+    // lossless at any WBW under this bound.
+    localparam integer ADW = WBW + 10;
     reg [LANES*ADW-1:0]  addend_r;
     reg                  add_v, add_v2;
 
@@ -197,14 +272,14 @@ module gemv_banked_resident_vec #(
             xrow2 = xrow2_p[RLAT-1];
             xsel2 = xrow2[xl2_p[RLAT-1]*8 +: 8];
             for (L = 0; L < LANES; L = L + 1) begin
-                prodL  = $signed(wsel[L*4 +: 4]) * xsel;
-                prod2L = mac_v2 ? $signed(wsel2[L*4 +: 4]) * xsel2 : 32'sd0;
+                prodL  = $signed(wsel[L*WBW +: WBW]) * xsel;
+                prod2L = mac_v2 ? $signed(wsel2[L*WBW +: WBW]) * xsel2 : 32'sd0;
                 addend_r[L*ADW +: ADW] <= prodL + prod2L;  // fits ADW, lossless
             end
         end
 
         if (rst) begin
-            state <= IDLE; done <= 1'b0; gdone <= 4'd0;
+            state <= IDLE; done <= 1'b0; gdone <= {GDONE_W{1'b0}};
             g <= 0; kc <= 0; kmac <= 0; accb <= {YBITS{1'b0}}; grp_base <= 0;
             for (i = 0; i < RLAT; i = i + 1) begin v_p[i] <= 1'b0; v2_p[i] <= 1'b0; end
             add_v <= 1'b0; add_v2 <= 1'b0;
@@ -214,7 +289,7 @@ module gemv_banked_resident_vec #(
                     done <= 1'b0;
                     if (start) begin
                         g <= 0; kc <= 0; kmac <= 0; accb <= {YBITS{1'b0}};
-                        gdone <= 4'd0;
+                        gdone <= {GDONE_W{1'b0}};
                         grp_base <= w_base;
                         for (i = 0; i < RLAT; i = i + 1) begin
                             v_p[i] <= 1'b0; v2_p[i] <= 1'b0;
@@ -237,7 +312,7 @@ module gemv_banked_resident_vec #(
                     end
                     if (kmac == k_count) begin
                         ymem[g[$clog2(GROUPS)-1:0]] <= accb;
-                        gdone <= gdone + 4'd1;
+                        gdone <= gdone + 1'b1;
                         if (g == gcount - 1) state <= FIN;
                         else begin
                             g <= g + 1'b1; kc <= 0; kmac <= 0;

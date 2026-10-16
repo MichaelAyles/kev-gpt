@@ -36,7 +36,13 @@ module weight_bank_tdp #(
     // (TDP UltraRAM has only two ports, both already used). The SYNTHESIS branch
     // here is unchanged (single read); the clk2x dual-beat read lands in Stage 1b.
     parameter integer DP     = 0,
-    parameter integer WBITS  = LANES*4
+    parameter integer WBITS  = LANES*4,
+    // Genesys2 (Kintex-7) port: no URAM primitive on that part at all, so the
+    // weight image must fall back to ordinary BRAM TDP. "block" is a strictly
+    // synthesizable XPM_MEMORY_TDPRAM choice (7-series BRAM36 is natively
+    // true-dual-port), not a capability downgrade; the KV260 default stays
+    // "ultra" so its existing gates/bitstream are untouched.
+    parameter               MEM_PRIMITIVE = "ultra"
 ) (
     input  wire                          clk,
     input  wire                          clk2x,    // 2x clk (DP=1 silicon; unused in sim model)
@@ -121,7 +127,7 @@ module weight_bank_tdp #(
                 xpm_memory_tdpram #(
                     .ADDR_WIDTH_A(WAW2), .ADDR_WIDTH_B(WAW2),
                     .BYTE_WRITE_WIDTH_A(BANKW), .BYTE_WRITE_WIDTH_B(BANKW),
-                    .CLOCKING_MODE("common_clock"), .MEMORY_PRIMITIVE("ultra"),
+                    .CLOCKING_MODE("common_clock"), .MEMORY_PRIMITIVE(MEM_PRIMITIVE),
                     .MEMORY_SIZE(BANKW*WHALF),
                     .READ_DATA_WIDTH_A(BANKW), .READ_DATA_WIDTH_B(BANKW),
                     .READ_LATENCY_A(1), .READ_LATENCY_B(1),
@@ -140,7 +146,7 @@ module weight_bank_tdp #(
                 xpm_memory_tdpram #(
                     .ADDR_WIDTH_A(WAW2), .ADDR_WIDTH_B(WAW2),
                     .BYTE_WRITE_WIDTH_A(BANKW), .BYTE_WRITE_WIDTH_B(BANKW),
-                    .CLOCKING_MODE("common_clock"), .MEMORY_PRIMITIVE("ultra"),
+                    .CLOCKING_MODE("common_clock"), .MEMORY_PRIMITIVE(MEM_PRIMITIVE),
                     .MEMORY_SIZE(BANKW*WHALF),
                     .READ_DATA_WIDTH_A(BANKW), .READ_DATA_WIDTH_B(BANKW),
                     .READ_LATENCY_A(1), .READ_LATENCY_B(1),
@@ -166,7 +172,7 @@ module weight_bank_tdp #(
                 .ADDR_WIDTH_A(WAW), .ADDR_WIDTH_B(WAW),
                 .BYTE_WRITE_WIDTH_A(BANKW), .BYTE_WRITE_WIDTH_B(BANKW),
                 .CLOCKING_MODE("common_clock"),
-                .MEMORY_PRIMITIVE("ultra"),
+                .MEMORY_PRIMITIVE(MEM_PRIMITIVE),
                 .MEMORY_SIZE(BANKW*WWORDS),
                 .READ_DATA_WIDTH_A(BANKW), .READ_DATA_WIDTH_B(BANKW),
                 .READ_LATENCY_A(1), .READ_LATENCY_B(1),

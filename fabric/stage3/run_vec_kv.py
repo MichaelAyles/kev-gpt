@@ -34,16 +34,23 @@ RTL_FILES = ["sequencer_vec.sv", "kv_bank.sv", "vec_attn_w.sv", "layernorm_vec.s
 def _encode(meta_path, text):
     m = json.load(open(meta_path))
     stoi = m["stoi"]
+    if m.get("tokenizer") == "word":
+        from model.word_data import tokenize, UNK
+        toks = tokenize(text.lower()) or [UNK]
+        return [stoi.get(t, stoi[UNK]) for t in toks]
     return [stoi.get(c, 0) for c in text]
 
 
 def _decode(meta_path, ids):
     m = json.load(open(meta_path))
     itos = {int(k): v for k, v in m["itos"].items()}
+    if m.get("tokenizer") == "word":
+        from model.word_data import decode
+        return decode(ids, itos)
     return "".join(itos.get(int(i), "?") for i in ids)
 
 
-def _sample_stream(gold_seq, prompt_ids, ngen, seed):
+def _sample_stream(gold_seq, prompt_ids, ngen, seed, vocab):
     """The on-chip-sampling golden, mirroring the TB pass schedule EXACTLY.
 
     The TB runs NPASS = PLEN+NGEN-1 passes (pos = 0..NPASS-1) and dumps the tok_out of
@@ -55,7 +62,7 @@ def _sample_stream(gold_seq, prompt_ids, ngen, seed):
     Sampling perturbs the SAME Q6.25 head logits the fabric argmax sees (step_head_q25).
     Returns the NGEN sampled tokens."""
     gold_seq.reset()
-    rng = gumbel.GumbelRng(seed)
+    rng = gumbel.GumbelRng(seed, vocab=vocab)
     # prompt passes 0..PLEN-2: greedy, output discarded (sampling not yet enabled)
     for tok in prompt_ids[:-1]:
         gold_seq.step_head_q25(int(tok))
@@ -76,14 +83,24 @@ def run(sim_dir, prompt_ids, ngen, P=8, lanes=16, tmax=256,
     assert plen + ngen - 1 <= tmax, "prompt+gen must fit the KV window"
 
     p, cfg = seq_ref.build(npz)
+
+    # Derived from the actual checkpoint (was hardcoded to the deployed
+    # KV260 shape: nlayer=4, d=256, nhead=4, vocab=193) -- see
+    # fabric/genesys2/PORT-NOTES.md. HEAD_DIM is not derived; this port's
+    # sizing decision keeps it fixed at sequencer_vec's own default (64).
+    d_model = p["tok_emb"].shape[1]
+    nlayer = len(p["blocks"])
+    nhead = int(p["n_head"])
+    vocab = p["tok_emb"].shape[0]
+
     gold_seq = IntKVQSequencer(p, cfg, kbits=8, vbits=8, rotate=False, divfree=True)
     if seed == 0:
         gold = gold_seq.generate_greedy(list(prompt_ids), ngen)[plen:]
     else:
-        gold = _sample_stream(gold_seq, list(prompt_ids), ngen, seed)
+        gold = _sample_stream(gold_seq, list(prompt_ids), ngen, seed, vocab)
 
     iseq = seq_ref.IntSequencer(p, cfg)
-    write_mems_wideword(sim_dir, iseq, lanes, 4, P)
+    write_mems_wideword(sim_dir, iseq, lanes, nlayer, P)
     # gelu_lut2 (the paired-lane core vec_gelu now uses) reads the even/odd split
     with open(os.path.join(sim_dir, "gelu_lut.mem")) as fh:
         lut = [ln.strip() for ln in fh if ln.strip()]
@@ -115,7 +132,9 @@ def run(sim_dir, prompt_ids, ngen, P=8, lanes=16, tmax=256,
     vvp = os.path.join(sim_dir, "sim.vvp")
     defs = [f"-DPVAL={P}", f"-DLVAL={lanes}", f"-DWROMN={wrom_n}",
             f"-DTMAXVAL={tmax}", f"-DPLEN={plen}", f"-DNGEN={ngen}",
-            f"-DSEEDVAL={seed & 0xFFFFFFFF}"]
+            f"-DSEEDVAL={seed & 0xFFFFFFFF}",
+            f"-DDVAL={d_model}", f"-DNLAYERVAL={nlayer}",
+            f"-DNHEADVAL={nhead}", f"-DVOCABVAL={vocab}"]
     if os.environ.get("KVDBG"):
         defs.append("-DKVDBG")
     if os.environ.get("KVSTOP"):

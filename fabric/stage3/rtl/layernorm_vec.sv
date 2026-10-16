@@ -27,7 +27,13 @@
 `timescale 1ns / 1ps
 
 module layernorm_vec #(
-    parameter integer P = 8                 // vector lanes (D must be divisible by P)
+    parameter integer P = 8,                // vector lanes (D must be divisible by P)
+    // Genesys2 port: the deployed KV260 build only ever ran D=256. The mean/var
+    // divide below is an exact arithmetic right-shift by $clog2(D) (see D_SH),
+    // which is only bit-exact for a power-of-2 D -- every embedding width this
+    // project trains at (128, 256, ...) is one; a non-power-of-2 D would need a
+    // real divider here, not a parameter change.
+    parameter integer D = 256
 ) (
     input  wire                  clk,
     input  wire                  rst,
@@ -39,8 +45,8 @@ module layernorm_vec #(
     output reg  [P*64-1:0]       y_out,         // P x Q.22 (each sign-extended into 64b)
     output reg                   done
 );
-    localparam integer D        = 256;
     localparam integer ROWS     = D / P;        // rows of P
+    localparam integer D_SH     = $clog2(D);    // exact /D shift; D must be pow2
     localparam integer QX       = 25;
     localparam integer G_FRAC   = 20;
     localparam integer A_FRAC   = 26;
@@ -228,9 +234,9 @@ module layernorm_vec #(
                 end
                 // ---- algebraic centered sum (exact identity), 2-stage ----------
                 S_VAR: begin
-                    mean  <= sum >>> 8;                                  // /256, Q6.25
-                    p_ct  <= $signed(sum >>> 8) * $signed(sum);          // mean*sum
-                    p_mq  <= $signed(sum >>> 8) * $signed(sum >>> 8);    // mean^2
+                    mean  <= sum >>> D_SH;                               // /D, Q6.25
+                    p_ct  <= $signed(sum >>> D_SH) * $signed(sum);       // mean*sum
+                    p_mq  <= $signed(sum >>> D_SH) * $signed(sum >>> D_SH); // mean^2
                     state <= S_VAR2;
                 end
                 S_VAR2: begin
@@ -240,8 +246,8 @@ module layernorm_vec #(
                     state <= S_MSB;
                 end
                 S_MSB: begin
-                    var_q <= ssq >>> 8;                                  // Q12.50
-                    A <= ($signed(ssq >>> 8) >>> (VAR_FRAC - A_FRAC)) + $signed(EPS_A);
+                    var_q <= ssq >>> D_SH;                               // Q12.50
+                    A <= ($signed(ssq >>> D_SH) >>> (VAR_FRAC - A_FRAC)) + $signed(EPS_A);
                     state <= S_SEED;       // msb_c combinational off A; sampled next state
                 end
                 S_SEED: begin

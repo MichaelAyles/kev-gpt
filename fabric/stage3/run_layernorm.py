@@ -96,22 +96,36 @@ def rsqrt_int(A: int) -> int:
 
 def _ln_int_quantized(X, G):
     """Core integer LayerNorm on already-quantized inputs.
-    X: list/array of int Q6.25 (len 256). G: int Q4.20 gamma (len 256).
-    Returns (Y_out_ints Q.OUT_FRAC, mean, var, A, Yr) — pure integer arithmetic."""
+    X: list/array of int Q6.25 (len d). G: int Q4.20 gamma (len d).
+    Returns (Y_out_ints Q.OUT_FRAC, mean, var, A, Yr) — pure integer arithmetic.
+
+    d = len(X) is derived from the input, not the module-level D=256 constant
+    (which stays what run_layernorm.py's own standalone _validate() self-test
+    exercises) -- the Genesys2 port trains smaller embedding widths, and this
+    is the function the shared golden reference (seq_ref.py's _ln, used by
+    model.goformer_kvq.IntKVQSequencer) actually calls per-token. The mean/var
+    divide is an exact arithmetic right-shift (matching layernorm_vec.sv's own
+    `sum >>> $clog2(D)`), which is only bit-exact for a power-of-2 d — every
+    embedding width this project trains at (128, 256, ...) is one."""
     X = [int(v) for v in X]
     G = [int(v) for v in G]
+    d_model = len(X)
+    assert d_model & (d_model - 1) == 0, (
+        f"_ln_int_quantized: d={d_model} is not a power of 2; the shift-based "
+        "mean/var divide (matching layernorm_vec.sv) is only exact for one")
+    d_shift = d_model.bit_length() - 1
     S = sum(X)                                     # Q6.25, up to ~40 bits
-    mean = S >> 8                                   # /256 (arith shift / floor)
+    mean = S >> d_shift                             # /d (arith shift / floor)
     d = [v - mean for v in X]                       # Q6.25
     SS = sum(di * di for di in d)                   # Q12.50
-    var = SS >> 8                                   # /256 -> Q12.50
+    var = SS >> d_shift                             # /d -> Q12.50
     A = (var >> (VAR_FRAC - A_FRAC)) + EPS_A        # Q.26
     if A <= 0:
         A = 1
     Yr = rsqrt_int(A)                               # Q.26
     sh = (QX + Y_FRAC + G_FRAC) - OUT_FRAC          # 25+26+20-22 = 49
     out = []
-    for i in range(D):
+    for i in range(d_model):
         t = d[i] * Yr                               # Q(QX+Y_FRAC)
         t = t * G[i]                                # Q(QX+Y_FRAC+G_FRAC)
         yv = t >> sh if sh >= 0 else t << (-sh)     # arith shift -> Q.OUT_FRAC

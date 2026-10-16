@@ -1,0 +1,479 @@
+<title>Long-Form Fidelity</title>
+<style>
+:root{
+  --bg:#F5F6F8; --surface:#FFFFFF; --surface-2:#EEF0F3;
+  --ink:#1C2129; --ink-muted:#5B6472; --ink-faint:#88909B;
+  --border:#DDE1E7; --border-soft:#E8EAED;
+  --accent-hw:#1E7F72; --accent-hw-bg:rgba(30,127,114,0.10); --accent-hw-bg-strong:rgba(30,127,114,0.16);
+  --accent-ref:#5B4B8A; --accent-ref-bg:rgba(91,75,138,0.09); --accent-ref-bg-strong:rgba(91,75,138,0.15);
+  --flag-mark-bg:rgba(201,138,31,0.28); --flag-mark-fg:#5C3F06;
+  --fix-mark-fg:#8B4B2E; --fix-underline:#C48257;
+  --clean:#2E7D4F;
+  --shadow: 0 1px 2px rgba(28,33,41,0.05), 0 4px 14px rgba(28,33,41,0.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#14171C; --surface:#1B1F26; --surface-2:#20252D;
+    --ink:#E7EAEF; --ink-muted:#9AA3B2; --ink-faint:#6C7684;
+    --border:#2A2F38; --border-soft:#242932;
+    --accent-hw:#4FD1C0; --accent-hw-bg:rgba(79,209,192,0.12); --accent-hw-bg-strong:rgba(79,209,192,0.20);
+    --accent-ref:#B7A3EC; --accent-ref-bg:rgba(183,163,236,0.12); --accent-ref-bg-strong:rgba(183,163,236,0.20);
+    --flag-mark-bg:rgba(240,180,41,0.30); --flag-mark-fg:#FCE3A6;
+    --fix-mark-fg:#E3A177; --fix-underline:#C48257;
+    --clean:#5FBE86;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 20px rgba(0,0,0,0.35);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#14171C; --surface:#1B1F26; --surface-2:#20252D;
+  --ink:#E7EAEF; --ink-muted:#9AA3B2; --ink-faint:#6C7684;
+  --border:#2A2F38; --border-soft:#242932;
+  --accent-hw:#4FD1C0; --accent-hw-bg:rgba(79,209,192,0.12); --accent-hw-bg-strong:rgba(79,209,192,0.20);
+  --accent-ref:#B7A3EC; --accent-ref-bg:rgba(183,163,236,0.12); --accent-ref-bg-strong:rgba(183,163,236,0.20);
+  --flag-mark-bg:rgba(240,180,41,0.30); --flag-mark-fg:#FCE3A6;
+  --fix-mark-fg:#E3A177; --fix-underline:#C48257;
+  --clean:#5FBE86;
+  --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 20px rgba(0,0,0,0.35);
+}
+
+*{box-sizing:border-box;}
+body{ background:var(--bg); color:var(--ink); font-family:'IBM Plex Sans',system-ui,-apple-system,sans-serif; line-height:1.5; }
+::selection{ background:var(--flag-mark-bg); }
+.wrap{ max-width:1180px; margin:0 auto; padding:56px 28px 80px; }
+
+header.top{ margin-bottom:40px; }
+.eyebrow{ font-family:'IBM Plex Mono',monospace; font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:var(--ink-faint); margin:0 0 10px; }
+h1{ font-family:'Fraunces',Georgia,serif; font-weight:600; font-size:clamp(32px,4.2vw,46px); margin:0 0 14px; letter-spacing:-0.01em; text-wrap:balance; color:var(--ink); }
+h2.sec{ font-family:'Fraunces',serif; font-size:22px; font-weight:600; margin:0 0 14px; }
+.dek{ font-size:16px; color:var(--ink-muted); max-width:70ch; margin:0 0 18px; }
+.provenance{ font-family:'IBM Plex Mono',monospace; font-size:12.5px; color:var(--ink-faint); display:flex; flex-wrap:wrap; gap:6px 18px; border-top:1px solid var(--border-soft); padding-top:16px; }
+.provenance b{ color:var(--ink-muted); font-weight:500; }
+
+.caveat{
+  background:var(--surface-2); border:1px solid var(--border); border-left:3px solid var(--accent-ref);
+  border-radius:8px; padding:14px 18px; font-size:13.5px; color:var(--ink-muted); margin-bottom:32px; max-width:80ch;
+}
+.caveat b{ color:var(--ink); }
+.caveat + .caveat{ margin-top:-20px; }
+
+.modeltag{ display:inline-flex; align-items:center; gap:6px; font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:600; padding:3px 9px; border-radius:5px; letter-spacing:0.01em; }
+.modeltag.hw{ background:var(--accent-hw-bg); color:var(--accent-hw); }
+.modeltag.ref{ background:var(--accent-ref-bg); color:var(--accent-ref); }
+.dot{ width:7px; height:7px; border-radius:50%; display:inline-block; }
+.dot.hw{ background:var(--accent-hw); }
+.dot.ref{ background:var(--accent-ref); }
+
+.stats-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:var(--border); border:1px solid var(--border); border-radius:12px; overflow:hidden; margin-bottom:18px; box-shadow:var(--shadow); }
+@media (max-width:820px){ .stats-grid{ grid-template-columns:repeat(2,1fr); } }
+.stat-tile{ background:var(--surface); padding:22px 20px; }
+.stat-tile .sweep-label{ font-family:'IBM Plex Mono',monospace; font-size:11px; text-transform:uppercase; letter-spacing:0.1em; color:var(--ink-faint); margin-bottom:10px; }
+.stat-tile .num{ font-family:'Fraunces',serif; font-size:30px; font-weight:600; line-height:1; font-variant-numeric:tabular-nums; margin-bottom:6px; }
+.stat-tile .num small{ font-size:14px; font-weight:500; color:var(--ink-faint); }
+.stat-tile.hw .num{ color:var(--accent-hw); }
+.stat-tile.ref .num{ color:var(--accent-ref); }
+.stat-tile .pct{ font-size:12.5px; color:var(--ink-muted); font-family:'IBM Plex Mono',monospace; }
+
+.runbook{ background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px 26px; margin-bottom:44px; box-shadow:var(--shadow); }
+.runbook ol{ margin:0; padding-left:22px; }
+.runbook li{ margin-bottom:18px; font-size:14px; color:var(--ink-muted); }
+.runbook li:last-child{ margin-bottom:0; }
+.runbook li b{ color:var(--ink); }
+.runbook pre{
+  background:var(--surface-2); border:1px solid var(--border-soft); border-radius:8px; padding:12px 14px;
+  overflow-x:auto; font-family:'IBM Plex Mono',monospace; font-size:12px; line-height:1.55; color:var(--ink);
+  margin:8px 0 0;
+}
+.runbook code{ font-family:'IBM Plex Mono',monospace; font-size:0.93em; background:var(--surface-2); padding:1px 5px; border-radius:4px; }
+
+.controls{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:14px; margin-bottom:22px; position:sticky; top:0; background:var(--bg); padding:14px 0; border-bottom:1px solid var(--border-soft); z-index:5; }
+.toggle{ display:inline-flex; align-items:center; gap:8px; font-size:13.5px; color:var(--ink-muted); cursor:pointer; user-select:none; }
+.toggle input{ accent-color:var(--fix-mark-fg); width:15px; height:15px; }
+.legend-strip{ display:flex; gap:16px; align-items:center; font-size:12.5px; color:var(--ink-faint); flex-wrap:wrap; }
+.legend-strip mark.flag{ background:var(--flag-mark-bg); color:var(--flag-mark-fg); padding:0 2px; border-radius:2px; }
+.legend-strip mark.fix{ background:transparent; color:var(--fix-mark-fg); text-decoration:underline; text-decoration-style:dashed; text-decoration-color:var(--fix-underline); text-underline-offset:3px; }
+
+.rowgroup{ margin-bottom:14px; }
+.rowmeta{ font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--ink-faint); margin:22px 0 8px; display:flex; gap:14px; align-items:baseline; }
+.rowmeta .seedno{ color:var(--ink-muted); font-weight:600; }
+
+.pair{ display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--border-soft); border:1px solid var(--border-soft); border-radius:10px; overflow:hidden; }
+@media (max-width:760px){ .pair{ grid-template-columns:1fr; } }
+
+.panel{ background:var(--surface); padding:18px 20px 20px; display:flex; flex-direction:column; }
+.panel-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; gap:10px; }
+.flagpill{ font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:600; letter-spacing:0.02em; padding:3px 8px; border-radius:20px; white-space:nowrap; }
+.flagpill.clean{ background:rgba(46,125,79,0.12); color:var(--clean); }
+.flagpill.flagged{ background:var(--flag-mark-bg); color:var(--flag-mark-fg); }
+.reason{ font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:var(--flag-mark-fg); margin-bottom:10px; line-height:1.4; }
+.story{ font-family:'Literata',Georgia,serif; font-size:14.5px; line-height:1.68; color:var(--ink); flex:1; }
+.story mark.flag{ background:var(--flag-mark-bg); color:var(--flag-mark-fg); padding:0 1px; border-radius:2px; }
+.story mark.fix{ background:transparent; color:var(--fix-mark-fg); font-weight:600; text-decoration:underline; text-decoration-style:dashed; text-decoration-color:var(--fix-underline); text-underline-offset:3px; }
+.panel-foot{ margin-top:12px; padding-top:10px; border-top:1px solid var(--border-soft); font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--ink-faint); display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px; }
+
+footer.endnote{ margin-top:56px; padding-top:20px; border-top:1px solid var(--border-soft); font-size:12.5px; color:var(--ink-faint); max-width:74ch; }
+#empty-state{ display:none; padding:60px 0; text-align:center; color:var(--ink-faint); font-size:14px; }
+</style>
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=Literata:opsz,wght@6..72,400;6..72,500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<div class="wrap">
+
+  <header class="top">
+    <p class="eyebrow">Genesys2 &middot; ~128-word stories, real hardware vs. published reference</p>
+    <h1>Long-Form Fidelity</h1>
+    <p class="dek">kev-gpt's actual deployed weights on the
+      (<span class="modeltag hw"><span class="dot hw"></span>real Genesys2 board</span>), 2-4M params, INT4/INT8
+      quantized, streamed over UART, generating stories near the model's own 128-token context limit &mdash;
+      set against <span class="modeltag ref"><span class="dot ref"></span>SauravP97/tiny-stories-19M</span>, a
+      published 19M-parameter FP reference trained on the same TinyStories-style corpus. Every draw, not a
+      curated subset.</p>
+    <div class="provenance">
+      <span><b>Detector</b> model.filter_synth_corpus.is_degenerate, min_bigram_recurrence=6</span>
+      <span><b>Draws</b> 5 &times; 5 prompts, 25 total each side</span>
+      <span><b>Hardware config</b> on-chip Gumbel-max, TEMP=0.45, MAX_GEN_LEN=124/STORY_SENTENCES=20 (benchmark
+        override, see runbook)</span>
+      <span><b>Reference config</b> temp=0.7, top_k=50, max_new_tokens=180</span>
+      <span><b>Board weights</b> data/ckpt_stepC_d128_v16384.qat.pt (INT4/INT8, 2-4M params)</span>
+      <span><b>Reference weights</b> SauravP97/tiny-stories-19M (FP, 19M params)</span>
+    </div>
+  </header>
+
+  <div class="caveat">
+    <b>This dataset caught two consecutive real bugs, both now fixed (2026-09-15).</b> An earlier capture
+    (prompt "a little girl", real_seed <code>0x2d7acf1a</code>) read "...lily loved her <b>new new new new
+    new</b> magnet..." &mdash; a repetition guard's own substitution logic never excluded <code>last_tok</code>,
+    so it kept landing right back on the word it was trying to avoid. Fixed in <code>57ce25a</code> &mdash; but
+    a second capture (prompt "the dog ran", real_seed <code>0x4361ec7e</code>) immediately surfaced a subtler
+    version of the same class of bug: "the dog" recurring 10&times; because the FIRST fix's own re-validation
+    loop could <b>oscillate</b> between two already-rejected candidates ("dog" &#8596; "cat") in stories with
+    multiple genuinely recurring nouns, landing back on the original word by pass-count parity. Fixed in
+    <code>4c3a398</code> by accumulating every rejected candidate across passes, not just the single most
+    recent one. Both root-caused via a real-hardware guard trace (not RTL simulation, which structurally
+    can't see this: the guards are pure firmware, never touch RTL) &mdash; full write-ups in
+    <code>fabric/genesys2/PORT-NOTES.md</code>. The hardware panels below are a
+    <b>fresh recapture after both fixes</b> (same 5&times;5 methodology): <b>0/25 flagged</b> at any
+    <code>min_bigram_recurrence</code> threshold, down from 4-6/25 on the same methodology before this second
+    fix. The original pre-fix samples remain preserved in <code>PORT-NOTES.md</code> and git history, not
+    silently dropped.
+  </div>
+  <div class="caveat">
+    <b>The 0/25-vs-5/25 gap is not a capability win.</b> It does not mean kev-gpt's 2-4M-parameter model is
+    more fluent than the 19M-parameter reference. Three things stack in kev-gpt's favor here, and none of
+    them speak to underlying model quality: (1) kev-gpt's output is actively repaired at inference time by
+    three firmware repetition guards (mechanism and cost in the panel below) &mdash; the reference's output
+    is raw, unedited HF <code>generate()</code> sampling with no equivalent correction; the fair comparison
+    would be guards-on vs. guards-on, and the reference has no guards to turn on. (2) Length isn't matched
+    (hw averages 108.6 words, reference 145.8 &mdash; more words means more chances for the detector to
+    trip). (3) <code>min_bigram_recurrence=6</code> was calibrated by inspecting THIS benchmark's own
+    hardware distribution (see the threshold caveat below), not chosen independently for both sides. A
+    held-out check backs this up directly: this project's own earlier 5&times;5 sweep on ~60-word samples
+    found the guarded firmware and an UNGUARDED baseline build statistically tied (7/25 vs 8/25 flagged)
+    &mdash; the guards eliminate the specific narrow patterns they target, but do not change kev-gpt's
+    underlying tendency to loop, which two separate follow-up attempts (60,000-iteration extended training,
+    distillation from an 8.7&times;-larger D=384 teacher) also failed to close. Full record in
+    <code>PORT-NOTES.md</code>'s "Repetition guards" section and this project's
+    <code>project-kevgpt-word-vocab-quality-ceiling</code> history.
+  </div>
+  <div class="caveat">
+    <b>Not an apples-to-apples parameter comparison.</b> kev-gpt is a 2-4M-parameter model that lives entirely
+    in FPGA on-chip memory by design (README's own "compression is the joke and the optimization"); the
+    reference is a conventional 19M-parameter FP model with no such constraint. This benchmark measures how
+    each behaves at a length near <i>kev-gpt's own</i> hard context ceiling (<code>KEVGPT_TMAX=128</code>
+    tokens) &mdash; not a fair fight on model capacity, a check of what kev-gpt's real hardware output looks
+    like at the length it's actually built to produce.
+  </div>
+  <div class="caveat">
+    <b>Threshold raised from 3 to 6 for this length.</b> The bigram-recurrence detector's usual
+    <code>min_bigram_recurrence=3</code> (calibrated for ~60-word samples elsewhere in this directory)
+    saturates at ~110-150 words &mdash; already documented in <code>quality_sweep_C_vs_reference.py</code>
+    ("detector saturates here per the original investigation" for its own 250-token Sweep 2). At threshold=3
+    this benchmark's first pass flagged 14/25 hardware and a full 25/25 reference samples, most on ordinary
+    function-word reuse ("the girl" 3&times;, "it was" 3&times;), not real loops. 6 was picked by inspecting
+    this benchmark's own actual max-bigram-count distribution: hardware samples split cleanly into a 2-4 bulk
+    (incidental reuse) and a 6/8/10/12 tail (genuine repetition, e.g. "the dog" recurring 12&times; in one
+    reply) &mdash; 6 is the natural cut between them, and it brings both sides down to a comparable, no-longer-
+    saturated rate (below). Fixation-term counts (kev-gpt-specific non-sequitur words this project has tracked
+    since the fixation-word investigation) remain the more targeted signal regardless of threshold.
+  </div>
+
+  <div class="stats-grid" id="stats-grid"></div>
+
+  <div class="runbook">
+    <h2 class="sec">Reproduce this benchmark</h2>
+    <ol>
+      <li><b>Build a benchmark firmware image.</b> kevgpt_interactive's normal chat config caps replies at
+        <code>MAX_GEN_LEN=60</code> word tokens (~45-55 words) &mdash; too short for a 128-word target. Both
+        constants are <code>#ifndef</code>-guarded in <code>kevgpt_interactive/main.c</code> specifically for
+        this (search "BENCHMARK OVERRIDE"):
+        <pre>\
+# in ~/RVchatbot/kevgpt-genesys2-soc/sw/applications/kevgpt_interactive/main.c:
+#define MAX_GEN_LEN 124u      // was 60u -- headroom under KEVGPT_TMAX=128 for a short prompt
+#define STORY_SENTENCES 20u   // was 8u -- generous, so the token budget (not sentence count) binds
+
+cd ~/RVchatbot/kevgpt-genesys2-soc
+make app PROJECT=kevgpt_interactive TARGET=genesys2</pre>
+      </li>
+      <li><b>Reload the board.</b> Start the weight+tokenizer listener <i>first</i>, wait for it to print
+        "waiting for KEVGPT_UART_READY", <i>then</i> trigger the GDB reload &mdash; reversing this order
+        causes <code>SEND_WEIGHTS_FAIL</code>. Regenerate the DDR3 tokenizer blob first if it doesn't already
+        exist:
+        <pre>\
+python -m fabric.genesys2.gen_chat_fw \
+  --npz fabric/export_word16384/goformer.npz --meta data/word_v16384/meta.json \
+  --prompt "once upon a time" --ngen 4 --lanes 64 --p 8 \
+  --out /tmp/scratch_weights_header.h --tokenizer-ddr \
+  --tokenizer-blob-out ~/RVchatbot/kevgpt-genesys2-soc/tokenizer_ddr_v16384.bin
+
+python -m fabric.genesys2.send_weights --port /dev/ttyUSB0 \
+  --npz fabric/export_stepC_d128_v16384/goformer.npz \
+  --tokenizer-blob ~/RVchatbot/kevgpt-genesys2-soc/tokenizer_ddr_v16384.bin
+# once that prints "waiting for KEVGPT_UART_READY", in another terminal:
+riscv32-corev-elf-gdb -batch -ex "target remote :3333" \
+  -ex "monitor reset halt" -ex "load" -ex "monitor resume" -ex "detach" \
+  ~/RVchatbot/kevgpt-genesys2-soc/hw/vendor/esl_epfl_x_heep/sw/build/main.elf</pre>
+      </li>
+      <li><b>Capture the hardware side</b> &mdash; 25 real generations (5 prompts &times; 5 repeats), on-chip
+        Gumbel-max sampling, no seed control (each turn's real captured seed is recorded):
+        <pre>python model/tinystories_hf_repro/benchmark_hw_stories_128w.py \
+  --out model/tinystories_hf_repro/benchmark_128w_hw.json</pre>
+      </li>
+      <li><b>Capture the reference side</b> &mdash; independent of the board, GPU-only, can run in parallel
+        with steps 1-3:
+        <pre>python model/tinystories_hf_repro/benchmark_reference_stories_128w.py \
+  --out model/tinystories_hf_repro/benchmark_128w_reference.json</pre>
+      </li>
+      <li><b>Build this report</b> from the two JSON files:
+        <pre>python model/tinystories_hf_repro/build_benchmark_128w_report.py</pre>
+      </li>
+      <li><b>Restore the board to normal chat.</b> Revert <code>MAX_GEN_LEN</code>/<code>STORY_SENTENCES</code>
+        to <code>60u</code>/<code>8u</code> in <code>main.c</code>, then repeat step 1 (rebuild) and step 2
+        (reload) to put the board back in its normal-chat configuration before real interactive use.</li>
+    </ol>
+  </div>
+
+  <div class="runbook">
+    <h2 class="sec">How the repetition guards work, and what they cost</h2>
+    <p style="font-size:14px;line-height:1.6;color:var(--ink-muted);margin:0 0 14px;max-width:80ch;">
+      kev-gpt's accelerator generates each token with a single-pass on-chip Gumbel-max tournament over all
+      16,384 vocab logits &mdash; a fixed-function hardware primitive with no sort, no top-k/top-p, and no
+      per-token host visibility into the full distribution by design (the same bandwidth-wall constraint
+      that keeps weights resident in on-chip memory in the first place). Firmware can't re-rank or resample
+      the distribution the way typical decoding tricks (repetition penalty, no-repeat-ngram) assume. What it
+      CAN do, reusing a mechanism that already existed for a different purpose (a stop-token remask), is
+      detect a collision after the token comes back and ask the hardware for a fresh answer with the
+      offending candidate excluded.
+    </p>
+    <p style="font-size:14px;line-height:1.6;color:var(--ink-muted);margin:0 0 14px;max-width:80ch;">
+      Three guards run in <code>chat_turn()</code>'s generation loop, checked in order after each token
+      comes back: exact doubling (<code>tok == last_tok</code>), near-duplicate word stems
+      (<code>is_stem_repeat()</code>), and delayed bigram recurrence (checked against the full history of
+      the reply so far). On a hit, <code>remask_pick_excluding()</code> reruns a full linear scan over all
+      16,384 head logits (<code>kevgpt_read_bank(dev, 8, i)</code>, Q6.25 fixed-point) to find the
+      best-scoring token NOT in the exclusion set, then re-checks the result against every other guard again
+      &mdash; a bounded 4-pass re-validation loop (fixed in commit <code>4c3a398</code> to accumulate every
+      rejected candidate across passes, not just the most recent one, closing an oscillation bug the first
+      fix, <code>57ce25a</code>, had itself introduced).
+    </p>
+    <p style="font-size:14px;line-height:1.6;color:var(--ink-muted);margin:0 0 14px;max-width:80ch;">
+      <b style="color:var(--ink);">Not pronoun-aware, or part-of-speech-aware at all.</b> It's easy to read
+      the "dog"/"cat"/"owner" example below as the guard deliberately swapping a repeated noun for a pronoun
+      or a topically-sensible alternative &mdash; it isn't. <code>remask_pick_excluding()</code> is a plain
+      masked-argmax over the SAME full 16,384-logit distribution the hardware already computed for that
+      position: whatever scores highest among the ids not yet excluded wins, with no notion of grammatical
+      role or narrative coherence. In the traces captured for both bugs above, the actual substitutions were
+      other concrete nouns, not pronouns &mdash; "penny" &rarr; "magnet" in the first case, and "dog"
+      &harr; "cat" (cycling between two other cast members) in the second, before either fix. When that
+      second-best logit happens to be topically sensible, the output reads as a deliberate edit; when it
+      isn't, the guard has no way to tell &mdash; it's picking a runner-up from the model's own distribution,
+      not exercising editorial judgment.
+    </p>
+    <p style="font-size:14px;line-height:1.6;color:var(--ink-muted);margin:0;max-width:80ch;">
+      <b style="color:var(--ink);">Cost model: only paid on an actual collision.</b> An unconditional
+      full-vocab rescan on every token would dominate the cycle budget, so each guard does nothing on the
+      common case and only triggers the extra scan when it actually fires. That shows up directly in this
+      benchmark's own token rates: <b style="color:var(--ink);">41.8 tok/s average, ranging 36.9-46.1 tok/s
+      (a 23% spread) across otherwise-identical prompts and settings.</b> The slowest prompt group, "the dog
+      ran" (39.9 tok/s avg) &mdash; the same prompt family behind both bugs fixed above, whose stories tend
+      to revolve around a small set of recurring nouns ("dog"/"cat"/"owner") that trip the bigram guard
+      repeatedly &mdash; runs about 8% slower than the fastest group, "she found a" (43.2 tok/s avg),
+      consistent with more guard firings on that prompt, not a hardware slowdown.
+    </p>
+  </div>
+
+  <div class="controls">
+    <div style="width:1px"></div>
+    <label class="toggle"><input type="checkbox" id="flagged-only"> flagged or fixation-word only</label>
+    <div class="legend-strip">
+      <span><mark class="flag">flag</mark> = detector-flagged span</span>
+      <span><mark class="fix">fixation</mark> = known kev-gpt non-sequitur token</span>
+    </div>
+  </div>
+
+  <div id="rows"></div>
+  <div id="empty-state">No samples match this filter.</div>
+
+  <footer class="endnote">
+    Hardware panels: <code>fabric.genesys2.chat_over_uart</code>'s own send/receive path, against the board's
+    live post-fix weights (<code>fabric/export_stepC_d128_v16384/</code>) &mdash; see
+    <code>fabric/genesys2/FIXATION-WORD-CDC-INVESTIGATION.md</code> for the RDADDRW fix this data postdates.
+    Reference panels: <code>transformers.AutoModelForCausalLM</code> against the published
+    <code>SauravP97/tiny-stories-19M</code> checkpoint. Rows pair the Nth hardware draw against the Nth
+    reference draw of the same prompt-theme for reading convenience only, not a claim of equivalent sampling
+    conditions.
+  </footer>
+
+</div>
+
+<script id="report-data" type="application/json">{"hardware":[{"seed":1,"real_seed":"0x42da8a1c","prompt":"once upon a time","text":"once upon a time, there was a little girl named lily. she loved to play outside with her friends. one day, lily's mom asked her to clean up her toys. lily didn't want to stop playing, but her mom said she had to go to the store. at the shop, lily saw a big box of toys. she wanted to make a new toy for her dolls, so she asked if she could play with them. the shopkeeper said yes and gave her a toy car. lily was so happy and hugged her new toys. she played with it all day and had lots of fun. from that day on, she always played","reason":null,"elapsed_s":2.418,"rate_tok_s":45.1,"word_count":113},{"seed":1,"real_seed":"0x31414c07","prompt":"the sun was","text":"the sun was gone, and he was sad. he had to go to the park. it was a bad ending. the little boy was so sad, but he knew he could always count on the swings. he smiled and felt much better. he counted all the time to find himself in the playground. he even counted the pieces of the slide and eventually he found the perfect spot. the end, the big boy had won the game! he now had his own special game and was happy that he learned something new. the moral of this story is that if you are honest, you can still count things. if someone has been here","reason":null,"elapsed_s":2.667,"rate_tok_s":41.3,"word_count":113},{"seed":1,"real_seed":"0x2db3cb5b","prompt":"the dog ran","text":"the dog ran away, but the dog was faster. the owner of the cat saw the big dog and knew what to do. the mom and dad were very relieved. they hugged the little dog, and the two of them went home. the end from the day, the family always looked for the ball and it was happy to be safe. they knew that the two dogs would come back to the park soon. and they lived happily ever after. the moral of this story is that we should always be careful and look for new things that are safe. we must always ask before we play together. and sometimes, we can have fun","reason":null,"elapsed_s":2.734,"rate_tok_s":40.6,"word_count":114},{"seed":1,"real_seed":"0x0d73da07","prompt":"a little girl","text":"a little girl named lily who loved to play outside. one day, she went to the park with her mom. she saw a big tree with a lot of leaves. she thought it looked pretty. suddenly, lily saw an owl with big eyes. it was a little bird with black feathers. it had a long tail and a loud wings. lily wanted to get the owl back. but the bird was too high. she said,\" please, can you help me get my promise?\" her friend said\" yes, i can help you.\" they went together to find the lost owl. they looked high and low, but","reason":null,"elapsed_s":2.475,"rate_tok_s":41.2,"word_count":105},{"seed":1,"real_seed":"0x5ed49d78","prompt":"she found a","text":"she found a big box with a label on it. she was very curious and wanted to know what was inside. she opened the box and found a big, red apple. she put it in her mouth and tasted it. she ate it and felt very full. she said,\" this apple is yummy. i like the apple. it is good for you.\" she took the apples and ate them. she smiled and said thank you to her mom. she went home and told her dad what happened. she hugged her and smiled. she told them she liked apples, but she did not like apples. she asked them if they","reason":null,"elapsed_s":2.524,"rate_tok_s":42.0,"word_count":109},{"seed":2,"real_seed":"0x24ba9f9f","prompt":"once upon a time","text":"once upon a time, there was a little girl named lily. she loved to play outside and pick flowers. one day, she found a big, shiny rock. it was so shiny and shiny. lily wanted to touch it, but she couldn't. she tried and tried, and finally, the rock started to move. but then she accidentally stepped on the ground. she felt scared and sad. she started crying because she really wanted her old toy back. she went to her mom and said,\" mommy, my old bear is broken. can you help me fix it?\" her mother smiled and hugged her. they went back to the","reason":null,"elapsed_s":2.382,"rate_tok_s":42.8,"word_count":106},{"seed":2,"real_seed":"0x0c033a97","prompt":"the sun was","text":"the sun was gone, but jane had gone. the sun was shining and it was the best day ever. jane was so happy that she had found the perfect day. she hugged her dad and said,\" i love you, dad.\" her mom smiled and hugged jane back. they walked back home, feeling happy and content. the end of the day was that jane would never forget the wonderful day she found. the moral of this story is: it's important to be kind to others and not be foolish. always be brave and have joy to make sure you are safe.\" jane smiled, and promised to never be scared again","reason":null,"elapsed_s":2.588,"rate_tok_s":41.0,"word_count":109},{"seed":2,"real_seed":"0xdaba45d7","prompt":"the dog ran","text":"the dog ran to the fence and jumped on the grass. lily and ben laughed and laughed. they were friends again. they played with the dog and the ball. they had fun and forgot about the rain. they forgot to play outside and have fun. they did not see the big sign that said\" no matter what.\" they heard the man who came to see what he was doing. he saw the sign on his fence, but he did hear them. he looked angry and sad.\" hey, you two, that's a dog! that's our ball and we need it to get free.\" he said to lily, and","reason":null,"elapsed_s":2.571,"rate_tok_s":40.5,"word_count":107},{"seed":2,"real_seed":"0x61bd7ba9","prompt":"a little girl","text":"a little girl named lily who loved to play outside. one day, she went to the park with her mommy. they saw a big tree with lots of leaves. lily thought it was so pretty. she wanted to climb the tree and eat the leaves. but her mom said,\" don't worry, lily. we can climb up the ladder and get some leaves.\" so, they went up to a tree to pick up all the sticks. lily's mom saw the big red leaves and said\" wow, that's a cool leaves!\" lily was happy to help her friend. they picked up leaves from the ground and put them in a","reason":null,"elapsed_s":2.493,"rate_tok_s":42.1,"word_count":108},{"seed":2,"real_seed":"0xc5dec216","prompt":"she found a","text":"she found a big, shiny rock. she picked it up and showed it to her mom.\" look, mom, i found a rock!\" she said, holding the rock.\" wow, that's cool!\" her dad said with a smile.\" let's go see if we can find something special together!\" lily and her friends went to look for a shiny gold rock. they found it with shiny things that were very pretty. they were amazed and wanted to keep it. they all worked together and found the shiny thing. they put it in a box and looked at it every day. they had so much fun together.","reason":null,"elapsed_s":2.428,"rate_tok_s":41.2,"word_count":103},{"seed":3,"real_seed":"0xfe33cf99","prompt":"once upon a time","text":"once upon a time, there was a little boy named timmy. timmy loved to play outside and run around. one day, he found a shiny rock. it was shiny and shiny, but he knew he had to find it. he picked it up and showed it to his mom. she said,\" look, timmy! i found it in the ground.\" timmy looked at the rock and said to the tree. he thought it looked pretty. he wanted to keep it. so, his mommy said\" let me see it\". timmy was amazed and happy. he put the shiny thing in his pocket and went to show his friends","reason":null,"elapsed_s":2.477,"rate_tok_s":41.2,"word_count":106},{"seed":3,"real_seed":"0x0fb226f4","prompt":"the sun was","text":"the sun was gone, but he was sad and he felt bad. he wished he had not passed away. he learned that sometimes, he should have listened to his mom. he decided to be careful and respectful to the animals that are not theirs. he also learned to share with the other animals who are sad, and that he could not be sad. he was happy that the people who met him and the creatures were okay. the end on the day, the little bird was feeling sad again. he missed his friends and his family. he felt sorry for being mean and sorry. he realized that being selfish was not nice. he","reason":null,"elapsed_s":2.892,"rate_tok_s":38.0,"word_count":113},{"seed":3,"real_seed":"0xd1de7711","prompt":"the dog ran","text":"the dog ran away, but the dog was too fast. the owner of the cat came and saw the big dog. the mom and dad were very scared. they ran away and hid under a tree. they hoped the dog's owner would not find him. they wished they had a dog or a cat. they learned that sometimes, things can be found. they did not know that the ball was not a ball, or the sun. they were happy and grateful. they said sorry to the cat and the sun. they hugged and said they loved them. they decided to play somewhere else. they also learned a lesson. they never forgot","reason":null,"elapsed_s":2.925,"rate_tok_s":36.9,"word_count":111},{"seed":3,"real_seed":"0x28de97ee","prompt":"a little girl","text":"a little girl named lily who loved to play outside. one day, she found a shiny rock on the ground. she picked it up and showed it to her mom.\" look, mom!\" she said, pointing to a big rock.\" i found this rock,\" her mommy replied.\" wow, that's a pretty rock that is very pretty.\" lily was so happy and said to lily, as she played with the rock. she showed the shiny thing to the boy and the toy.\" thank you, mommy!\" said lily with a smile. from that day on, lily and her toy rock became the best","reason":null,"elapsed_s":2.507,"rate_tok_s":38.7,"word_count":100},{"seed":3,"real_seed":"0xd6892c97","prompt":"she found a","text":"she found a big, shiny rock. she picked it up and put it in her pocket. she was so happy and proud of her new rock. from that day on, lily always remembered to put the rock in a safe place. she always made sure to keep it safe and always put her things safe. and whenever she felt worried, she remembered how she had been to make sure she got better. the end on the day, the little girl had to go to the park and play with her friends. she learned that even when things are scary, there are always something important to her. the moral of the story is: if","reason":null,"elapsed_s":2.445,"rate_tok_s":45.0,"word_count":113},{"seed":4,"real_seed":"0x23e33cef","prompt":"once upon a time","text":"once upon a time, there was a little girl named lily. she loved to play outside in the park. one day, she saw a big tree. it was very tall and had lots of branches. lily wanted to climb the tree, but she didn't know how. she asked her mom for help.\" mom, can you help me?\" she said to her dad.\" i want to reach the top and see the world.\" her mommy smiled and said,\" yes, i would love to go down the oak tree.\" lily was so happy to help her friend. they went to the tall tree and played together.","reason":null,"elapsed_s":2.445,"rate_tok_s":40.9,"word_count":104},{"seed":4,"real_seed":"0x8c9d174e","prompt":"the sun was","text":"the sun was getting hot and the sun was shining. when they were inside, the baby was gone. she was so sad and didn't know what to do. then, a kind lady found the infant and gave her a big hug. she said,\" you are so smart and kind, baby! you must have been so strong and strong.\" the little baby smiled and thanked the lady. the next day, little girl and her mom went to the park again. they saw all of the other kids playing and having fun. they all laughed and had a wonderful time. the end from that day on, they always made sure to","reason":null,"elapsed_s":2.396,"rate_tok_s":44.2,"word_count":109},{"seed":4,"real_seed":"0x3e5a64bc","prompt":"the dog ran","text":"the dog ran to the slide and ran to get his mom. he was so happy to be down. but then, a big dog came and tried to steal the car. the dog was scared and didn't know what to do. he ran away, but the big boy was too fast. he tried and pulled, and the toy car came. the boy got angry and threw the doll away. the bad dog chased the boy away and made him lose his toy. the end, the moral of the story is: do not be mean to others. be kind and help others, not for you. do you understand if you are not","reason":null,"elapsed_s":2.717,"rate_tok_s":39.8,"word_count":111},{"seed":4,"real_seed":"0x418eaa39","prompt":"a little girl","text":"a little girl named lily who loved to play outside. one day, she found a shiny rock on the ground. she picked it up and showed it to her mom.\" look, mommy! i found this rock!\" she said, pointing to the rock.\" wow, that's cool!\" her mommy replied,\" yes, it is. but i can't figure it out.\" lily was sad, but she knew she could keep trying. she decided to try and use the shiny thing to make a new picture. she drew a big circle with a red crayon. she was very proud of her work. later that day the","reason":null,"elapsed_s":2.333,"rate_tok_s":42.0,"word_count":101},{"seed":4,"real_seed":"0x081b1ca3","prompt":"she found a","text":"she found a big rock and went back home. the end of the day, lily was happy to have found a new friend and couldn't wait to play with it again. she learned that it's important to be polite and share with others. and from that day on, she always remembered to share her toys with her friends and family. the moral of her story is that sharing is important and that it is better to ask for help and not be selfish. from then on that night, lily's friends helped her find the right thing to find and make her feel happy. the two friends learned to forgive and be kind to each other. they all","reason":null,"elapsed_s":2.557,"rate_tok_s":44.6,"word_count":117},{"seed":5,"real_seed":"0x3f290440","prompt":"once upon a time","text":"once upon a time, there was a little girl named lily. she loved to play outside with her friends. one day, she found a big, colorful ball. she wanted to catch it so she jumped up and down. her friend, timmy, came to see what lily saw and said,\" wow, that's a great ball! can i catch you, lily?\" but lily didn't want to give up. she said to timmy and told him that she was too young to ask for help. timmy was sad and didn't know what to do. he went to his friend and asked for a stick. his friends showed him how to stick","reason":null,"elapsed_s":2.397,"rate_tok_s":43.4,"word_count":108},{"seed":5,"real_seed":"0x337ff85c","prompt":"the sun was","text":"the sun was shining and the sun was shining. when the rain stopped, the little girl was very sad. she had to get her cup set. she tried to find the cup, but it was too big. she started to cry. her mom came and saw what happened. she said,\" don't worry, i will help you.\" the mom took the glass in her pocket and put it in the car. the next day, when she was back to the house, she saw the big cup again. she smiled and said\" thank you\". with a big smile, they both went to play together. the end\"","reason":null,"elapsed_s":2.508,"rate_tok_s":40.3,"word_count":104},{"seed":5,"real_seed":"0x17d56aea","prompt":"the dog ran","text":"the dog ran away, but the dog was too fast. the owner of the cat saw what happened and came to help. the mom and dad were very sad. they said,\" don't worry, little dog. we will get you to the hospital.\" they took the dog's collar from the park and put it in the car. the doctor was very nice and gave them a sticker. he said he was a very good dog. he gave lily a hug and a kiss. he told her he loved her and he liked her very much. he asked her to be his friend. he wanted to learn more about his dog. he","reason":null,"elapsed_s":2.557,"rate_tok_s":41.9,"word_count":110},{"seed":5,"real_seed":"0xebb2cfa2","prompt":"a little girl","text":"a little girl who was very sad. she was sad because she didn't have her toy. she missed her friend and wanted to help her. but then she remembered something her mom said. she said that she needed to be kind and share her toys with others. so, the little girl went outside and found her favorite toy. she played with it all day long and had lots of fun. the end from the day, she learned that sharing and sharing with her friends is more important than being mean to others. the moral of the story is that it's better to share and be nice to everyone. moral: sharing is caring and that being","reason":null,"elapsed_s":2.429,"rate_tok_s":46.1,"word_count":115},{"seed":5,"real_seed":"0xba1a5870","prompt":"she found a","text":"she found a big, shiny coin. she picked it up and put it in her pocket. she was so happy and excited to show her friends. but when she tried to catch her coin, she accidentally dropped it on the ground. she cried out in pain and her mom came running to her.\" what's wrong, lily?\" her mother asked. lily felt bad and said,\" i don't know. i just wanted to play.\" but her mommy said no. lily was sad and cried. her family were very sad too. they didn't know how to get the coin. they all looked for the right place to find the","reason":null,"elapsed_s":2.396,"rate_tok_s":43.0,"word_count":106}],"reference":[{"seed":1,"prompt":"Once upon a time","text":"Once upon a time, there was a little girl named Lily who loved her grandma. She loved her very much and always talked to her. One day, Lily's grandma took her to a big building called a hospital. It was a big building with lots of people inside.  Lily's grandma told her to hold her hand and walk in the stroller. \"Are you ready to go?\" she asked. Lily nodded her head.  As they walked, Lily saw a man who looked sad. \"What's wrong?\" she asked the man. \"I lost my job,\" he said. Lily's grandma gave her a little hug and said, \"Don't worry, we'll go and find your job.\"  As they walked, they saw a man who looked very sad. \"Excuse me, sir. My job is broken,\" he said. \"Don't worry, I'll help","reason":null,"word_count":135},{"seed":1,"prompt":"The sun was","text":"The sun was shining and the birds were singing. It was a beautiful day. Mommy and Daddy were in the house and they were in the kitchen.  Mommy was doing something very special. She was making a cake! It was so delicious.  Mommy and Daddy came to the kitchen. They were preparing for the surprise.  Mommy and Daddy started to put up the cake batter. It was a great idea!  They cut the cake into small pieces and put it in the oven. When it was done, Mommy and Daddy took it out of the oven.  It was a little bit smelly.  Mommy laughed and said, \"Maybe we can make another one!\"  Mommy and Daddy smiled. They all enjoyed the cake together. It was a great day!   The end. The cake was a perfect match! Mom","reason":null,"word_count":136},{"seed":1,"prompt":"The dog ran","text":"The dog ran into the yard, looking around. He saw a big, round thing and wanted to explore it. He ran after it, but it was too fast for him. He ran and ran until he got home.  The dog was so excited that he started to run around the yard. He ran and ran, until he got home. When he got there, he saw a big, round thing. It was a red ball! He grabbed it and started to play with it.  He ran around the yard with the ball, and it was so much fun! He chased the ball for a long time and it was the best day ever.  The dog never forgot the fun he had when he played with the ball. He had found such a wonderful thing and he was very proud of himself for keeping it close. He would never forget how much fun he had with his red ball","reason":null,"word_count":157},{"seed":1,"prompt":"A little girl","text":"A little girl was playing in her room. She felt very special. Suddenly, she heard a noise. She looked around and saw a giant. He was standing on the wall, looking very serious. The little girl said, \"Hi giant!\" But the giant did not say anything.  The little girl said, \"Please don't be mad. I just wanted a little toy.\" The giant was still standing on the wall, so the little girl said, \"Okay, okay.\"  The giant smiled and said, \"I'm sorry. I don't want you to bother me.\" The little girl smiled too. She said, \"It's okay. I like playing in my room.\"  The giant smiled back and said, \"Thank you. I'm happy now.\" The little girl said goodbye and went to play with her toys. The giant was so happy. He knew he had made","reason":"bigram recurred 6x: ('little', 'girl')","word_count":137},{"seed":1,"prompt":"She found a","text":"She found a big and ugly puddle near the garden. She had never seen it before, but she was excited. She wanted to see what would happen if she put it in her bucket.  She started to pull the bucket and started to walk. She was so excited.  Suddenly, the bucket started to shake. A strong wind came and blew the bucket away. She could not believe it.  \"What is happening?\" yelled a voice from the bucket.  It was a dragonfly. He was huge and he was flying very fast. He wanted to help the little girl.  The dragonfly was very brave. He flew up high, and made a lot of noise. The dragonfly flew right up to the bucket and caught it.  The dragonfly flew away, and the little girl was so happy. She had won the battle and the ugly puddle","reason":null,"word_count":143},{"seed":2,"prompt":"Once upon a time","text":"Once upon a time, there was a little boy named Timmy. Timmy loved to play with his toys and eat ice cream. One day, Timmy's mom made him a big ice cream cone. Timmy was so happy and he said, \"Thank you, Mommy! This ice cream is delicious!\"  Timmy's mom smiled and said, \"You're welcome, Timmy. But don't forget to close the lid when you're done playing.\"  Timmy nodded and said, \"Okay, Mommy. I will close the lid when I'm done.\"  Later that day, Timmy's mom noticed he looked guilty. \"Timmy, did you do that?\" she asked.  \"Yes, Mommy. I did,\" Timmy replied.  His mom hugged him and said, \"Timmy, we need to be more careful next time.","reason":null,"word_count":118},{"seed":2,"prompt":"The sun was","text":"The sun was shining and the birds were singing. It was a beautiful day, and the sun was shining.  Tom and his mom went for a walk. They came to a lake and saw a lot of ducks swimming in the lake. Tom's mom said, \"Let's take a look!\"  Tom and his mom walked closer. They stopped and looked around. They saw a little duck swimming around in the water. Tom said, \"Can I pet the duck?\"  His mom said, \"Of course!\" Tom reached out and touched the duck's soft fur. It felt nice and soft.  Tom's mom said, \"Let's go and take a few more ducks for a little while.\"  Tom was so excited. He said, \"Yes!\" and they both started running home.  When they got home, Tom was so happy and he said, \"That","reason":null,"word_count":136},{"seed":2,"prompt":"The dog ran","text":"The dog ran through the woods. The dog was so excited to explore. She had heard about a fox who was trying to steal something. The dog knew she had to be careful, so she quickly ran back to him.  The fox had a big, furry tail and it was very friendly. He sniffed the fox's tail and barked at it. The dog was so happy to have a friend! She started to run around the woods, chasing after the fox.  But then the fox ran too quickly and the dog stopped. She looked sad. She tried to forget about the fox.  The dog saw the fox trying to steal the fox. She was so upset. She ran away and never got to see the fox again.  The dog was disappointed. She had scared away the fox and now she never saw the fox again. She had learned a lesson that day.","reason":"bigram recurred 8x: ('the', 'fox')","word_count":152},{"seed":2,"prompt":"A little girl","text":"A little girl named Lucy was walking through the woods. She saw a mushroom and she thought it was so pretty. She wanted to pick it and take it home.  Just then, she heard a voice. It was coming from a bush. Lucy looked up and saw a rabbit.  \"Hello, little girl,\" said the rabbit. \"What are you doing here?\"  \"I'm picking the mushroom,\" said Lucy.  \"That's so nice,\" said the rabbit. \"Can you come and see what I can find in the woods?\"  Lucy was so excited. She wanted to see what the rabbit was up to. \"Can you help me?\" she asked.  The rabbit smiled and said, \"Sure, I can help you.\"  So Lucy and the rabbit went on an adventure together. They found a big tree and a little pond. The","reason":"exact doubling: '\"' '\"'","word_count":134},{"seed":2,"prompt":"She found a","text":"She found a white bag in her house. She was so excited because she had never seen a bag before. She held it up to her chest and opened it. Inside was a shiny golden coin. She was so happy that she couldn't contain herself.  She took out the coin and held it tight. She looked at it and saw how shiny and beautiful it was. She wanted to show it to her mom.  But when she got home she was so sad. Her mom was very angry with her. She said that she would be in trouble if she took the coin and could not find it.  But then her mom said to her, \"Why don't we look at the white bag and see if you can find something else?\"  So they went to the store and looked around. After a while, they found something shiny and new. It was a silver coin! She","reason":null,"word_count":155},{"seed":3,"prompt":"Once upon a time","text":"Once upon a time, there was a little girl. She was three years old. She loved to play in the park.  One day, she saw something shiny in the grass. She walked closer and saw it was a coin. She was so happy and excited.  She picked up the coin and began to run home. When she got home, she showed her mom the coin. Her mom said it was very valuable.  The little girl was so happy. She put the coin in a safe place so she could always remember it. She loved to look at it and remember all the things she saw. She knew she was lucky to have found such a valuable thing.   The little girl took the coin home and kept it safe with her. She was so proud of her special coin. It made her day even more special and she always remembered her special coin.   The","reason":null,"word_count":153},{"seed":3,"prompt":"The sun was","text":"The sun was shining brightly as Tommy the little girl went outside to play. She loved to run and laugh in the sunshine. But today, she was feeling frustrated. She was about to take a nap when she heard a noise. She saw a strange noise coming from the grass. It was a bird! Tommy was so excited and she ran over to see it better.   The bird was fluttering around and singing a song. Tommy watched it for a moment, watching it. Suddenly, the bird flew away. Tommy was still frustrated, so he quickly ran back inside. But before he could get to bed, he had a plan.   He went to the kitchen and grabbed some bread and milk. Then he quickly got to work. He made sure he was comfortable and took out the bread. He threw it out the window and watched the bird fly away.   Tommy was","reason":null,"word_count":151},{"seed":3,"prompt":"The dog ran","text":"The dog ran along the street, looking for something to do when it saw a shop down the street. It was so excited and ran straight to it. It had never seen a shop before, and it ran up to the door. The shopkeeper saw the dog, and he knew that the dog was going to be very friendly. The dog looked up at the shopkeeper with big eyes, and he knew that the shopkeeper must be very nice.  The dog was so excited, it jumped up and down and barked, \"Woof woof!\" The shopkeeper smiled and said, \"That's great, dog!\" The dog thanked the shopkeeper, and then ran off to play.  The dog was so happy to have found such a friendly shop. It ran around the park, feeling happy and excited to be there. Everywhere the dog went it said, \"Woof woof","reason":null,"word_count":144},{"seed":3,"prompt":"A little girl","text":"A little girl named Jane went to the park. She saw the big swing and wanted to try it. She went up to it and pushed herself as hard as she could. She felt like she was floating in the air. She was so excited that she started to swing back and forth, higher and higher. Every time she went higher, she felt like she was flying.  One day, when Jane was swinging, she saw a little bird. It had fallen from its nest. Jane was very sad that the bird couldn't get back up. She knew that she had to help the bird. She went to get a hammer and some nails. She found them in her pocket and put them around the bird. The bird looked so happy and it thanked her. Jane smiled and waved goodbye.  Jane was happy that she could help the little bird. The bird was okay, but he was very happy","reason":null,"word_count":158},{"seed":3,"prompt":"She found a","text":"She found a big, shiny thing. It was a trophy. She wanted to show her mom. She put it on her foot and ran to find her mom.  When she got home, she showed her mom the trophy. Her mom was very happy and said, \"This is a very special trophy. You are so lucky to find it!\"  The trophy was very special. It was a very special trophy. It was pink, with a star on it. She put it on her foot and smiled.  She kept it safe and took it everywhere. She always kept it safe. Whenever her mom was around she would take it out and hug it. She was very lucky to have such a special trophy.  At night, the trophy kept her safe. She took it everywhere, so it could keep her safe and happy. She was so lucky to have a special trophy and was","reason":null,"word_count":151},{"seed":4,"prompt":"Once upon a time","text":"Once upon a time, there was a little boy named Timmy. Timmy loved to play with his toys all day long. One day, Timmy's mom took him to the store to buy a new toy. Timmy was so happy and couldn't wait to get home and play with his new toy.  As Timmy was walking home from the store, he saw a big truck outside. It was the most beautiful toy he had ever seen. But then, the truck hit a tree and broke! Timmy was sad and scared that his new toy would be broken. Suddenly, he heard a loud noise outside. It was the truck hit the tree! Timmy was so scared that he ran outside to see what happened.  But when he got outside, he saw that the truck had broken. Timmy was sad and didn't know what to do. He wished he had been more careful","reason":null,"word_count":150},{"seed":4,"prompt":"The sun was","text":"The sun was shining and it was a beautiful day. The little girl was very happy. She ran around and saw a big tree. She hugged it and smiled.  Suddenly, the little girl heard a loud noise. She looked up and saw a big bird. It was carrying a big stick. The bird was carrying a big pole. The little girl smiled.  The bird flew down and landed on the pole. The girl touched its soft feathers. It was so soft and cool. She waved to the bird and smiled. She was so happy to see the bird.  The bird flew away, but the little girl knew she had to keep the pole. She held it in her hand and it flew away. The little girl smiled, happy that she had seen the bird. She knew she was lucky to have seen such a special bird. The little girl hugged the pole one more time and","reason":"bigram recurred 6x: ('little', 'girl')","word_count":156},{"seed":4,"prompt":"The dog ran","text":"The dog ran through the forest. He saw a bright light. He wanted to get closer but he was scared. He started to run faster. He ran and ran until he reached the light. He was so happy! He quickly ran towards it and saw that it was a firefly. He was so excited! He wanted to show his friends. He ran to his friends and showed them the firefly. They were so amazed! The firefly flew away and the dog felt proud of himself. He was happy that he had been brave enough to run and explore the forest. He knew that he had made a new friend. He was so glad he was brave enough to face the firefly. He and his friends went home with big smiles on their faces. The firefly was still there, but he knew it was a sign of a happy day. He was safe! The end. The dog was glad","reason":null,"word_count":158},{"seed":4,"prompt":"A little girl","text":"A little girl named Lucy was playing in the garden with her doll. She was having such a lot of fun. Suddenly, her doll started shaking!  \"Oh no!\" cried Lucy.  \"What happened?\" asked her mom.  \"A baby,\" said her mom, \"We need to go to the hospital to get it fixed up.\"  Lucy was sad to hear this. She was worried that her doll was going to be broken.  \"What can we do?\" asked Lucy.  \"We need to go to the hospital,\" said her mom.  So they went to the hospital. Lucy was very scared, but she was brave. When they arrived, the hospital was huge and had lots of people.  The doctor was very gentle. He told Lucy's mom that everything was going to be alright. He said that they were all very lucky","reason":null,"word_count":135},{"seed":4,"prompt":"She found a","text":"She found a package in the garden. It was bright and colourful. She opened it and saw some yummy treats inside. She was so excited, she couldn't wait to try them.  She opened the package and quickly started to eat the delicious treats. But then she forgot to close the package. The package was all gone!  She looked around for the package, but it was nowhere to be found. She was so sad, she started to cry.  Suddenly, she heard her mum's voice. She had hidden a package in the garden. She was so happy and hugged her mum.  She was so glad that her mum had found the package. She quickly got to open it again and the package was still there. It was a toy car! She was so happy and hugged her mum again. She was so glad that she had been able to show her the surprise package","reason":"bigram recurred 6x: ('he', 'was')","word_count":152},{"seed":5,"prompt":"Once upon a time","text":"Once upon a time, there was a boy named Bob. Bob was three years old and he loved to play. One day, Bob was playing in his backyard when he saw something strange. It was a big blackboard! He wondered what it was.   Bob ran over to the blackboard and touched it. It felt soft, like a pill. He wanted to know what it was. He touched it, and it felt like a big hug. Bob was so happy to have discovered something new.   Bob decided to sit down and take a rest under the blackboard. He felt so safe and content. He looked up at the sky and said, \"Look at me, I'm so lucky to have discovered such a beautiful blackboard!\"   Bob and his mommy watched the clouds in their living room and they smiled. Bob was so happy to have discovered such a special place","reason":null,"word_count":148},{"seed":5,"prompt":"The sun was","text":"The sun was shining, and the sky was blue. It was a perfect day for the day.  But then something strange happened. A man came and he was being very selfish. He didn't share his things.  The man started to complain. He didn't want to share his things. He wanted to keep them all for himself.  Suddenly, a little girl came along. She was only three years old. She was very kind and gentle. She sat next to the man and helped him.  The man stopped being so selfish. He was glad that he was able to share his things. They both had a nice time together.  The man was very happy. He thanked the little girl and together they went home. The man was so thankful for the help he shared his things.  The man and the little girl were now the best of friends. They had","reason":null,"word_count":148},{"seed":5,"prompt":"The dog ran","text":"The dog ran through the park, barking happily. He was excited and ready to explore the world. Suddenly, a big dog came running up and stopped. The dog was scared and started to bark loudly. He wanted to run away, but the big dog started to bark even louder.  The dog was feeling very sad. He didn't know what to do. He looked around, but there was no sign of being heard. He was starting to get very scared and he started to cry. Suddenly, he heard a voice. It was a man who had come to help him.  The man said, \"I can help you. I'm here to give you a treat.\" The dog was so happy. He stopped crying and smiled. He was very thankful to the man. She gave him a big hug and they both walked away together.  The man stayed with the dog for a long","reason":null,"word_count":151},{"seed":5,"prompt":"A little girl","text":"A little girl named Sarah was very excited to go to the park. She put on her shoes and grabbed her bag. When she arrived, she ran outside and explored all the different things she could find.  Sarah saw a big tree and ran to it. She sat down under the tree and looked around. She spotted some yummy treats in a basket. She picked one and took a big bite. It was delicious! She smiled and took another bite.  Sarah sat on the grass and enjoyed the tasty treat. She watched the birds, the birds and the clouds dance in the sky. She felt so happy and content.   Suddenly, Sarah noticed something else. It was a big, round ball. She picked it up and threw it. It bounced back and forth. She laughed and chased the ball out of the spot. It was so much fun!  Sarah was so happy","reason":null,"word_count":151},{"seed":5,"prompt":"She found a","text":"She found a small, white sheet in the garden. She decided she would give it a try. She put a blanket on it and put it over her head. Then she started to fold it up.  Just then, her friend Tom came over. He saw the sheet and smiled. \"What are you doing?\" he asked.   \"I'm folding the sheet,\" said Tom. \"I'm making a pretty picture.\"  Tom smiled. He grabbed his shirt and started to fold it too. He watched as the sheet got smaller and smaller until it was the size.   Tom was amazed. \"It looks so nice!\" he said.   Tom was glad he could help. \"Thanks for helping me fold it,\" he said.   Tom smiled. He was glad he could help. He was even happier knowing he had made a beautiful picture. As","reason":null,"word_count":135}]}</script>
+<script>
+const DATA = JSON.parse(document.getElementById('report-data').textContent);
+const FIXATION_TERMS = ['cardinal', "buster's", 'buster', 'bustled', "spidey's", 'spidey', 'contains', 'cube', 'care', 'chug', 'carefree'];
+
+function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function flagSpan(text, reason){
+  if (!reason) return null;
+  let m = reason.match(/^exact doubling: (['"])(.*?)\1 (['"])(.*?)\3$/);
+  if (m) return {w1: m[2], w2: m[4]};
+  m = reason.match(/^bigram recurred \d+x: \((['"])(.*?)\1,\s*(['"])(.*?)\3\)$/);
+  if (m) return {w1: m[2], w2: m[4]};
+  return null;
+}
+
+function findSpans(text, reason, trackFixation){
+  const spans = [];
+  const fs = flagSpan(text, reason);
+  if (fs){
+    const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(esc(fs.w1) + '\\s?' + esc(fs.w2), 'gi');
+    let mm;
+    while ((mm = re.exec(text))){
+      spans.push({start: mm.index, end: mm.index + mm[0].length, type: 'flag'});
+      if (mm[0].length === 0) re.lastIndex++;
+    }
+  }
+  if (trackFixation){
+    FIXATION_TERMS.forEach(term => {
+      const re = new RegExp('\\b' + term.replace(/'/g, "['’]") + '\\b', 'gi');
+      let mm;
+      while ((mm = re.exec(text))){
+        spans.push({start: mm.index, end: mm.index + mm[0].length, type: 'fix'});
+        if (mm[0].length === 0) re.lastIndex++;
+      }
+    });
+  }
+  spans.sort((a, b) => a.start - b.start || b.end - a.end);
+  const merged = [];
+  let lastEnd = -1;
+  for (const s of spans){
+    if (s.start < lastEnd) continue;
+    merged.push(s);
+    lastEnd = s.end;
+  }
+  return merged;
+}
+
+function highlight(text, reason, trackFixation){
+  const spans = findSpans(text, reason, trackFixation);
+  if (spans.length === 0) return escapeHtml(text);
+  let out = '', last = 0;
+  spans.forEach(s => {
+    out += escapeHtml(text.slice(last, s.start));
+    out += `<mark class="${s.type}">${escapeHtml(text.slice(s.start, s.end))}</mark>`;
+    last = s.end;
+  });
+  out += escapeHtml(text.slice(last));
+  return out;
+}
+
+function hasFixation(text){
+  return FIXATION_TERMS.some(term => new RegExp('\\b' + term.replace(/'/g, "['’]") + '\\b', 'i').test(text));
+}
+
+function computeStats(samples){
+  const total = samples.length;
+  const flagged = samples.filter(s => s.reason).length;
+  const avgWords = samples.reduce((a,s) => a + s.word_count, 0) / total;
+  return {total, flagged, avgWords};
+}
+
+function renderStats(){
+  const hwStats = computeStats(DATA.hardware);
+  const refStats = computeStats(DATA.reference);
+  const tiles = [
+    {label:'Real Genesys2 board', cls:'hw', stats: hwStats},
+    {label:'SauravP97/tiny-stories-19M', cls:'ref', stats: refStats},
+  ];
+  let html = tiles.map(t => `<div class="stat-tile ${t.cls}">
+      <div class="sweep-label">${t.label}</div>
+      <div class="num">${t.stats.avgWords.toFixed(0)}<small>avg words</small></div>
+      <div class="pct">${t.stats.flagged}/${t.stats.total} flagged (see caveat)</div>
+    </div>`).join('');
+  const hwFix = DATA.hardware.filter(s => hasFixation(s.text)).length;
+  html += `<div class="stat-tile hw">
+      <div class="sweep-label">kev-gpt fixation words</div>
+      <div class="num">${hwFix}<small>/${hwStats.total} samples</small></div>
+      <div class="pct">care/cardinal/chug/&hellip;</div>
+    </div>`;
+  const avgRate = DATA.hardware.reduce((a,s) => a + (s.rate_tok_s||0), 0) / DATA.hardware.length;
+  html += `<div class="stat-tile hw">
+      <div class="sweep-label">Hardware throughput</div>
+      <div class="num">${avgRate.toFixed(1)}<small>tok/s avg</small></div>
+      <div class="pct">real UART-measured</div>
+    </div>`;
+  document.getElementById('stats-grid').innerHTML = html;
+}
+
+let flaggedOnly = false;
+
+function panelHtml(sample, cls, label, trackFixation){
+  const flagged = !!sample.reason;
+  const fix = trackFixation && hasFixation(sample.text);
+  const badge = flagged ? `<span class="flagpill flagged">flagged</span>` : `<span class="flagpill clean">clean</span>`;
+  const reasonHtml = flagged ? `<div class="reason">${escapeHtml(sample.reason)}</div>` : '';
+  const hide = (flaggedOnly && !flagged && !fix) ? ' hidden' : '';
+  const rateTag = (sample.rate_tok_s !== undefined) ? `<span>${sample.rate_tok_s} tok/s</span>` : '';
+  const seedTag = sample.real_seed ? `<span>seed ${sample.real_seed}</span>` : (sample.seed !== undefined ? `<span>seed ${sample.seed}</span>` : '');
+  return `<div class="panel${hide}">
+    <div class="panel-head">
+      <span class="modeltag ${cls}"><span class="dot ${cls}"></span>${label}</span>
+      ${badge}
+    </div>
+    ${reasonHtml}
+    <div class="story">${highlight(sample.text, sample.reason, trackFixation)}</div>
+    <div class="panel-foot">
+      <span>prompt: &ldquo;${escapeHtml(sample.prompt)}&rdquo;</span>
+      <span style="display:flex;gap:10px">${seedTag}<span>${sample.word_count} words</span>${rateTag}</span>
+    </div>
+  </div>`;
+}
+
+function render(){
+  const hw = DATA.hardware, ref = DATA.reference;
+  const container = document.getElementById('rows');
+  let html = '', visibleRows = 0;
+  for (let i = 0; i < hw.length; i++){
+    const h = hw[i], r = ref[i];
+    const anyMatch = h.reason || r.reason || hasFixation(h.text);
+    if (flaggedOnly && !anyMatch) continue;
+    visibleRows++;
+    html += `<div class="rowgroup">
+      <div class="rowmeta"><span class="seedno">draw ${i+1}</span><span>condition ${i+1} of ${hw.length}</span></div>
+      <div class="pair">
+        ${panelHtml(h, 'hw', 'real board', true)}
+        ${panelHtml(r, 'ref', 'reference 19M', false)}
+      </div>
+    </div>`;
+  }
+  container.innerHTML = html;
+  document.getElementById('empty-state').style.display = visibleRows === 0 ? 'block' : 'none';
+}
+
+document.getElementById('flagged-only').addEventListener('change', e => {
+  flaggedOnly = e.target.checked;
+  render();
+});
+
+renderStats();
+render();
+</script>
