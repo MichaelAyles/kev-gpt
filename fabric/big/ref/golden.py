@@ -48,7 +48,7 @@ import numpy as np
 import torch
 
 from . import fabric_ref as fr
-from .fabric_ref import (ACC_LSB, EXP_K, GEMV_BITS, KV_BITS, LOG2E, P, ExactBfpGemv, FabricRef, Trace,
+from .fabric_ref import (ACC_LSB, EXP_K, GEMV_BITS, K_BITS, KV_BITS, LOG2E, P, ExactBfpGemv, FabricRef, Trace,
                          bfp_dequant, bfp_quant, fp16_decompose)
 from .qwen3_ref import Cfg, Q1Matrix
 
@@ -77,7 +77,7 @@ SIG = {
     "x_in": (("pos", "d"), F32, "layer input residual (layer 0: == embed)"),
     "q_rope": (("pos", "head", "hd"), F32, "rope(q_norm): [x1*c - x2*s, x2*c + x1*s] with tab.rope_cos/sin[pos]"),
     "k_rope": (("pos", "kvhead", "hd"), F32, "rope(k_norm)"),
-    "k_q": (("cpos", "kvhead", "hd"), S(KV_BITS), "K cache mantissa: BFP8 of k_rope, exponent per 16 channels"),
+    "k_q": (("cpos", "kvhead", "hd"), S(K_BITS), "K cache mantissa: BFP10 of k_rope, exponent per 16 channels"),
     "k_e": (("cpos", "kvhead", "kgroup"), S(8), "K cache exponent (K = k_q * 2^k_e)"),
     "v_q": (("cpos", "kvhead", "hd"), S(KV_BITS), "V cache mantissa: BFP8 of v.y, one exponent per head vector"),
     "v_e": (("cpos", "kvhead", "vgroup"), S(8), "V cache exponent (V = v_q * 2^v_e)"),
@@ -282,7 +282,7 @@ def dump(fab: FabricRef, toks, out, layers, positions=None, rows=(0, 64), partia
     man = dict(
         format=FORMAT, **(meta or {}), cfg=dataclasses.asdict(c), tokens=[int(t) for t in toks],
         positions=pos, cache_positions=tr.cache_pos, layers=layers,
-        spec=dict(P=P, ACC_LSB=ACC_LSB, GEMV_BITS=GEMV_BITS, GEMV_GROUP=128, KV_BITS=KV_BITS, EXP_K=EXP_K,
+        spec=dict(P=P, ACC_LSB=ACC_LSB, GEMV_BITS=GEMV_BITS, GEMV_GROUP=128, KV_BITS=KV_BITS, K_BITS=K_BITS, EXP_K=EXP_K,
                   K_FMT=list(fab.K_FMT), V_FMT=list(fab.V_FMT), LOG2E=f32_bits(LOG2E),
                   eps=f32_bits(fab.eps32.item()), inv_sqrt_hd=f32_bits(fab.inv_sqrt_hd.item()),
                   note="K_FMT / V_FMT = [mantissa bits, channels per exponent]; LOG2E / eps / inv_sqrt_hd = fp32 bits"),
@@ -383,7 +383,7 @@ def verify(out) -> bool:
 
     print(f"verify {out}: {m.get('model', '?')}, {len(D.f)} files, positions {pos}, layers {m['layers']}")
     ck("spec constants", format=m["format"] == FORMAT,
-       consts=all(sp[k] == getattr(fr, k) for k in ("P", "ACC_LSB", "GEMV_BITS", "KV_BITS", "EXP_K")),
+       consts=all(sp[k] == getattr(fr, k) for k in ("P", "ACC_LSB", "GEMV_BITS", "KV_BITS", "K_BITS", "EXP_K")),
        LOG2E=sp["LOG2E"] == f32_bits(LOG2E), eps=sp["eps"] == f32_bits(c.eps),
        inv_sqrt_hd=sp["inv_sqrt_hd"] == f32_bits(1 / np.sqrt(c.head_dim)))
     # a weightless FabricRef: tables rebuilt from the formulas, compared, then REPLACED by the files

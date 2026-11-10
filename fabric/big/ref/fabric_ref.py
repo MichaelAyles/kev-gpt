@@ -29,7 +29,7 @@ Vector path — IEEE-754 fp32 (round-to-nearest-even) with pinned order:
   rope: cos/sin tables fp32(cos/sin(pos*inv_freq) * yarn_attn_factor) built offline in
       float64 (the engine streams them, 512 B/token); out = [x1*c - x2*s, x2*c + x1*s]
   attention: s_t = fsum(q*k_t) * fp32(1/sqrt(hd)); ctx_d = fsum_t(p_t * v_t,d)
-  KV cache: K = BFP8 with one exponent per 16 channels (after RoPE); V = BFP8 per
+  KV cache: K = BFP10 with one exponent per 16 channels (after RoPE); V = BFP8 per
       (head, position) 128-vector.
   residual: x = x + y (fp32)
 
@@ -53,7 +53,8 @@ from .qwen3_ref import Q1Matrix, Qwen3Ref, rope_params
 P = 16                 # reduction lanes
 ACC_LSB = 40           # GEMV accumulator LSB = 2^-40
 GEMV_BITS = 10         # activation mantissa bits into the GEMV
-KV_BITS = 8
+KV_BITS = 8            # V cache mantissa bits
+K_BITS = 10            # K cache mantissa bits (long-context gate: 8 bits flips near-ties, R1 task 1)
 EXP_K = 4096
 LOG2E = np.float32(1.4426950408889634)
 
@@ -340,7 +341,8 @@ class FabricRef(Qwen3Ref):
         return y
 
     # KV formats: (bits, group) per tensor; returned dequantised (exact in fp32)
-    K_FMT = (KV_BITS, 16)     # R1c: Qwen post-RoPE K outliers need an exponent per 16 channels
+    K_FMT = (K_BITS, 16)      # R1c: Qwen post-RoPE K outliers need an exponent per 16 channels;
+                              # long-context check: and 10 mantissa bits, not 8
     V_FMT = (KV_BITS, 128)
 
     def kv_q(self, x, fmt, tr=None, name=""):       # x [n_kv, T, hd]

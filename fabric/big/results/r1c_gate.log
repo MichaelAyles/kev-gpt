@@ -1,0 +1,10 @@
+The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[1] step==seq bit-identical: True (14 tok, 31s)
+    chat: "Certainly! Let's break down how a **transformer language model** generates text and then explain why **decoding one token at a time** is limited by **memory bandwidth**.\n\n---\n\n## 🔍 How a Transformer Language Model Generates Text"
+[2] tinystories   n=255 top1 0.9843 dNLL +0.0012 cos mean 0.999993 min 0.99997 (39s)
+[2] readme        n=255 top1 1.0000 dNLL +0.0006 cos mean 0.999986 min 0.99990 (39s)
+[2] master_doc    n=255 top1 0.9922 dNLL -0.0005 cos mean 0.999992 min 0.99994 (39s)
+[2] chat_selfgen  n=255 top1 1.0000 dNLL +0.0004 cos mean 0.999988 min 0.99961 (39s)
+[2] pooled n=1020 top1 0.9941 dNLL +0.0004 cos 0.999990
+[3] GEMV shifts [6..32] floor-terms 0.00e+00 peak acc bits 56/64
+R1C_VERDICT PASS

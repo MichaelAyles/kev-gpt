@@ -1,0 +1,42 @@
+The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+loaded Bonsai-8B-Q1_0.gguf on cuda (3s, peak GPU 1.08/1.08 GB)
+[factual] prompt 25 tok, fabric prefill 49s (1.95 s/tok, peak GPU 2.40/2.60 GB)
+    [factual] gen 10/80 (19s)
+    [factual] gen 20/80 (39s)
+    [factual] gen 30/80 (59s)
+    [factual] gen 40/80 (78s)
+    [factual] gen 50/80 (98s)
+    [factual] gen 60/80 (117s)
+    [factual] gen 70/80 (137s)
+[factual] 80 tokens (n reached), 154s, peak GPU 2.44/2.65 GB
+[factual] Q: List the planets of the solar system in order from the Sun.
+[factual] A: 'The planets of the solar system, in order from the Sun, are:\n\n1. **Mercury**  \n2. **Venus**  \n3. **Earth**  \n4. **Mars**  \n5. **Jupiter**  \n6. **Saturn**  \n7. **Uranus**  \n8. **Neptune**\n\n**Note:** Pluto was once considered the ninth planet'
+[factual] float agrees on 80/80 tokens, first divergence None, cos mean 0.999965 min 0.99925, float NLL of the text 0.049 (fabric 0.048) (3s, peak GPU 1.99/2.65 GB)
+[factual] degeneracy: unique 0.62, distinct-4 1.00, longest loop 0 tok (period 0 x0.0) -> ok
+[explain] prompt 23 tok, fabric prefill 45s (1.96 s/tok, peak GPU 2.40/2.60 GB)
+    [explain] gen 10/80 (20s)
+    [explain] gen 20/80 (39s)
+    [explain] gen 30/80 (59s)
+    [explain] gen 40/80 (78s)
+    [explain] gen 50/80 (98s)
+    [explain] gen 60/80 (117s)
+    [explain] gen 70/80 (137s)
+[explain] 80 tokens (n reached), 155s, peak GPU 2.44/2.65 GB
+[explain] Q: Why is the sky blue? Answer in three sentences.
+[explain] A: "The sky appears blue due to a phenomenon called Rayleigh scattering, where shorter wavelengths of light (like blue and violet) are scattered more efficiently by the Earth's atmosphere. Although violet light is scattered even more than blue, our eyes are more sensitive to blue, and the Sun's light contains more blue than violet. This scattering effect makes the blue light from the sky visible to us, giving the impression"
+[explain] float agrees on 80/80 tokens, first divergence None, cos mean 0.999988 min 0.99996, float NLL of the text 0.182 (fabric 0.182) (3s, peak GPU 1.99/2.65 GB)
+[explain] degeneracy: unique 0.62, distinct-4 1.00, longest loop 0 tok (period 0 x0.0) -> ok
+[creative] prompt 23 tok, fabric prefill 45s (1.96 s/tok, peak GPU 2.40/2.60 GB)
+    [creative] gen 10/80 (20s)
+    [creative] gen 20/80 (39s)
+    [creative] gen 30/80 (58s)
+    [creative] gen 40/80 (78s)
+    [creative] gen 50/80 (98s)
+    [creative] gen 60/80 (117s)
+    [creative] gen 70/80 (137s)
+[creative] 80 tokens (n reached), 155s, peak GPU 2.44/2.65 GB
+[creative] Q: Write a short poem about a robot learning to paint.
+[creative] A: 'In circuits deep, a robot stands,  \nA brush in hand, a canvas vast.  \nNo paint is mixed, no color drawn—  \nJust pixels, light, and logic planned.  \n\nIt learns through trial, each stroke a test,  \nA dance of light, a rhythm of rest.  \nThe world is gray, but through its lens,  \nIt paints the stars, the skies,'
+[creative] float agrees on 80/80 tokens, first divergence None, cos mean 0.999989 min 0.99995, float NLL of the text 0.667 (fabric 0.669) (3s, peak GPU 1.99/2.65 GB)
+[creative] degeneracy: unique 0.64, distinct-4 1.00, longest loop 0 tok (period 0 x0.0) -> ok
+R1_FREERUN_VERDICT PASS

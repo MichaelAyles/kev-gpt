@@ -1,0 +1,8 @@
+The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+K bfp10 g16      top1 0.9935  buckets 1.0000 0.9922 0.9882  dNLL +0.0010 cos min 0.99965  (122s)
+K bfp12 g16      top1 0.9948  buckets 0.9922 1.0000 0.9922  dNLL +0.0016 cos min 0.99981  (122s)
+K bfp16 g16      top1 0.9961  buckets 1.0000 0.9922 0.9961  dNLL +0.0002 cos min 0.99977  (122s)
+K bfp10 g128     top1 0.9857  buckets 0.9922 0.9922 0.9725  dNLL +0.0012 cos min 0.98892  (122s)
+K bfp12 g128     top1 0.9948  buckets 0.9961 0.9922 0.9961  dNLL +0.0008 cos min 0.99900  (123s)
+K bfp16 g128     top1 0.9896  buckets 0.9883 0.9883 0.9922  dNLL +0.0001 cos min 0.99953  (124s)
+K bfp10 g8       top1 0.9909  buckets 0.9961 0.9922 0.9843  dNLL +0.0002 cos min 0.99979  (122s)
