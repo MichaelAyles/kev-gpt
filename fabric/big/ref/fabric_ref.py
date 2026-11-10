@@ -29,7 +29,8 @@ Vector path — IEEE-754 fp32 (round-to-nearest-even) with pinned order:
   rope: cos/sin tables fp32(cos/sin(pos*inv_freq) * yarn_attn_factor) built offline in
       float64 (the engine streams them, 512 B/token); out = [x1*c - x2*s, x2*c + x1*s]
   attention: s_t = fsum(q*k_t) * fp32(1/sqrt(hd)); ctx_d = fsum_t(p_t * v_t,d)
-  KV cache: BFP8 per (head, position) 128-vector (e + int8 mantissas), K after RoPE.
+  KV cache: K = BFP8 with one exponent per 16 channels (after RoPE); V = BFP8 per
+      (head, position) 128-vector.
   residual: x = x + y (fp32)
 """
 from __future__ import annotations
@@ -231,7 +232,7 @@ class FabricRef(Qwen3Ref):
         return torch.cat([x1 * c - x2 * s, x2 * c + x1 * s], -1)
 
     # KV formats: (bits, group) per tensor; returned dequantised (exact in fp32)
-    K_FMT = (KV_BITS, 128)
+    K_FMT = (KV_BITS, 16)     # R1c: Qwen post-RoPE K outliers need an exponent per 16 channels
     V_FMT = (KV_BITS, 128)
 
     def kv_q(self, x, fmt):
