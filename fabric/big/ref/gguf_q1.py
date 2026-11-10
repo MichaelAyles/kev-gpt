@@ -9,6 +9,22 @@ PrismML's custom 1-bit type. Exposes metadata, tensor infos, and raw tensor byte
 
 That layout is a hypothesis until `check_q1_layout` confirms it bit-exact against the
 unpacked (bf16) release of the same model.
+
+Ternary-Bonsai (R1d) uses PrismML's 2-bit type, `dequant_q2`, PINNED the same way
+(`r1d_ternary --pin`, against the fp16 unpacked release: zeros and signs agree 100%, every
+value equals sign * the group's max |unpacked| bit-exactly; ~1 group in 10^4 of the unpacked
+release carries two magnitudes one bf16 ulp apart, which one scale per group flattens):
+
+    block (G weights) = fp16 d  ||  G/4 bytes of 2-bit codes
+    weight j of the block: code q = bits [2*(j%4) +: 2] of byte (j // 4); w = (q - 1) * d
+    (q = 0/1/2 -> -d/0/+d; q = 3 would be +2d, reserved and never used by a ternary model)
+
+    ggml type 42  (Q2_0):  G = 128, 34 B/block, 2.125 bpw in the released `*-Q2_0.gguf`;
+                           G = 64, 18 B/block, 2.25 bpw in `*-Q2_0_g64.gguf` (what type 42 means
+                           in PrismML's current llama.cpp fork). G is read off the tensor size.
+    ggml type 142 (PQ2_0): G = 128, the fork's private id for the same g128 blocks.
+    (Only type 42 / G = 128 has been pinned on a file; G = 64 and type 142 follow the fork's
+    ggml-quants.c and are untested here.)
 """
 from __future__ import annotations
 
@@ -27,6 +43,8 @@ STRING, ARRAY = 8, 9
 GGML_F32, GGML_F16, GGML_BF16 = 0, 1, 30
 QK = 128
 Q1_BLOCK_BYTES = 2 + QK // 8   # 18 -> 1.125 bpw
+GGML_Q1_0, GGML_Q2_0, GGML_PQ2_0 = 41, 42, 142
+Q2_TYPES = (GGML_Q2_0, GGML_PQ2_0)
 
 
 @dataclass
@@ -140,6 +158,39 @@ class GGUF:
         qs = b[:, 2:]
         return d, qs
 
+    def q2_group(self, name: str) -> int:
+        """Group size G (128 or 64) of a 2-bit ternary tensor, 0 if it is not one. The type id
+        says "2-bit codes"; G comes from the byte size (G/4 + 2 bytes per G weights)."""
+        ti = self.tensors[name]
+        if ti.ggml_type not in Q2_TYPES:
+            return 0
+        for grp in (128, 64):
+            want = ti.n // grp * (2 + grp // 4)
+            if ti.n % grp == 0 and ti.shape[0] % grp == 0 and want <= ti.nbytes < want + 64:
+                return grp
+        raise ValueError(f"{name}: type {ti.ggml_type} but {ti.nbytes} bytes fits no Q2_0 group size")
+
+    def q2_parts(self, name: str):
+        """(scales fp16 [nblk], codes uint8 [nblk, G/4], G) for a Q2_0 / PQ2_0 tensor."""
+        ti, grp = self.tensors[name], self.q2_group(name)
+        nblk, bb = ti.n // grp, 2 + grp // 4
+        b = np.asarray(self.raw(name)[:nblk * bb]).reshape(nblk, bb)
+        return b[:, :2].copy().view(np.float16).reshape(nblk), b[:, 2:], grp
+
+    def dequant_rows(self, name: str, r0: int, r1: int) -> np.ndarray:
+        """float32 rows [r0, r1) of a Q1_0 / Q2_0 matrix (PyTorch orientation) without touching
+        the rest of the tensor (layout pinning, spot checks)."""
+        ti = self.tensors[name]
+        inn, grp = ti.shape[0], self.q2_group(name)
+        if grp:
+            d, qs, _ = self.q2_parts(name)
+            sl = slice(r0 * (inn // grp), r1 * (inn // grp))
+            return dequant_q2(d[sl], np.ascontiguousarray(qs[sl])).reshape(-1, inn)
+        assert self.is_q1(name), f"{name}: not a Q1_0/Q2_0 tensor"
+        d, qs = self.q1_parts(name)
+        sl = slice(r0 * (inn // QK), r1 * (inn // QK))
+        return dequant_q1(d[sl], np.ascontiguousarray(qs[sl])).reshape(-1, inn)
+
     def dequant(self, name: str) -> np.ndarray:
         """float32 tensor in PyTorch orientation [out, in] (ggml ne[0] = in = row length)."""
         ti = self.tensors[name]
@@ -151,6 +202,9 @@ class GGUF:
         if ti.ggml_type == GGML_BF16:
             u = np.asarray(self.raw(name)).view(np.uint16).astype(np.uint32) << 16
             return u.view(np.float32).reshape(rows, ti.shape[0])
+        if ti.ggml_type in Q2_TYPES:
+            d, qs, _ = self.q2_parts(name)
+            return dequant_q2(d, qs).reshape(rows, ti.shape[0])
         d, qs = self.q1_parts(name)
         return dequant_q1(d, qs).reshape(rows, ti.shape[0])
 
@@ -163,6 +217,17 @@ def unpack_signs(qs: np.ndarray) -> np.ndarray:
 def dequant_q1(d: np.ndarray, qs: np.ndarray) -> np.ndarray:
     s = unpack_signs(qs).astype(np.float32) * 2.0 - 1.0
     return (s * d.astype(np.float32)[:, None]).reshape(-1)
+
+
+def unpack_codes2(qs: np.ndarray) -> np.ndarray:
+    """[nblk, G/4] uint8 -> [nblk, G] 2-bit codes in 0..3, weight j = bits [2*(j%4) +: 2] of
+    byte (j//4)."""
+    return ((qs[:, :, None] >> np.arange(0, 8, 2, dtype=np.uint8)) & 3).reshape(qs.shape[0], -1)
+
+
+def dequant_q2(d: np.ndarray, qs: np.ndarray) -> np.ndarray:
+    t = unpack_codes2(qs).astype(np.float32) - 1.0
+    return (t * d.astype(np.float32)[:, None]).reshape(-1)
 
 
 if __name__ == "__main__":

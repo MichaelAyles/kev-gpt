@@ -1,0 +1,50 @@
+{
+ "Ternary-Bonsai-4B-Q2_0.gguf": {
+  "n": 8060928,
+  "zero_bad": 0,
+  "sign_bad": 0,
+  "exact": 8060583,
+  "groupmax": 8060928,
+  "groups": 62976,
+  "mixed_groups": 6,
+  "maxdiff": 0.000244140625,
+  "maxrel": 0.007352941176470588,
+  "tensors": 24,
+  "hist": [
+   2538777,
+   2982161,
+   2539990
+  ],
+  "repo": "prism-ml/Ternary-Bonsai-4B-unpacked",
+  "fetched_bytes": 16200026,
+  "verdict": "PASS",
+  "types": {
+   "0": 145,
+   "42": 253
+  }
+ },
+ "Ternary-Bonsai-1.7B-Q2_0.gguf": {
+  "n": 5898240,
+  "zero_bad": 0,
+  "sign_bad": 0,
+  "exact": 5898138,
+  "groupmax": 5898240,
+  "groups": 46080,
+  "mixed_groups": 2,
+  "maxdiff": 0.000244140625,
+  "maxrel": 0.007142857142857143,
+  "tensors": 24,
+  "hist": [
+   1801936,
+   2297874,
+   1798430
+  ],
+  "repo": "prism-ml/Ternary-Bonsai-1.7B-unpacked",
+  "fetched_bytes": 11831800,
+  "verdict": "PASS",
+  "types": {
+   "0": 113,
+   "42": 197
+  }
+ }
+}

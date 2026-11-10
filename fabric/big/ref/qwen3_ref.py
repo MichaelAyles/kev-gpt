@@ -6,7 +6,8 @@ GEMV pluggable so the same forward serves as:
   * the FIXED reference  (`fixed.py`: the bit-true integer arithmetic the fabric runs).
 
 Weights stay PACKED (1 sign bit + fp16 scale per 128) on the device and are expanded
-one matrix at a time, so the 8B model fits a 4 GB laptop GPU.
+one matrix at a time, so the 8B model fits a 4 GB laptop GPU. Ternary-Bonsai GGUFs (R1d)
+load as `TernMatrix` (5 trits per byte + fp16 scale per group), float reference only.
 
 Sources: `from_gguf` (the Q1_0 release = ground truth) or `from_unpacked` (bf16
 safetensors, used only to validate this code against HF transformers).
@@ -86,6 +87,55 @@ class Q1Matrix:
         s = self.signs[r0:r1]
         bits = (s.unsqueeze(-1) >> torch.arange(8, device=s.device, dtype=torch.uint8)) & 1
         return bits.reshape(s.shape[0], -1).to(dtype) * 2 - 1
+
+
+class TernMatrix:
+    """A packed ternary matrix [out, in] (R1d, Ternary-Bonsai): trits [out, ceil(in/5)] uint8,
+    5 weights per byte in base 3 (weight 5b+k of a row = digit k of byte b; digit 0/1/2 =
+    -1/0/+1; the row tail is padded with 0-weights), scales [out, in/grp] fp16. 1.6 bpw +
+    scales on the device, expanded through a 243-entry LUT one row chunk at a time."""
+    _luts: dict = {}
+
+    def __init__(self, trits: torch.Tensor, scales: torch.Tensor, inn: int, grp: int = QK):
+        self.trits, self.scales, self.inn, self.grp = trits, scales, inn, grp
+        self.out = trits.shape[0]
+
+    @classmethod
+    def from_codes2(cls, qs, d, rows, inn, grp, device, chunk=1 << 26):
+        """From GGUF Q2_0 blocks: qs uint8 [nblk, grp/4] of 2-bit codes (weight j of a block =
+        bits [2*(j%4) +: 2] of byte j//4; 0/1/2 = -1/0/+1), d fp16 [nblk]. Repacked on `device`
+        in row chunks of ~`chunk` weights; code 3 (+2*scale) is refused."""
+        n5, bpr = -(-inn // 5), inn // grp
+        trits = torch.empty(rows, n5, dtype=torch.uint8, device=device)
+        sh = torch.arange(0, 8, 2, device=device, dtype=torch.uint8)
+        step = max(1, chunk // inn)
+        for r0 in range(0, rows, step):
+            b = np.ascontiguousarray(qs[r0 * bpr:(r0 + step) * bpr])
+            b = torch.from_numpy(b).to(device).view(-1, inn // 4)
+            c = ((b.unsqueeze(-1) >> sh) & 3).view(b.shape[0], inn)
+            if int(c.max()) > 2:
+                raise ValueError("2-bit code 3 (+2*scale) present: not a ternary tensor")
+            c = torch.nn.functional.pad(c, (0, n5 * 5 - inn), value=1).view(-1, n5, 5)
+            trits[r0:r0 + step] = c[..., 0] + 3 * c[..., 1] + 9 * c[..., 2] + 27 * c[..., 3] + 81 * c[..., 4]
+        scales = torch.from_numpy(d.copy().reshape(rows, bpr)).to(device)
+        return cls(trits, scales, inn, grp)
+
+    @property
+    def nbytes(self) -> int:
+        return self.trits.numel() + 2 * self.scales.numel()
+
+    def trit_pm(self, r0=0, r1=None, dtype=torch.float32) -> torch.Tensor:
+        t = self.trits[r0:r1]
+        lut = self._luts.get(t.device)
+        if lut is None:
+            b = torch.arange(256, dtype=torch.int32).unsqueeze(1)
+            lut = (b // torch.tensor([1, 3, 9, 27, 81], dtype=torch.int32) % 3 - 1).to(torch.int8)
+            lut = self._luts[t.device] = lut.to(t.device)
+        return lut[t.long()].view(t.shape[0], -1)[:, :self.inn].to(dtype)
+
+    def dequant(self, r0=0, r1=None, dtype=torch.float32) -> torch.Tensor:
+        sc = self.scales[r0:r1].to(dtype).repeat_interleave(self.grp, dim=1)
+        return self.trit_pm(r0, r1, dtype) * sc
 
 
 class DenseMatrix:
@@ -227,6 +277,56 @@ class Qwen3Ref:
         return g.mm(W["lm_head"], h, "lm_head")
 
     @torch.no_grad()
+    def forward_seq_chunked(self, toks, chunk=128, out_device="cpu", progress=None) -> torch.Tensor:
+        """forward_seq in query chunks of `chunk` positions against the growing K/V history
+        (the FLOAT reference at long context: attention is [H, chunk, T] instead of [H, T, T]
+        and the [T, V] logits are written to `out_device` chunk by chunk). Same math as
+        forward_seq, equal to float rounding only (the GEMV batch shape differs).
+        `progress(done, T)` is called after each chunk."""
+        c, W, g = self.c, self.W, self.gemv
+        T, E, hd, rep = len(toks), W["embed"], c.head_dim, c.n_head // c.n_kv
+        KV = [(torch.empty(c.n_kv, T, hd, device=self.dev), torch.empty(c.n_kv, T, hd, device=self.dev))
+              for _ in range(c.n_layer)]
+        out = None
+        for t0 in range(0, T, chunk):
+            t1 = min(t0 + chunk, T)
+            n = t1 - t0
+            x = torch.stack([E.dequant(int(t), int(t) + 1)[0].to(torch.float32) for t in toks[t0:t1]])
+            ang = (torch.arange(t0, t1, device=x.device, dtype=torch.float64)[:, None] * self.inv_freq[None]).to(torch.float32)
+            cos, sin = torch.cos(ang) * self.attn_factor, torch.sin(ang) * self.attn_factor
+
+            def rot(z):  # z [h, n, hd], same rotation as rope_seq at positions t0..t1
+                z1, z2 = z[..., : hd // 2], z[..., hd // 2:]
+                return torch.cat([z1 * cos - z2 * sin, z2 * cos + z1 * sin], -1)
+
+            mask = torch.full((n, t1), float("-inf"), device=x.device).triu(t0 + 1)
+            for L in range(c.n_layer):
+                p = f"l{L}."
+                h = self.rmsnorm(x, W[p + "attn_norm"])
+                q = g.mm(W[p + "q"], h, p + "q").view(n, c.n_head, hd).transpose(0, 1)
+                k = g.mm(W[p + "k"], h, p + "k").view(n, c.n_kv, hd).transpose(0, 1)
+                v = g.mm(W[p + "v"], h, p + "v").view(n, c.n_kv, hd).transpose(0, 1)
+                q = rot(self.rmsnorm(q, W[p + "q_norm"]))
+                KV[L][0][:, t0:t1] = rot(self.rmsnorm(k, W[p + "k_norm"]))
+                KV[L][1][:, t0:t1] = v
+                s = q @ KV[L][0][:, :t1].repeat_interleave(rep, 0).transpose(1, 2) / math.sqrt(hd) + mask
+                ctx = (self.softmax(s) @ KV[L][1][:, :t1].repeat_interleave(rep, 0)).transpose(0, 1).reshape(n, -1)
+                del s
+                x = x + g.mm(W[p + "o"], ctx, p + "o")
+                h = self.rmsnorm(x, W[p + "ffn_norm"])
+                gt = g.mm(W[p + "gate"], h, p + "gate")
+                up = g.mm(W[p + "up"], h, p + "up")
+                x = x + g.mm(W[p + "down"], self.silu(gt) * up, p + "down")
+            lg = g.mm(W["lm_head"], self.rmsnorm(x, W["out_norm"]), "lm_head")
+            if out is None:
+                out = torch.empty(T, lg.shape[1], dtype=lg.dtype, device=out_device)
+            out[t0:t1] = lg
+            del lg
+            if progress:
+                progress(t1, T)
+        return out
+
+    @torch.no_grad()
     def prefill(self, toks):
         lg = None
         for t in toks:
@@ -286,6 +386,10 @@ def from_gguf(path, device="cuda"):
             signs = torch.from_numpy(np.ascontiguousarray(qs).reshape(rows, inn // 8)).to(device)
             scales = torch.from_numpy(d.copy().reshape(rows, inn // QK)).to(device)
             return Q1Matrix(signs, scales)
+        grp = g.q2_group(name)
+        if grp:  # 2-bit ternary (Q2_0 / PQ2_0): repack to 5 trits/byte on the device
+            d, qs, _ = g.q2_parts(name)
+            return TernMatrix.from_codes2(qs, d, ti.n // ti.shape[0], ti.shape[0], grp, device)
         return DenseMatrix(torch.from_numpy(g.dequant(name)).to(device))
 
     def vec(name):

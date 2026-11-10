@@ -1,0 +1,25 @@
+The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+spec             top1 0.9791  buckets 0.9961 0.9883 0.9529  dNLL -0.0032 cos min 0.99238  (123s)
+   pos  137 gap 0.005 float '2' fabric '0' | ctx ' + shared LN/attention (1'
+   pos  262 gap 0.029 float '3' fabric '2' | ctx '6.7 MHz) | '
+   pos  401 gap 0.154 float ' overlap' fabric ',' | ctx '6, CTX cross-group stream'
+   pos  442 gap 0.024 float '0' fabric ',' | ctx 'ASURED |\n\nPast 25'
+   pos  521 gap 0.259 float ').\n\n' fabric '\n' | ctx ' 1.2M-trial'
+   pos  592 gap 0.027 float ',\n' fabric ',' | ctx '6/16 bit-exact'
+   pos  603 gap 0.075 float '%' fabric 'k' | ctx '3).\nThe 100'
+   pos  642 gap 0.122 float '5' fabric '6' | ctx ' architecture\non this chip at '
+   pos  675 gap 0.107 float ' ' fabric ' =' | ctx '11 tok/s · XPS'
+   pos  678 gap 0.038 float 'T' fabric ' (' | ctx '/s · XPS15 ON'
+   pos  679 gap 0.035 float ' runtime' fabric ' (' | ctx ' · XPS15 ONNX'
+   pos  687 gap 0.020 float '5' fabric '0' | ctx '\nCPU 1,27'
+   pos  689 gap 0.081 float ' X' fabric ' ' | ctx ' 1,273 ·'
+   pos  702 gap 0.038 float '7' fabric '5' | ctx '0 Ti 719.'
+   pos  736 gap 0.048 float '2' fabric '.' | ctx ' N=1 build at ~1'
+   pos  759 gap 0.011 float '.\n\n' fabric '.' | ctx ' GPU at the same B=1'
+KV fp32          top1 0.9909  buckets 0.9844 0.9961 0.9922  dNLL -0.0002 cos min 0.99958  (123s)
+K fp32           top1 0.9909  buckets 0.9883 0.9922 0.9922  dNLL +0.0002 cos min 0.99990  (124s)
+V fp32           top1 0.9804  buckets 0.9922 0.9922 0.9569  dNLL -0.0025 cos min 0.99249  (124s)
+K bfp8 g8        top1 0.9817  buckets 0.9844 0.9844 0.9765  dNLL -0.0004 cos min 0.99213  (125s)
+V bfp8 g16       top1 0.9791  buckets 0.9961 0.9883 0.9529  dNLL -0.0016 cos min 0.98856  (125s)
+GEMV bfp12       top1 0.9831  buckets 1.0000 0.9961 0.9529  dNLL -0.0039 cos min 0.99579  (123s)
+exp+rsqrt torch  top1 0.9817  buckets 0.9961 0.9883 0.9608  dNLL -0.0031 cos min 0.99009  (121s)
