@@ -28,7 +28,7 @@ Rules of the house (from CLAUDE.md, and they apply here):
 | **R1 long context** | **PASS** (after a spec change) | top-1 **0.9961 at T=1024, 0.9946 at T=2048**, no trend across 256-token buckets. First run FAILED at 0.9886/0.9885 with 8-bit K; root cause the K mantissa width → **K = BFP10** |
 | **R1 golden vectors** | **PASS** | trace taps in the spec + `.mem` exporter; 8B dump (layers 0 and 35) round-trips bit-exact, `GOLDEN_VERDICT PASS 42/42` |
 | **R1 free-run** | **PASS** | 3 prompts × 80 greedy tokens: fabric output identical to float greedy at every position |
-| **R1d** ternary-4B vs binary-8B | **DONE, no flag** | pooled NLL 2.598 vs 2.516 (binary wins by ~2σ, tied on neutral text); bytes equal as stored, ternary 18.5% smaller at 5 trits/byte. R2 stays on binary-8B |
+| **R1d** ternary-4B vs binary-8B | **DONE, no flag** | pooled NLL 2.598 vs 2.516 (binary wins by ~2σ, tied on neutral text); bytes equal as stored, ternary 18.5% smaller at 5 trits/byte. Ternary-8B is the quality ceiling (2.438) at 1.53× the bytes. R2 stays on binary-8B |
 | **R2a (sim)** packer + streaming GEMV RTL | **PASS in iverilog** | `GEMV_STREAM_VERDICT PASS` (136 sims, bit-exact vs `ExactBfpGemv`), 2.637 groups/cycle at 3 ports, 1,064.1 MB/token packed. **OOC place+route at 3.0 ns (333 MHz): WNS +0.197 ns, 9.3k LUT (8%), 13.3k FF, 6 DSP, 0 BRAM** (PROJECTED, core only) |
 | **R2** streaming engine on silicon | not started | roofline **~14.0 tok/s** (DERIVED: 1,064 MB weights + ~44 MB KV per token at ctx 512) |
 
@@ -134,8 +134,8 @@ only). What is open now, in order:
 3. **Stream layout decision:** the packer's dense 3-slot stripe has no silicon number; R0's
    15.54 GB/s used a 4-slot stripe with HP2's slot unread (`--slots 4 --port-slots 0,1,3`, 4/3
    the image size). Measure both with the R0 probe before fixing the format.
-4. **Ternary-8B quality ceiling** for R1d: finish the download
-   (`prism-ml/Ternary-Bonsai-8B-gguf`, 2.18 GB) and re-run `ref/r1d_ternary.py` (~1 min GPU).
+4. ~~Ternary-8B quality ceiling~~ **done:** pooled NLL 2.438 vs binary-8B 2.516, but 1,633 MB per
+   token at best packing vs 1,064 (9.5 vs 14.6 tok/s weights-only, DERIVED).
 5. **R6 entry experiment** (contextual sparsity, `docs/10-big-kevin.md`): threshold sweep on
    the FFN `down` input, skipped fraction vs top-1 / ΔNLL, all layers (~15 min GPU). If R6 is
    taken up, `down` wants a column-major stream: decide before item 2 hardens the format.

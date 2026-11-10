@@ -1,11 +1,11 @@
-NOTE skipping data/big/Ternary-Bonsai-8B-Q2_0.gguf: file not found
 bytes/token = matrices streamed once per token (7 per layer + LM head); EXCLUDES the embedding row lookup and all KV traffic.
 tok/s DERIVED = 15.54e9 B/s (R0 MEASURED) / bytes per token: a weights-only roofline, KV reads/writes come off it.
 model                weights  stored MB    bpw  tok/s |   best MB    bpw  tok/s | device MB  notes
 binary-8B      7,567,003,648     1064.1  1.125  14.60 |    1064.1  1.125  14.60 |    1152.7  separate LM head
 ternary-4B     4,021,588,480     1068.2  2.125  14.55 |     867.3  1.725  17.92 |     868.0  head tied to embed; -1/0/+1 = 0.315/0.371/0.315 H0 1.581 b/w, code3 0
+ternary-8B     7,567,003,648     2010.0  2.125   7.73 |    1632.8  1.726   9.52 |    1768.1  separate LM head; -1/0/+1 = 0.312/0.377/0.311 H0 1.579 b/w, code3 0
 stored = as in the GGUF (MEASURED from tensor sizes); best = ternary 5 trits/byte + fp16 scale per group, binary as stored (DERIVED); device = whole model packed incl. embedding and norms (DERIVED; what from_gguf puts on --device).
-tokenizer (GGUF tokens+merges sha256/16): {'binary-8B': 'cdbfa31b2b6b5513', 'ternary-4B': 'cdbfa31b2b6b5513'} -> IDENTICAL
+tokenizer (GGUF tokens+merges sha256/16): {'binary-8B': 'cdbfa31b2b6b5513', 'ternary-4B': 'cdbfa31b2b6b5513', 'ternary-8B': 'cdbfa31b2b6b5513'} -> IDENTICAL
 The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
 [binary-8B] data/big/Bonsai-8B-Q1_0.gguf
     loaded in 2s, 1152.7 MB packed on cuda (MEASURED)
@@ -17,16 +17,28 @@ The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect r
 [ternary-4B] data/big/Ternary-Bonsai-4B-Q2_0.gguf
     loaded in 2s, 868.0 MB packed on cuda (MEASURED)
     tinystories   n=255 NLL 2.2086 nats/tok (2s)
-    readme        n=255 NLL 3.2800 nats/tok (2s)
-    master_doc    n=255 NLL 3.6024 nats/tok (2s)
-    chat_selfgen  n=255 NLL 1.3007 nats/tok (2s)
+    readme        n=255 NLL 3.2800 nats/tok (1s)
+    master_doc    n=255 NLL 3.6024 nats/tok (1s)
+    chat_selfgen  n=255 NLL 1.3007 nats/tok (1s)
     greedy 8 tok (7s): 'The capital of France is Paris.<|im_end|>'
     GPU peak 1.32 GB (MEASURED)
+[ternary-8B] data/big/Ternary-Bonsai-8B-Q2_0.gguf
+    loaded in 3s, 1768.1 MB packed on cuda (MEASURED)
+    tinystories   n=255 NLL 1.9354 nats/tok (3s)
+    readme        n=255 NLL 3.3282 nats/tok (3s)
+    master_doc    n=255 NLL 3.4880 nats/tok (3s)
+    chat_selfgen  n=255 NLL 1.0012 nats/tok (3s)
+    greedy 8 tok (12s): 'The capital of France is Paris.<|im_end|>'
+    GPU peak 2.45 GB (MEASURED)
 R1D_SANITY binary-8B: pooled NLL 2.516205 vs r1c_gate float_nll 2.516205 |d|=0.00e+00 PASS
 R1D_SANITY binary-8B: pooled NLL 2.5162 < 5.96 (half of uniform) PASS
 R1D_SANITY ternary-4B: pooled NLL 2.5979 < 5.96 (half of uniform) PASS
+R1D_SANITY ternary-8B: pooled NLL 2.4382 < 5.96 (half of uniform) PASS
 R1D_GREEDY ternary-4B: 'The capital of France is Paris.<|im_end|>'
+R1D_GREEDY ternary-8B: 'The capital of France is Paris.<|im_end|>'
 R1D_CMP ternary-4B vs binary-8B: pooled NLL 2.5979 vs 2.5162 (d +0.0817 +- 0.0417 paired SE, 1020 tok, MEASURED); ex-selfgen 3.0304 vs 3.0337 (d -0.0034 +- 0.0381); bytes/token stored 1068.2 vs 1064.1 MB (+0.4%), best packing 867.3 MB (-18.5%) (DERIVED)
 R1D_RESULT ternary-4B vs binary-8B: NLL winner binary-8B; bytes winner as stored binary-8B, at best packing ternary-4B
 R1D_NOTE ternary-4B: the NLL winner flips when chat_selfgen is excluded (that text is the binary Bonsai-8B float model's own greedy answer, so it favours binary-8B)
+R1D_CMP ternary-8B vs binary-8B: pooled NLL 2.4382 vs 2.5162 (d -0.0780 +- 0.0273 paired SE, 1020 tok, MEASURED); ex-selfgen 2.9172 vs 3.0337 (d -0.1165 +- 0.0292); bytes/token stored 2010.0 vs 1064.1 MB (+88.9%), best packing 1632.8 MB (+53.4%) (DERIVED)
+R1D_RESULT ternary-8B vs binary-8B: NLL winner ternary-8B; bytes winner as stored binary-8B, at best packing binary-8B
 R1D_VERDICT DONE -> fabric/big/results/r1d_ternary.json
