@@ -32,6 +32,14 @@ Vector path — IEEE-754 fp32 (round-to-nearest-even) with pinned order:
   KV cache: K = BFP8 with one exponent per 16 channels (after RoPE); V = BFP8 per
       (head, position) 128-vector.
   residual: x = x + y (fp32)
+
+Golden vectors: pass a `Trace` to forward_seq / step / prefill_chunked (`trace=`) and every
+intermediate above is recorded per layer and per position, including the integer side of
+the GEMV (BFP10 mantissas/exponents, per-group inner / shift / term, the 64-bit
+accumulator) and of the KV cache (BFP8 mantissas/exponents). Tracing only reads values the
+forward already computes; with trace=None (the default) nothing is recorded.
+`python -m fabric.big.ref.golden` exports a trace as $readmemh files + MANIFEST.json and
+round-trips it (GOLDEN_VERDICT).
 """
 from __future__ import annotations
 
@@ -112,6 +120,75 @@ class GemvStats:
         self.terms = 0
 
 
+# ----------------------------------------------------------------------------- trace
+class Trace:
+    """Golden-vector recorder (exported by golden.py). The default path never builds one.
+
+        tr = Trace(layers={0, 35}, positions=None, rows=(0, 64), partials={"l0.q": (0, 64)})
+        fab.forward_seq(toks, trace=tr)     # or step(tok, trace=tr) / prefill_chunked(..)
+        tr["l0.q.xq"]                        # CPU tensor, dim 0 = traced position (tr.pos)
+
+    layers / positions: sets of ints, None = all; final = also trace out_norm / lm_head.
+    Every signal is stored position-major (dim 0 = query position, in call order) except
+    the KV cache rows (k_q / k_e / v_q / v_e), which are kept for EVERY position of a traced
+    layer (tr.cache_pos), because attention at a traced position reads the whole history.
+    rows = the output-row window [r0, r1) for which every traced GEMV records its 64-bit
+    accumulator; partials maps a GEMV name ("l0.q") to the row window that also gets the
+    per-group inner / prod / sh / term / accp. Signal names: the taps below; widths and
+    file formats: SIG / GEMV_SIG in golden.py.
+    """
+
+    def __init__(self, layers=None, positions=None, rows=(0, 64), partials=None, final=True):
+        self.layers = None if layers is None else set(layers)
+        self.positions = None if positions is None else set(positions)
+        self.rows, self.partials, self.final = rows, dict(partials or {}), final
+        self.sig, self.fill = {}, {}
+        self.pos, self.cache_pos, self._sel, self._all = [], [], [], True
+
+    def begin(self, pos):
+        """Start one _layers call over absolute positions `pos` [Tq]."""
+        pl = [int(p) for p in pos]
+        self._sel = [i for i, p in enumerate(pl) if self.positions is None or p in self.positions]
+        self._all = len(self._sel) == len(pl)
+        self.pos += [pl[i] for i in self._sel]
+        self.cache_pos += pl
+
+    def on(self, L):
+        return self.layers is None or L in self.layers
+
+    def window(self, name, n_out):
+        """(r0, r1, partials?) for GEMV `name`, clipped to its n_out rows."""
+        part = name in self.partials
+        r0, r1 = self.partials[name] if part else (self.rows or (0, 0))
+        return r0, min(r1, n_out), part
+
+    def tap(self, name, t, tdim=0, fill=None, cache=False):
+        """Record t with its position axis `tdim` moved first. fill = pad value for a ragged
+        last axis (attention over a growing history); cache = keep all positions."""
+        t = t.detach().movedim(tdim, 0)
+        if not cache:
+            if not self._sel:
+                return
+            if not self._all:
+                t = t[torch.as_tensor(self._sel, device=t.device)]
+        self.sig.setdefault(name, []).append(t.to("cpu", copy=True))
+        if fill is not None:
+            self.fill[name] = fill
+
+    def __contains__(self, name):
+        return name in self.sig
+
+    def __getitem__(self, name):
+        ch = self.sig[name]
+        if name in self.fill:
+            n = max(c.shape[-1] for c in ch)
+            ch = [torch.nn.functional.pad(c, (0, n - c.shape[-1]), value=self.fill[name]) for c in ch]
+        return torch.cat(ch)
+
+    def names(self):
+        return list(self.sig)
+
+
 # ----------------------------------------------------------------------------- GEMV
 class ExactBfpGemv:
     """Bit-true 1-bit x BFP10 GEMV (see module doc). Weights must be Q1Matrix."""
@@ -129,7 +206,9 @@ class ExactBfpGemv:
             self._dec[k] = fp16_decompose(W.scales)       # [R, G] each
         return self._dec[k]
 
-    def mm(self, W, X: torch.Tensor, name: str = "") -> torch.Tensor:
+    def mm(self, W, X: torch.Tensor, name: str = "", tr=None) -> torch.Tensor:
+        """Y [T, out]. tr (a Trace) taps name.xq/.xe/.y, .acc over the trace's row window
+        and, for a partials matrix, .inner/.prod/.sh/.term/.accp as [T, row, group]."""
         assert isinstance(W, Q1Matrix), name
         T, n = X.shape
         G = n // 128
@@ -138,6 +217,12 @@ class ExactBfpGemv:
         md, ed = self._scales(W)
         st = self.stats
         out = []
+        w0 = w1 = 0
+        if tr is not None:
+            tr.tap(name + ".xq", q)
+            tr.tap(name + ".xe", ex)
+            w0, w1, part = tr.window(name, W.out)
+            pc = {k: [] for k in ("acc", "inner", "prod", "sh", "term")}
         rows = max(16, min(4096, 1 << ((self.ELEMS // (G * T)).bit_length() - 1)))
         for r0 in range(0, W.out, rows):
             r1 = min(r0 + rows, W.out)
@@ -145,6 +230,10 @@ class ExactBfpGemv:
             inner = torch.bmm(Xq, S).round().to(torch.int64)                 # [G, T, R] exact
             term = inner * md[r0:r1].T[:, None, :]                           # [G, T, R]
             sh = ed[r0:r1].T[:, None, :] + ex.T[:, :, None] + ACC_LSB       # [G, T, R]
+            lo, hi = max(w0, r0) - r0, min(w1, r1) - r0                      # trace window
+            if lo < hi and part:
+                for k, t in (("inner", inner), ("prod", term), ("sh", sh)):
+                    pc[k].append(t[..., lo:hi].clone())
             st.max_shift = max(st.max_shift, int(sh.max()))
             st.min_shift = min(st.min_shift, int(sh.min()))
             nfl = int((sh < 0).sum())
@@ -157,9 +246,21 @@ class ExactBfpGemv:
                 term = torch.bitwise_left_shift(term, sh)
             del sh
             acc = term.sum(0)                                                 # [T, R] int64
+            if lo < hi:
+                pc["acc"].append(acc[:, lo:hi].clone())
+                if part:
+                    pc["term"].append(term[..., lo:hi].clone())
             st.max_acc_bits = max(st.max_acc_bits, int(acc.abs().max()).bit_length())
             out.append(acc.to(torch.float32) * pow2_f32(torch.tensor(-ACC_LSB)).to(X.device))
-        return torch.cat(out, 1)
+        y = torch.cat(out, 1)
+        if tr is not None:
+            tr.tap(name + ".y", y)
+            for k, v in pc.items():
+                if v:                                         # acc [T, R]; partials [T, R, G]
+                    tr.tap(name + "." + k, torch.cat(v, -1) if k == "acc" else torch.cat(v, -1).permute(1, 2, 0))
+            if pc["term"]:                                    # accumulator after each group
+                tr.tap(name + ".accp", torch.cat(pc["term"], -1).permute(1, 2, 0).cumsum(-1))
+        return y
 
     def __call__(self, W, x, name=""):
         return self.mm(W, x[None], name)[0]
@@ -215,34 +316,44 @@ class FabricRef(Qwen3Ref):
         return y
 
     # --- vector ops (override the float reference) ---
-    def rmsnorm(self, x, w):
+    def rmsnorm(self, x, w, tr=None, name="", tdim=0):
         n = x.shape[-1]
         ss = fsum(x * x)
         mean = ss * pow2_f32(torch.tensor(-int(math.log2(n)), device=x.device))
         r = self.rsqrt_fab(mean + self.eps32)
-        return w * (x * r[..., None])
+        y = w * (x * r[..., None])
+        if tr is not None:
+            for k, t in ((".ss", ss), (".mean", mean), (".r", r), ("", y)):
+                tr.tap(name + k, t, tdim)
+        return y
 
     def silu(self, x):
         return x * (1.0 / (1.0 + self.exp_fab(-x)))
 
-    def rope_tab(self, x, pos):            # x [..., T, hd]; pos LongTensor [T]
+    def rope_tab(self, x, pos, tr=None, name=""):   # x [..., T, hd]; pos LongTensor [T]
         hd = x.shape[-1]
         c, s = self.COS[pos], self.SIN[pos]
         x1, x2 = x[..., : hd // 2], x[..., hd // 2:]
-        return torch.cat([x1 * c - x2 * s, x2 * c + x1 * s], -1)
+        y = torch.cat([x1 * c - x2 * s, x2 * c + x1 * s], -1)
+        if tr is not None:
+            tr.tap(name, y, y.dim() - 2)
+        return y
 
     # KV formats: (bits, group) per tensor; returned dequantised (exact in fp32)
     K_FMT = (KV_BITS, 16)     # R1c: Qwen post-RoPE K outliers need an exponent per 16 channels
     V_FMT = (KV_BITS, 128)
 
-    def kv_q(self, x, fmt):
+    def kv_q(self, x, fmt, tr=None, name=""):       # x [n_kv, T, hd]
         if fmt is None:
             return x
         bits, grp = fmt
         q, e = bfp_quant(x, bits, grp)
+        if tr is not None:                          # the cache as stored: mantissas + exponents
+            tr.tap(name + "_q", q, 1, cache=True)
+            tr.tap(name + "_e", e, 1, cache=True)
         return bfp_dequant(q, e, grp)
 
-    def attend(self, q, K, V, valid):
+    def attend(self, q, K, V, valid, tr=None, name=""):
         """q [H, Tq, hd]; K,V [H, Tk, hd] (already repeated to H); valid [Tq, Tk] bool."""
         H, Tq, hd = q.shape
         Tk = K.shape[1]
@@ -259,7 +370,15 @@ class FabricRef(Qwen3Ref):
         m = s.amax(-1, keepdim=True)
         e = torch.where(valid[None], self.exp_fab(s - m), torch.zeros_like(s))
         Z = fsum(e)
-        p = e * (1.0 / Z)[..., None]
+        rz = 1.0 / Z
+        p = e * rz[..., None]
+        if tr is not None:                  # [pos, head, t]; masked t: s = -inf, e = p = +0
+            tr.tap(name + "att.s", s, 1, fill=float("-inf"))
+            tr.tap(name + "att.m", m[..., 0], 1)
+            tr.tap(name + "att.e", e, 1, fill=0.0)
+            tr.tap(name + "att.z", Z, 1)
+            tr.tap(name + "att.rz", rz, 1)
+            tr.tap(name + "att.p", p, 1, fill=0.0)
         # ctx: lane-strided over positions t (lane = t % P), sequential per lane
         pad = (-Tk) % P
         if pad:
@@ -272,6 +391,8 @@ class FabricRef(Qwen3Ref):
         while w > 1:
             w //= 2
             cacc = cacc[:, :, :w] + cacc[:, :, w:2 * w]
+        if tr is not None:
+            tr.tap(name + "ctx", cacc[:, :, 0], 1)
         return cacc[:, :, 0]                                      # [H, Tq, hd]
 
     def embed_rows(self, toks):
@@ -279,42 +400,84 @@ class FabricRef(Qwen3Ref):
         return torch.stack([E.dequant(int(t), int(t) + 1)[0] for t in toks]).to(torch.float32)
 
     # --- shared layer body: positions pos [Tq], with K/V history supplied ---
-    def _layers(self, x, pos, kv_hist, valid):
+    def _layers(self, x, pos, kv_hist, valid, trace=None):
         c, W, g = self.c, self.W, self.gemv
         Tq = x.shape[0]
         rep = c.n_head // c.n_kv
         new_kv = []
+        if trace is not None:
+            trace.begin(pos)
+            trace.tap("embed", x)
         for L in range(c.n_layer):
             p = f"l{L}."
-            h = self.rmsnorm(x, W[p + "attn_norm"])
-            q = g.mm(W[p + "q"], h, p + "q").view(Tq, c.n_head, c.head_dim).transpose(0, 1)
-            k = g.mm(W[p + "k"], h, p + "k").view(Tq, c.n_kv, c.head_dim).transpose(0, 1)
-            v = g.mm(W[p + "v"], h, p + "v").view(Tq, c.n_kv, c.head_dim).transpose(0, 1)
-            q = self.rope_tab(self.rmsnorm(q, W[p + "q_norm"]), pos)
-            k = self.kv_q(self.rope_tab(self.rmsnorm(k, W[p + "k_norm"]), pos), self.K_FMT)
-            v = self.kv_q(v, self.V_FMT)
+            tr = trace if trace is not None and trace.on(L) else None
+            if tr is not None:
+                tr.tap(p + "x_in", x)
+            h = self.rmsnorm(x, W[p + "attn_norm"], tr, p + "attn_norm")
+            q = g.mm(W[p + "q"], h, p + "q", tr).view(Tq, c.n_head, c.head_dim).transpose(0, 1)
+            k = g.mm(W[p + "k"], h, p + "k", tr).view(Tq, c.n_kv, c.head_dim).transpose(0, 1)
+            v = g.mm(W[p + "v"], h, p + "v", tr).view(Tq, c.n_kv, c.head_dim).transpose(0, 1)
+            q = self.rope_tab(self.rmsnorm(q, W[p + "q_norm"], tr, p + "q_norm", 1), pos, tr, p + "q_rope")
+            k = self.rope_tab(self.rmsnorm(k, W[p + "k_norm"], tr, p + "k_norm", 1), pos, tr, p + "k_rope")
+            k = self.kv_q(k, self.K_FMT, tr, p + "k")
+            v = self.kv_q(v, self.V_FMT, tr, p + "v")
             if kv_hist is not None:
                 Kc = torch.cat([kv_hist[L][0], k], 1)
                 Vc = torch.cat([kv_hist[L][1], v], 1)
             else:
                 Kc, Vc = k, v
             new_kv.append((Kc, Vc))
-            ctx = self.attend(q, Kc.repeat_interleave(rep, 0), Vc.repeat_interleave(rep, 0), valid)
-            x = x + g.mm(W[p + "o"], ctx.transpose(0, 1).reshape(Tq, -1), p + "o")
-            h = self.rmsnorm(x, W[p + "ffn_norm"])
-            gt = g.mm(W[p + "gate"], h, p + "gate")
-            up = g.mm(W[p + "up"], h, p + "up")
-            x = x + g.mm(W[p + "down"], self.silu(gt) * up, p + "down")
-        h = self.rmsnorm(x, W["out_norm"])
-        return g.mm(W["lm_head"], h, "lm_head"), new_kv
+            ctx = self.attend(q, Kc.repeat_interleave(rep, 0), Vc.repeat_interleave(rep, 0), valid, tr, p)
+            x = x + g.mm(W[p + "o"], ctx.transpose(0, 1).reshape(Tq, -1), p + "o", tr)
+            if tr is not None:
+                tr.tap(p + "x_mid", x)
+            h = self.rmsnorm(x, W[p + "ffn_norm"], tr, p + "ffn_norm")
+            gt = g.mm(W[p + "gate"], h, p + "gate", tr)
+            up = g.mm(W[p + "up"], h, p + "up", tr)
+            sg = self.silu(gt)
+            act = sg * up
+            if tr is not None:
+                tr.tap(p + "silu", sg)
+                tr.tap(p + "act", act)
+            x = x + g.mm(W[p + "down"], act, p + "down", tr)
+            if tr is not None:
+                tr.tap(p + "x_out", x)
+        tr = trace if trace is not None and trace.final else None
+        if tr is not None:
+            tr.tap("x_final", x)
+        h = self.rmsnorm(x, W["out_norm"], tr, "out_norm")
+        lg = g.mm(W["lm_head"], h, "lm_head", tr)
+        if tr is not None:                  # argmax = the LOWEST index holding the maximum
+            i = torch.arange(lg.shape[-1], device=lg.device)
+            tr.tap("argmax", torch.where(lg == lg.amax(-1, keepdim=True), i, lg.shape[-1]).amin(-1))
+        return lg, new_kv
 
     @torch.no_grad()
-    def forward_seq(self, toks):
+    def forward_seq(self, toks, trace=None):
         T = len(toks)
         pos = torch.arange(T, device=self.dev)
         valid = torch.ones(T, T, dtype=torch.bool, device=self.dev).tril()
-        lg, _ = self._layers(self.embed_rows(toks), pos, None, valid)
+        lg, _ = self._layers(self.embed_rows(toks), pos, None, valid, trace)
         return lg
+
+    @torch.no_grad()
+    def prefill_chunked(self, toks, chunk=64, out_device="cpu", trace=None):
+        """forward_seq in query chunks of `chunk` positions against the growing K/V history.
+
+        Bit-identical to forward_seq (masked positions contribute p = +0, and the lane of
+        position t is t % P whatever the history length), but the attention temporaries are
+        [H, chunk, T, P] instead of [H, T, T, P], so T = 1-2k fits a 4 GB card. Logits are
+        moved to `out_device` per chunk ([T, vocab] fp32 is 1.2 GB at T = 2048).
+        """
+        T = len(toks)
+        kv, outs = None, []
+        for t0 in range(0, T, chunk):
+            t1 = min(t0 + chunk, T)
+            pos = torch.arange(t0, t1, device=self.dev)
+            valid = torch.arange(t1, device=self.dev)[None, :] <= pos[:, None]
+            lg, kv = self._layers(self.embed_rows(toks[t0:t1]), pos, kv, valid, trace)
+            outs.append(lg.to(out_device))
+        return torch.cat(outs)
 
     def reset(self):
         super().reset()
@@ -324,6 +487,6 @@ class FabricRef(Qwen3Ref):
     def step(self, tok: int, trace=None):
         pos = torch.tensor([self.pos], device=self.dev)
         valid = torch.ones(1, self.pos + 1, dtype=torch.bool, device=self.dev)
-        lg, self.kv = self._layers(self.embed_rows([tok]), pos, self.kv, valid)
+        lg, self.kv = self._layers(self.embed_rows([tok]), pos, self.kv, valid, trace)
         self.pos += 1
         return lg[0]
