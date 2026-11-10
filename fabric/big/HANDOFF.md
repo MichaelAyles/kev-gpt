@@ -1,4 +1,4 @@
-# Big Kev — handoff (2026-11-10)
+# Big Kev — handoff (2026-11-10, updated after the R1 leftovers and R2a sim)
 
 **Goal.** Run a 1-bit 8B LLM (PrismML **Bonsai-8B**, Qwen3-8B architecture) on a $250 Xilinx
 Kria KV260, streaming its weights from DDR as fast as the bus allows. Single-stream decode is
@@ -24,9 +24,13 @@ Rules of the house (from CLAUDE.md, and they apply here):
 | **R0** DDR bandwidth probe | **DONE, MEASURED on silicon** | PL→DDR **15.54 GB/s = 91.1%** of the DDR4-2133 peak (17.07 GB/s), using HP0+HP1+HP3 at 333 MHz with a **port-interleaved layout**. Data-checked. |
 | **R1a** float reference | **PASS** | from-scratch Qwen3 forward == HF transformers (max Δlogit 1.7e-5, greedy identical) |
 | **R1b** GEMV activation format | **PASS** | **BFP10, one power-of-two exponent per 128-group**: 99.48% top-1 vs float |
-| **R1c** bit-true fabric spec | **PASS** | **99.41% top-1**, ΔNLL −0.0012, cos 0.99997 vs float over 1,020 tokens; step()==forward_seq() bit-identical |
-| R1 leftovers (§3) | open | long context, golden vectors, free-run check, ternary comparison |
-| **R2** streaming engine on silicon | not started | roofline **~14.0 tok/s** (DERIVED: 1,064 MB weights + ~39 MB KV per token at ctx 512) |
+| **R1c** bit-true fabric spec | **PASS** | **99.41% top-1**, ΔNLL +0.0004, cos 0.99999 vs float over 1,020 tokens (K = BFP10 g16); step()==forward_seq() bit-identical |
+| **R1 long context** | **PASS** (after a spec change) | top-1 **0.9961 at T=1024, 0.9946 at T=2048**, no trend across 256-token buckets. First run FAILED at 0.9886/0.9885 with 8-bit K; root cause the K mantissa width → **K = BFP10** |
+| **R1 golden vectors** | **PASS** | trace taps in the spec + `.mem` exporter; 8B dump (layers 0 and 35) round-trips bit-exact, `GOLDEN_VERDICT PASS 42/42` |
+| **R1 free-run** | **PASS** | 3 prompts × 80 greedy tokens: fabric output identical to float greedy at every position |
+| **R1d** ternary-4B vs binary-8B | **DONE, no flag** | pooled NLL 2.598 vs 2.516 (binary wins by ~2σ, tied on neutral text); bytes equal as stored, ternary 18.5% smaller at 5 trits/byte. R2 stays on binary-8B |
+| **R2a (sim)** packer + streaming GEMV RTL | **PASS in iverilog** | `GEMV_STREAM_VERDICT PASS` (136 sims, bit-exact vs `ExactBfpGemv`), 2.637 groups/cycle at 3 ports, 1,064.1 MB/token packed. **Not synthesised** |
+| **R2** streaming engine on silicon | not started | roofline **~14.0 tok/s** (DERIVED: 1,064 MB weights + ~44 MB KV per token at ctx 512) |
 
 Key facts you would otherwise rediscover:
 - **KV260 DDR is DDR4-2133** (read from the DPLL/DDR_CTRL/MSTR registers), so the peak is
@@ -40,8 +44,11 @@ Key facts you would otherwise rediscover:
   embedding and LM head. Pinned against PrismML's unpacked release.
 - Qwen3 here uses **YaRN RoPE ×4** (original context 16384 on the 8B, 8192 on the 1.7B), applied
   at every length.
-- **K cache needs an exponent per 16 channels.** Qwen's post-RoPE K has outlier channels; BFP8
-  with one exponent per 128 dropped agreement to 96.3%.
+- **K cache = BFP10 with an exponent per 16 channels.** Qwen's post-RoPE K has outlier
+  channels; BFP8 with one exponent per 128 dropped agreement to 96.3% (R1c), and BFP8 per 16
+  still flipped near-ties on number-heavy text at long context (0.9886). V stays BFP8 per 128.
+- **Agreement numbers are noisy at the 0.3–0.5% level** (a few hundred to a few thousand
+  tokens, and most disagreements are float near-ties). Use ablations, not single runs.
 
 ## 2. Code map (`fabric/big/`)
 
@@ -57,14 +64,22 @@ Key facts you would otherwise rediscover:
 | `ref/actquant.py`, `ref/r1b_sweep.py` | R1b activation-format sweep |
 | `ref/gate_float.py` | R1a gate (vs HF, 1.7B, CPU) |
 | `ref/r1c_gate.py` | R1c gate (fabric spec vs float, 8B, GPU) → `results/r1c_gate.json` |
-| `results/` | raw R0 sweeps, R1b sweep, R1c gate, cached float chat text (`Bonsai-8B-Q1_0_chatgen_T256.json`, which took 35 min to make) |
+| `ref/r1_longctx.py` | long-context gate (chunked prefill, 256-token buckets) → `results/r1_longctx.json`; `r1_longctx_k8.*`, `_ablate.*`, `_ksweep.*` are the failing run and its root-cause |
+| `ref/golden.py`, `tests/test_big_golden.py` | golden-vector exporter (`.mem` + `MANIFEST.json`) with `--verify` round-trip; tiny-model test |
+| `ref/r1_freerun.py` | free-running greedy check → `results/r1_freerun.json` |
+| `ref/r1d_ternary.py` | ternary vs binary: Q2_0 pin, bytes/token table, NLL eval → `results/r1d_ternary.json`, `r1d_pin.json` |
+| `pack_weights.py` | **R2a weight packer**: Q1 matrices → port-interleaved 128-bit beat stream (docstring is the stream-format spec) |
+| `rtl/gemv_stream.v`, `tb/tb_gemv_stream.sv`, `run_gemv_stream.py` | **R2a streaming GEMV** + iverilog gate (`GEMV_STREAM_VERDICT`) |
+| `tcl/ooc_gemv_stream.tcl` | OOC synth of the GEMV core. **Written, never run** (licence, see §3) |
+| `results/` | raw R0 sweeps, R1b sweep, R1c gate, the R1 leftover results, cached float chat text (`Bonsai-8B-Q1_0_chatgen_T256.json`, which took 35 min to make) |
 
 The fabric spec in one breath: the GEMV input goes to BFP10 per 128; per group an exact integer
 Σ sign·q (17 b) is multiplied by the fp16 scale split as an 11-bit integer × 2^e, then shifted
 into a 64-bit accumulator with LSB 2^−40 (peak use 56 bits), with one RNE to fp32 at the end. The
 vector path is IEEE fp32 with **lane-strided reductions** (lane = i % 16, sequential per lane,
 then a pairwise tree), table exp (4097 entries) and rsqrt (1024 entries + 2 Newton steps),
-streamed RoPE tables, and KV as BFP8 (K: exponent per 16 channels; V: per 128).
+streamed RoPE tables, and KV as block floating point (K: BFP10, exponent per 16 channels;
+V: BFP8, exponent per 128).
 
 ## 3. Environment
 
@@ -93,94 +108,49 @@ EOF
 - On CPU-only machines the exact-integer spec is slow on the 8B: develop on
   `Bonsai-1.7B-Q1_0.gguf` (same architecture), and run 8B checks only where needed.
 
+- **Vivado licence** is node-locked to the laptop's home-network MAC (or the dock ethernet).
+  On a hotspot with a randomised MAC synthesis cannot check out a licence; `xvlog` / `xelab`
+  still work.
+- Ternary GGUFs for R1d live in `data/big/` (`Ternary-Bonsai-4B-Q2_0.gguf`, `-1.7B-`); the
+  tokenizer is identical to Bonsai-8B's.
+
 Sanity check that the setup works (about 3 min on the laptop GPU):
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True .venv/bin/python -u -m fabric.big.ref.r1c_gate`
 → `R1C_VERDICT PASS`.
 
-## 4. Open tasks (R1 leftovers), with acceptance criteria
+## 4. Open tasks
 
-GPU tasks (1, 3, and the eval part of 4) must run one after another on a 4 GB card. Task 2 is
-mostly code and runs alongside anything. Task 4's downloads run alongside anything.
+The four R1 leftovers are done (table in §1; write-up in `docs/big-kev-r1.md` §8–§13, local
+only). What is open now, in order:
 
-### Task 1 — Long-context check (~1–1.5 h, GPU)
-The R1c gate ran at T = 256. KV quantisation and softmax error grow with context.
-- Add **chunked prefill** to `FabricRef`: `_layers()` already accepts `kv_hist` and a `valid`
-  mask, so feed queries in chunks of ~128 with the growing K/V history. The full-T attention
-  temporaries (`[32, T, T, 16]` fp32) don't fit 4 GB at T = 1024.
-- Compare against the float reference (`Qwen3Ref.forward_seq` is fine to T ≈ 2048) on 2–3 long
-  texts at T = 1024 and 2048. Report top-1 / ΔNLL / cos **by position bucket** (0–256,
-  256–512, …).
-- **Accept:** pooled top-1 ≥ 0.99 at each length, and no downward trend across buckets. If it
-  trends down, ablate K/V format first (`FabricRef.K_FMT` / `V_FMT`), then softmax.
-- Also confirm chunked prefill == `forward_seq` bit-identical at T = 256 (same invariant as
-  step == seq).
-- Write results to `results/r1_longctx.json`.
+1. **OOC synth of `gemv_stream`** (30–60 min, needs the Vivado licence):
+   `vivado -mode batch -source fabric/big/tcl/ooc_gemv_stream.tcl -tclargs 3 96 3.0 /tmp/kevbuild/gemv_stream_ooc impl`.
+   Report WNS and LUT / FF / DSP as PROJECTED. Likely critical paths: the 64-bit accumulator
+   feedback add, the 1280-bit activation read into tree level 1, the fan-out of `fire`.
+   **Accept:** closes at 3.0 ns, or a stated fallback (split 32+32 accumulator, or HP0–3 at
+   250 MHz = 4.0 ns).
+2. **R2a on silicon** (needs the board, §6): AXI read masters + address generator around
+   `gemv_stream` (reuse `rtl/axi_rd_probe.v`'s burst logic), a packed image in reserved DDR,
+   a driver that loads activations and reads fp32 rows back. **Accept:** bit-exact against the
+   golden vectors (`ref/golden.py`) on real 8B matrices, then a MEASURED GB/s and the DERIVED
+   tok/s it implies.
+3. **Stream layout decision:** the packer's dense 3-slot stripe has no silicon number; R0's
+   15.54 GB/s used a 4-slot stripe with HP2's slot unread (`--slots 4 --port-slots 0,1,3`, 4/3
+   the image size). Measure both with the R0 probe before fixing the format.
+4. **Ternary-8B quality ceiling** for R1d: finish the download
+   (`prism-ml/Ternary-Bonsai-8B-gguf`, 2.18 GB) and re-run `ref/r1d_ternary.py` (~1 min GPU).
+5. **R6 entry experiment** (contextual sparsity, `docs/10-big-kevin.md`): threshold sweep on
+   the FFN `down` input, skipped fraction vs top-1 / ΔNLL, all layers (~15 min GPU). If R6 is
+   taken up, `down` wants a column-major stream: decide before item 2 hardens the format.
 
-### Task 2 — Golden vectors for RTL (~2 h, mostly code)
-The bridge to R2. The analogue of `fabric/stage3/seq_ref.py: block0_phase_signals()`.
-- Add a trace option to `FabricRef._layers` that records, per layer and per position, every
-  intermediate the RTL will produce:
-  - embed row;
-  - attn_norm out;
-  - **BFP10 quantised GEMV input (q mantissas + exponents)**;
-  - q/k/v GEMV outputs;
-  - q_norm/k_norm;
-  - roped q/k;
-  - quantised K/V (mantissas + exponents);
-  - scores;
-  - softmax p;
-  - ctx;
-  - o_proj out;
-  - residual;
-  - ffn_norm;
-  - gate / up;
-  - silu·up (and its BFP10 quantisation);
-  - down out;
-  - residual;
-  - final norm;
-  - logits / argmax.
-- Also dump per-GEMV **per-group integer partials** (inner sums and shifted terms) for at least
-  one matrix, so the RTL accumulator can be debugged term by term.
-- Export as `.mem` hex in a directory layout one RTL testbench can `$readmemh` (one file per
-  signal, a fixed bit-width per signal documented in a `MANIFEST.json`). fp32 values as raw IEEE
-  bits.
-- Default scope: Bonsai-8B, a short chat prompt (~16 tokens), layers 0 and 35 in full, plus
-  final logits. Make layers and positions arguments.
-- Mind the iverilog traps in CLAUDE.md: flat ROMs + ranged `$readmemh`, never a 2D-array row.
-- **Accept:** a Python round-trip (re-read the `.mem` files, recompute layer 0 from them with the
-  spec functions) reproduces the recorded outputs bit-exactly. Commit the generator; don't
-  commit large vector dumps (put them under `/tmp/kevbuild/big_vectors/` or similar).
+GPU jobs must run one at a time on a 4 GB card.
 
-### Task 3 — Free-running sanity (~30 min, GPU)
-Teacher forcing can hide drift.
-- Greedy-generate 64–100 tokens with `FabricRef` (per-token `step()` is ~2.3 s/token on the
-  laptop GPU) on 3 chat prompts.
-- Find the first divergence from float greedy cheaply: take the fabric output, run
-  `Qwen3Ref.forward_seq` on it once, and see where float's argmax differs.
-- Accept if the text stays coherent. Report divergence positions and a sample in
-  `results/r1_freerun.json`.
-
-### Task 4 — R1d: ternary vs binary at equal bytes (~2–3 h; downloads + CPU work + ~20 min GPU)
-Decision-affecting. Ternary (−1, 0, +1) costs ~1.6–2.1 bits/weight but is often better per bit
-than binary. At equal bytes/token (≈ equal tok/s) does **Ternary-Bonsai-4B** beat
-**binary Bonsai-8B**?
-- Download `prism-ml/Ternary-Bonsai-4B-gguf` (and `-8B-gguf` for the quality ceiling), plus
-  `Ternary-Bonsai-4B-unpacked` to pin the GGUF block layout, the same way Q1_0 was pinned
-  (signs/zeros agree 100%, values equal after bf16 rounding).
-- Extend `gguf_q1.py` with a dequant for their ternary type, and a packed-ternary matrix class
-  for `qwen3_ref.py` (or dequant to dense on load if memory allows).
-- Evaluate **float-reference NLL** for binary-8B, ternary-4B and ternary-8B on the same texts
-  (`r1b_sweep.eval_texts` + the cached chat). Report NLL, bytes/token (exact, from tensor
-  sizes, excluding the embedding), and DERIVED tok/s at 15.54 GB/s.
-- Note the bits/weight as stored and the best achievable packing (5 trits/byte = 1.6 bpw).
-- Output `results/r1d_ternary.json`. **Decision rule:** if ternary-4B NLL < binary-8B NLL at
-  ≤ the same bytes/token, flag it. The model choice for R2 is the human's call.
-
-## 5. After R1: R2 plan (not started)
+## 5. R2 plan
 
 - **R2a:** a weight packer that emits R0's port-interleaved layout, plus a streaming 1-bit ×
-  BFP10 GEMV RTL across HP0/1/3. Gate it bit-exact in iverilog against task 2's vectors, then
-  run it on silicon at line rate. First Big-Kev silicon number.
+  BFP10 GEMV RTL across HP0/1/3. **Packer and RTL are done and gated bit-exact in iverilog**
+  (own test cases plus real 8B rows, not yet the golden-vector files). Remaining: synth, then
+  run it on silicon at line rate (§4 items 1–3). First Big-Kev silicon number.
   - Risk: ~330 weights/cycle at 333 MHz is aggressive for timing. Fallback is HP0–3 at 250 MHz
     (14.6 GB/s).
 - **R2b:** fp32 vector unit, attention with KV in DDR, layer sequencing, board driver.
