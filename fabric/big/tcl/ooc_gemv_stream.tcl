@@ -3,9 +3,9 @@
 #   vivado -mode batch -source fabric/big/tcl/ooc_gemv_stream.tcl \
 #          -tclargs <NPORTS> <GMAX> <PERIOD_NS> <BDIR> <synth|impl> [ACT_RAM_STYLE]
 # Defaults: 3 96 3.0 /tmp/kevbuild/gemv_stream_ooc synth distributed
-# STATUS (2026-11-10): written but NEVER RUN -- Vivado could not check out its node-locked
-# licence on the day (see the R2a report), so treat this script as untested. The RTL itself
-# does parse and elaborate in Vivado's front end (xvlog -sv + xelab, no warnings).
+# STATUS (2026-11-10): RUN with `3 96 3.0 <dir> impl` on Vivado 2026.1, ~7 min: post-route
+# WNS +0.197 ns at 3.0 ns (0 of 45,066 endpoints failing, WHS +0.036), 9,318 LUT (7,015 logic +
+# 2,303 LUTRAM), 13,297 FF, 823 CARRY8, 6 DSP, 0 BRAM. See results/ooc_gemv_stream.txt.
 # Only clk is constrained, so the report is register-to-register timing inside the core;
 # the port-side paths (s_ready/s_valid skid, act_* write port, m_*) are registered in the RTL
 # but their I/O timing is not covered here.

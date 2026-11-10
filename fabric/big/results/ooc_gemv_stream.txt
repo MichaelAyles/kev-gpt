@@ -1,0 +1,21 @@
+OOC synth + place + route of fabric/big/rtl/gemv_stream.v (PROJECTED: out of context, not a bitstream)
+tool      Vivado 2026.1, part xck26-sfvc784-2LV-c, 2026-11-10
+command   vivado -mode batch -source fabric/big/tcl/ooc_gemv_stream.tcl -tclargs 3 96 3.0 /tmp/kevbuild/gemv_stream_ooc impl
+params    NPORTS=3 GMAX=96 ACT_RAM_STYLE=distributed, clock 3.000 ns (333.3 MHz)
+
+post-route timing   WNS +0.197 ns  TNS 0.000  failing endpoints 0 / 45066   WHS +0.036 ns  THS 0.000   WPWS +0.738 ns
+post-place estimate WNS +0.366 ns
+worst path          s0_bsrc_reg[2] -> lane[1].s1_sign_reg[6]: 2.799 ns, 1 logic level (LUT5), 94% routing
+                    (fan-out of the sign-beat steering select, not the accumulator or the adder tree)
+
+utilisation (post-route)          used    available   %
+CLB LUTs                          9318    117120      7.96
+  LUT as logic                    7015    117120      5.99
+  LUT as memory (activation RAM)  2303     57600      4.00
+CLB registers                    13297    234240      5.68
+CARRY8                             823     14640      5.62
+DSP48E2                              6      1248      0.48
+Block RAM / URAM                     0
+
+caveats: only clk is constrained (register-to-register paths inside the core); no I/O timing, no AXI read
+masters, no PS, no neighbouring logic. An in-context build will be tighter than this.

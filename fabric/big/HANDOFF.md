@@ -29,7 +29,7 @@ Rules of the house (from CLAUDE.md, and they apply here):
 | **R1 golden vectors** | **PASS** | trace taps in the spec + `.mem` exporter; 8B dump (layers 0 and 35) round-trips bit-exact, `GOLDEN_VERDICT PASS 42/42` |
 | **R1 free-run** | **PASS** | 3 prompts × 80 greedy tokens: fabric output identical to float greedy at every position |
 | **R1d** ternary-4B vs binary-8B | **DONE, no flag** | pooled NLL 2.598 vs 2.516 (binary wins by ~2σ, tied on neutral text); bytes equal as stored, ternary 18.5% smaller at 5 trits/byte. R2 stays on binary-8B |
-| **R2a (sim)** packer + streaming GEMV RTL | **PASS in iverilog** | `GEMV_STREAM_VERDICT PASS` (136 sims, bit-exact vs `ExactBfpGemv`), 2.637 groups/cycle at 3 ports, 1,064.1 MB/token packed. **Not synthesised** |
+| **R2a (sim)** packer + streaming GEMV RTL | **PASS in iverilog** | `GEMV_STREAM_VERDICT PASS` (136 sims, bit-exact vs `ExactBfpGemv`), 2.637 groups/cycle at 3 ports, 1,064.1 MB/token packed. **OOC place+route at 3.0 ns (333 MHz): WNS +0.197 ns, 9.3k LUT (8%), 13.3k FF, 6 DSP, 0 BRAM** (PROJECTED, core only) |
 | **R2** streaming engine on silicon | not started | roofline **~14.0 tok/s** (DERIVED: 1,064 MB weights + ~44 MB KV per token at ctx 512) |
 
 Key facts you would otherwise rediscover:
@@ -70,7 +70,7 @@ Key facts you would otherwise rediscover:
 | `ref/r1d_ternary.py` | ternary vs binary: Q2_0 pin, bytes/token table, NLL eval → `results/r1d_ternary.json`, `r1d_pin.json` |
 | `pack_weights.py` | **R2a weight packer**: Q1 matrices → port-interleaved 128-bit beat stream (docstring is the stream-format spec) |
 | `rtl/gemv_stream.v`, `tb/tb_gemv_stream.sv`, `run_gemv_stream.py` | **R2a streaming GEMV** + iverilog gate (`GEMV_STREAM_VERDICT`) |
-| `tcl/ooc_gemv_stream.tcl` | OOC synth of the GEMV core. **Written, never run** (licence, see §3) |
+| `tcl/ooc_gemv_stream.tcl` | OOC synth + place + route of the GEMV core (~7 min) → `results/ooc_gemv_stream.txt` |
 | `results/` | raw R0 sweeps, R1b sweep, R1c gate, the R1 leftover results, cached float chat text (`Bonsai-8B-Q1_0_chatgen_T256.json`, which took 35 min to make) |
 
 The fabric spec in one breath: the GEMV input goes to BFP10 per 128; per group an exact integer
@@ -109,8 +109,8 @@ EOF
   `Bonsai-1.7B-Q1_0.gguf` (same architecture), and run 8B checks only where needed.
 
 - **Vivado licence** is node-locked to the laptop's home-network MAC (or the dock ethernet).
-  On a hotspot with a randomised MAC synthesis cannot check out a licence; `xvlog` / `xelab`
-  still work.
+  On a hotspot NetworkManager randomises the MAC and synthesis cannot check out a licence:
+  `nmcli connection modify "<profile>" wifi.cloned-mac-address permanent`, then reconnect.
 - Ternary GGUFs for R1d live in `data/big/` (`Ternary-Bonsai-4B-Q2_0.gguf`, `-1.7B-`); the
   tokenizer is identical to Bonsai-8B's.
 
@@ -123,12 +123,9 @@ Sanity check that the setup works (about 3 min on the laptop GPU):
 The four R1 leftovers are done (table in §1; write-up in `docs/big-kev-r1.md` §8–§13, local
 only). What is open now, in order:
 
-1. **OOC synth of `gemv_stream`** (30–60 min, needs the Vivado licence):
-   `vivado -mode batch -source fabric/big/tcl/ooc_gemv_stream.tcl -tclargs 3 96 3.0 /tmp/kevbuild/gemv_stream_ooc impl`.
-   Report WNS and LUT / FF / DSP as PROJECTED. Likely critical paths: the 64-bit accumulator
-   feedback add, the 1280-bit activation read into tree level 1, the fan-out of `fire`.
-   **Accept:** closes at 3.0 ns, or a stated fallback (split 32+32 accumulator, or HP0–3 at
-   250 MHz = 4.0 ns).
+1. ~~OOC synth of `gemv_stream`~~ **done:** post-route WNS +0.197 ns at 3.0 ns, 9.3k LUT, 13.3k FF,
+   6 DSP (`results/ooc_gemv_stream.txt`). Worst path = fan-out of the sign-beat steering select.
+   The margin is thin and core-only: re-time in context once the AXI masters are attached.
 2. **R2a on silicon** (needs the board, §6): AXI read masters + address generator around
    `gemv_stream` (reuse `rtl/axi_rd_probe.v`'s burst logic), a packed image in reserved DDR,
    a driver that loads activations and reads fp32 rows back. **Accept:** bit-exact against the
