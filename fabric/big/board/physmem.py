@@ -245,26 +245,35 @@ class HugePool:
 
     def region(self, pa: int, size: int) -> Region:
         """re-attach a region recorded by an earlier process (persistent pool): fails if the
-        pages are no longer where the record says."""
+        pages are no longer where the record says. Marks its bytes used in the allocator."""
         first, off0 = pa - pa % HP, pa % HP
         try:
             slots = [self.vpage[first + i * HP] for i in range(-(-(off0 + size) // HP))]
         except KeyError:
             raise RuntimeError(f"physical page for region {pa:#x}+{size} is not in the pool") from None
+        for r in self.free:
+            if r[0] <= pa < r[0] + len(r[1]) * HP:
+                r[2] = max(r[2], pa - r[0] + size)
         return Region(self, pa, size, slots, off0)
 
     def alloc(self, size: int, align: int = 4096) -> Region:
         """bump-allocate inside a run, tightest sufficient run first (keeps the big runs for
-        big matrices). Regions are `align`-aligned, so several small ones share a hugepage."""
-        size = -(-size // align) * align
+        big matrices). Regions start `align`-aligned, so several small ones share a hugepage."""
+        size = -(-size // 4096) * 4096
         for r in sorted(self.free, key=lambda r: len(r[1]) * HP - r[2]):
-            if len(r[1]) * HP - r[2] >= size:
-                pg, off0 = divmod(r[2], HP)
-                reg = Region(self, r[0] + r[2], size, r[1][pg:pg + -(-(off0 + size) // HP)], off0)
-                r[2] += size
+            start = -(-r[2] // align) * align
+            if len(r[1]) * HP - start >= size:
+                pg, off0 = divmod(start, HP)
+                reg = Region(self, r[0] + start, size, r[1][pg:pg + -(-(off0 + size) // HP)], off0)
+                r[2] = start + size
                 return reg
         raise MemoryError(f"no contiguous {size / 1e6:.1f} MB left; largest free "
                           f"{max((len(r[1]) * HP - r[2] for r in self.free), default=0) / 1e6:.1f} MB")
+
+    def va(self, reg: Region) -> int:
+        """virtual address of a region that lies inside ONE hugepage (scratch buffers)."""
+        assert len(reg.slots) == 1, "region spans hugepages: not virtually contiguous"
+        return self.va0 + reg.slots[0] * HP + reg.off0
 
     def report(self) -> str:
         ln = sorted((len(r[1]) for r in self.runs), reverse=True)

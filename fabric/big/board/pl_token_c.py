@@ -24,6 +24,7 @@ import time
 
 import numpy as np
 
+from .. import gemv_axi_regs as R
 from ..host.bk_host import BkHost, mat_name
 from ..pack_weights import Layout
 from .pl_gemv import KINDS, Gemv, build_image, set_fclk
@@ -73,6 +74,21 @@ class BoardGemv:
         return 0
 
 
+class DmaStats:
+    """the same counters as BoardGemv, read from the C callback's context (version-2 path)."""
+
+    def __init__(self, dma, fclk):
+        self.dma, self.fclk = dma, fclk
+
+    def reset(self):
+        self.dma.reset()
+
+    def __getattr__(self, k):
+        c = self.dma.c
+        return {"cyc": c.cyc, "cyc_extra": 0, "stall": c.stall_in, "t_act": (c.ns_act + c.ns_regs) / 1e9,
+                "t_run": c.ns_wait / 1e9, "t_read": c.ns_read / 1e9}[k]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gguf", default=os.path.expanduser("~ubuntu/bigkev/data/Bonsai-8B-Q1_0.gguf"))
@@ -89,6 +105,8 @@ def main():
     ap.add_argument("--think", action="store_true", help="with --text: leave Qwen3 thinking on")
     ap.add_argument("-n", type=int, default=80)
     ap.add_argument("--max-ctx", type=int, default=1024)
+    ap.add_argument("--no-dma", action="store_true", help="use the AXI-Lite path even on a version-2 bitstream")
+    ap.add_argument("--full-head", action="store_true", help="with DMA: read all logits back instead of the fabric argmax")
     ap.add_argument("--out", default="")
     a = ap.parse_args()
     for k, v in dict(chunk=256, slots=0, port_slots="", rebuild=False, spare_pages=64, min_pages=256).items():
@@ -122,9 +140,17 @@ def main():
     names = [f"l{l}.{k}" for l in range(n_layer) for k in KINDS] + ["lm_head"]
     pool, mats = build_image(a, lay, names)
     t0 = time.time()
-    g = BoardGemv(eng, mats, lay, a.maxout, n_layer)
-    host = BkHost.from_gguf(a.gguf, gemv=g, tables=a.tables, max_ctx=a.max_ctx)
-    print(f"PL_TOKEN_C fclk {fclk / 1e6:.2f} MHz, {n_layer} layers, host loaded in {time.time() - t0:.0f}s, lib {os.path.basename(host.lib._name)}")
+    dma = None
+    if (eng.rd(R.PARAMS) >> 24) >= 2 and not a.no_dma:
+        from .pl_dma import PlDma
+        dma = PlDma(eng, mats, lay, names, pool, a.maxout, head_argmax=not a.full_head)
+        g = DmaStats(dma, fclk)
+        host = BkHost.from_gguf(a.gguf, tables=a.tables, max_ctx=a.max_ctx)
+        host.set_c_gemv(dma.lib.bkpl_gemv, dma.ctx)
+    else:
+        g = BoardGemv(eng, mats, lay, a.maxout, n_layer)
+        host = BkHost.from_gguf(a.gguf, gemv=g, tables=a.tables, max_ctx=a.max_ctx)
+    print(f"PL_TOKEN_C {'DMA (v2)' if dma else 'AXI-Lite (v1)'} fclk {fclk / 1e6:.2f} MHz, {n_layer} layers, host loaded in {time.time() - t0:.0f}s, lib {os.path.basename(host.lib._name)}")
 
     res, all_ok = {}, True
     for name, job in jobs.items():
@@ -170,7 +196,7 @@ def main():
                      head_extra_ms_per_token=med("head_extra_ms"))
             print(f"[{name}] {len(gen)} tokens generated: {wall * 1e3:.0f} ms/token = {1 / wall:.2f} tok/s end to end (hybrid, MEASURED) "
                   f"at context {per[0]['ctx']}..{per[-1]['ctx']}; fabric weight stream {med('fabric_ms'):.1f} ms, "
-                  f"C host {med('host_ms'):.0f} ms, Python glue {med('glue_ms'):.0f} ms, AXI-Lite io: act-load {med('act_ms'):.0f} ms + run/poll {med('run_ms'):.0f} ms "
+                  f"C host {med('host_ms'):.0f} ms, Python glue {med('glue_ms'):.0f} ms, host<->fabric io: act-load {med('act_ms'):.0f} ms + run/poll {med('run_ms'):.0f} ms "
                   f"(of which {med('fabric_ms') + med('head_extra_ms'):.0f} ms is the fabric streaming, "
                   f"{med('head_extra_ms'):.0f} ms of it LM-head re-streams) + readback {med('read_ms'):.0f} ms")
         if expect:
