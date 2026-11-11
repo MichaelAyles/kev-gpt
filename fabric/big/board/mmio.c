@@ -63,7 +63,7 @@ enum {
     R_CTRL, R_STATUS, R_ROWS, R_GROUPS, R_PAD, R_BURSTS, R_CHUNK, R_STEP, R_MAXOUT, R_RES_START,
     R_BASE_LO, R_BASE_HI, R_MODE, R_PORT_OFF, R_ACT_ADDR_LO, R_ACT_ADDR_HI, R_RES_ADDR_LO,
     R_RES_ADDR_HI, R_CYC_LO, R_CYC_HI, R_ROWS_DONE, R_TUPLES, R_STALL_IN, R_ERRCNT, R_ARGMAX_IDX,
-    R_ARGMAX_VAL, R_CYC_ACT, R_CYC_RES, R_PORT_BASE, R_PORT_STRIDE, R_P_BEATS, R_P_XSUM, R_N
+    R_ARGMAX_VAL, R_CYC_ACT, R_CYC_RES, R_PORT_BASE, R_PORT_STRIDE, R_P_BEATS, R_P_XSUM, R_BATCH, R_ARGMAX_B, R_N
 };
 
 typedef struct {
@@ -89,6 +89,10 @@ typedef struct {
     int32_t last_argmax, err_mat;
     uint32_t last_status, err_code;
     const int16_t *last_xq;
+    /* register map VERSION 3 (batch): nb_max = NB of the bitstream, 0 on version 2 */
+    int32_t nb_max, last_nb;
+    int32_t argmax_b[8];                  /* per element, after an argmax-only LM head */
+    uint64_t res_cap;                     /* bytes available at res_va */
 } bkpl;
 
 static inline uint64_t now_ns(void)
@@ -164,6 +168,11 @@ int bkpl_gemv(void *vctx, int mat_id, const int16_t *xq, const int8_t *xe, int g
         return -11;
     int head = mat_id == c->n_mats - 1 && c->head_argmax;
     uint32_t mode = head ? 4u : 6u;                    /* RES_NOCAP, + RES_DMA unless argmax only */
+    if (c->nb_max > 0 && c->last_nb != 1) {            /* after a batch run: back to one element */
+        RG(c, R_BATCH) = 1;
+        c->last_nb = 1;
+        c->last_xq = 0;
+    }
     uint64_t t0 = now_ns();
     if (xq != c->last_xq) {                            /* q/k/v and gate/up share one input */
         bkpl_pack_act(c->act_va, xq, xe, groups);
@@ -233,6 +242,113 @@ int bkpl_gemv(void *vctx, int mat_id, const int16_t *xq, const int8_t *xe, int g
 }
 
 /* registers that do not change between runs */
+/* Batch form (register map VERSION 3): nb activation vectors through one pass over the matrix.
+ * xq[b] / xe[b] / y[b] are element b's arrays, laid out exactly as bkpl_gemv's. reuse != 0: the
+ * nb activations are the ones of the previous call (same nb), so the banks are not reloaded.
+ * The argmax-only LM head (head_argmax) fills y[b] with -inf except the maximum when y[b] is
+ * not NULL, and always sets argmax_b[b]. */
+int bkpl_gemv_batch(void *vctx, int mat_id, int nb, const int16_t *const *xq, const int8_t *const *xe, int groups,
+                    float *const *y, int rows, int reuse)
+{
+    bkpl *c = (bkpl *)vctx;
+    if (mat_id < 0 || mat_id >= c->n_mats)
+        return -10;
+    const bkpl_mat *m = &c->mats[mat_id];
+    if ((uint32_t)rows != m->rows || (uint32_t)groups != m->groups)
+        return -11;
+    if (nb < 1 || nb > c->nb_max || nb > 8)
+        return -16;
+    int head = mat_id == c->n_mats - 1 && c->head_argmax;
+    size_t res_bytes = ((size_t)rows * (size_t)nb * 4 + 15) & ~(size_t)15;
+    if (!head && res_bytes > c->res_cap)
+        return -17;
+    uint32_t mode = head ? 4u : 6u;
+    uint64_t t0 = now_ns();
+    if (!reuse || nb != c->last_nb) {
+        for (int b = 0; b < nb; b++)
+            bkpl_pack_act(c->act_va + (size_t)256 * (size_t)b * (size_t)groups, xq[b], xe[b], groups);
+        bkpl_cache_clean(c->act_va, (size_t)nb * (size_t)groups * 256);
+        c->act_loads += (uint64_t)nb;
+        mode |= 1u;
+    }
+    c->last_xq = 0;                                    /* the single-vector reuse test no longer holds */
+    c->last_nb = nb;
+    uint64_t t1 = now_ns();
+    RG(c, R_BATCH) = (uint32_t)nb;
+    RG(c, R_ROWS) = m->rows;
+    RG(c, R_GROUPS) = m->groups;
+    RG(c, R_PAD) = m->pad;
+    RG(c, R_BURSTS) = m->bursts;
+    RG(c, R_BASE_LO) = (uint32_t)m->pa;
+    RG(c, R_BASE_HI) = (uint32_t)(m->pa >> 32);
+    RG(c, R_MODE) = mode;
+    RG(c, R_CTRL) = 1;
+    uint64_t t2 = now_ns();
+    uint32_t st = mmio_wait(&RG(c, R_STATUS), 2, c->spins);
+    uint64_t t3 = now_ns();
+    c->last_status = st;
+    c->ns_act += t1 - t0;
+    c->ns_regs += t2 - t1;
+    c->ns_wait += t3 - t2;
+    if (st != 2u || RG(c, R_ERRCNT) != 0 || RG(c, R_ROWS_DONE) != m->rows || RG(c, R_TUPLES) != m->tuples) {
+        c->err_mat = mat_id;
+        c->err_code = st;
+        return -12;
+    }
+    if (c->check_xsum) {
+        for (int k = 0; k < c->nports; k++) {
+            uint32_t pb = c->off[R_PORT_BASE] + c->off[R_PORT_STRIDE] * (uint32_t)k;
+            if (c->regs[(pb + c->off[R_P_BEATS]) >> 2] != m->beats) {
+                c->err_mat = mat_id;
+                return -13;
+            }
+            for (int i = 0; i < 4; i++)
+                if (c->regs[(pb + c->off[R_P_XSUM] + 4u * (uint32_t)i) >> 2] != m->xsum[k][i]) {
+                    c->err_mat = mat_id;
+                    return -14;
+                }
+        }
+    }
+    c->cyc += RG(c, R_CYC_LO) | ((uint64_t)RG(c, R_CYC_HI) << 32);
+    c->cyc_act += RG(c, R_CYC_ACT);
+    c->cyc_res += RG(c, R_CYC_RES);
+    c->stall_in += RG(c, R_STALL_IN);
+    c->runs++;
+    if (head) {
+        for (int b = 0; b < nb; b++) {
+            uint32_t a = c->off[R_ARGMAX_B] + 8u * (uint32_t)b;
+            uint32_t idx = c->regs[a >> 2], raw = c->regs[(a + 4u) >> 2];
+            if (idx >= (uint32_t)rows) {
+                c->err_mat = mat_id;
+                return -15;
+            }
+            c->argmax_b[b] = (int32_t)idx;
+            if (y[b]) {
+                float v;
+                memcpy(&v, &raw, 4);
+                for (int i = 0; i < rows; i++)
+                    y[b][i] = -INFINITY;
+                y[b][idx] = v;
+            }
+        }
+        c->last_argmax = c->argmax_b[nb - 1];
+    } else {
+        bkpl_cache_invalidate(c->res_va, res_bytes);
+        const float *s = (const float *)(const void *)c->res_va;   /* row r, element b at r * nb + b */
+        if (nb == 1)
+            memcpy(y[0], s, (size_t)rows * 4);
+        else
+            for (int b = 0; b < nb; b++) {
+                float *d = y[b];
+                const float *q = s + b;
+                for (int r = 0; r < rows; r++, q += nb)
+                    d[r] = *q;
+            }
+    }
+    c->ns_read += now_ns() - t3;
+    return 0;
+}
+
 void bkpl_setup(bkpl *c)
 {
     RG(c, R_CHUNK) = (uint32_t)c->chunk;
@@ -246,4 +362,7 @@ void bkpl_setup(bkpl *c)
     RG(c, R_RES_ADDR_LO) = (uint32_t)c->res_pa;
     RG(c, R_RES_ADDR_HI) = (uint32_t)(c->res_pa >> 32);
     c->last_xq = 0;
+    if (c->nb_max > 0)
+        RG(c, R_BATCH) = 1;
+    c->last_nb = 1;
 }
