@@ -40,6 +40,12 @@ the only function that needs it.
     python -m fabric.big.host.bk_host --tables t.npz --gguf data/big/Bonsai-8B-Q1_0.gguf
     python -m fabric.big.host.bk_host --bench --shape 8b --ctx 20,64,256     # host cost, no PL
     python -m fabric.big.host.bk_host --replay host_replay_tiny.npz           # numpy-only gate
+    python -m fabric.big.host.bk_host --kern-check --threads-check host_replay_tiny.npz
+        # numpy-only: fast kernels == reference kernels on adversarial inputs
+        # (HOST_KERN_VERDICT); the replay with 1/3/4/2 threads x both kernel sets, one digest
+        # over every tap and the KV cache (HOST_THREADS_VERDICT)
+    python -m fabric.big.host.bk_host --bench --shape 8b --ctx 1,20,64,256 --threads 1,4
+        # [--kernels ref] [--spin-us N] [--gap-us N: the stand-in GEMV waits N us, as the fabric would]
 """
 from __future__ import annotations
 
@@ -63,9 +69,13 @@ HERE = Path(__file__).resolve().parent
 SRC, HDR = HERE / "bk_host.c", HERE / "bk_host.h"
 
 # the mandatory part: -ffp-contract=off (aarch64 gcc fuses a*b+c by default), never fast-math
-BASE_FLAGS = ["-O2", "-ffp-contract=off", "-fno-fast-math", "-shared", "-fPIC"]
-# default build: -O3 only adds vectorisation of the lane loops; no fp32 result can change
-DEFAULT_FLAGS = ["-O3", "-ffp-contract=off", "-fno-fast-math", "-shared", "-fPIC"]
+BASE_FLAGS = ["-O2", "-ffp-contract=off", "-fno-fast-math", "-pthread", "-shared", "-fPIC"]
+# default build: the optimisation level cannot change an fp32 result (the gate checks it)
+DEFAULT_FLAGS = ["-O3", "-ffp-contract=off", "-fno-fast-math", "-pthread", "-shared", "-fPIC"]
+API_VERSION = 2
+KERN_AUTO, KERN_FAST, KERN_REF = 0, 1, 2
+KERN_NAMES = {KERN_FAST: "fast", KERN_REF: "ref"}
+SIMD_NAMES = {0: "none", 1: "neon", 2: "sse2"}
 
 P, EXP_K, QK = 16, 4096, 128
 KINDS = ("q", "k", "v", "o", "gate", "up", "down")
@@ -119,7 +129,8 @@ def build_lib(flags=None, defines=(), cc=None, out_dir=None, force=False, libs=(
 class BkConfig(ctypes.Structure):
     _fields_ = [(n, c_int32) for n in ("n_layer", "d", "ffn", "n_head", "n_kv", "head_dim", "vocab",
                                        "max_ctx", "max_pos", "init_ctx")] + \
-               [("eps", c_float), ("inv_sqrt_hd", c_float)]
+               [("eps", c_float), ("inv_sqrt_hd", c_float)] + \
+               [(n, c_int32) for n in ("n_threads", "spin_us", "kernels", "_pad")]
 
 
 class BkWeights(ctypes.Structure):
@@ -139,7 +150,8 @@ class BkTaps(ctypes.Structure):
 
 class BkStats(ctypes.Structure):
     _fields_ = [("ns", c_uint64 * len(T_NAMES)), ("steps", c_uint64), ("gemv_calls", c_uint64),
-                ("att_pos", c_uint64)]
+                ("att_pos", c_uint64), ("cpu_ns", c_uint64 * len(T_NAMES)), ("regions", c_uint64),
+                ("threads", c_int32), ("kernels", c_int32), ("worker_units", c_uint64)]
 
 
 GEMV_FN = ctypes.CFUNCTYPE(c_int, c_void_p, c_int, c_void_p, c_void_p, c_int, c_void_p, c_int)
@@ -178,13 +190,22 @@ def load_lib(path=None, **build_kw):
         "bk_bfp_dequant8": (None, [vp, vp, c_int, c_int, vp]),
         "bk_embed_row": (None, [vp, c_int64, vp, c_int64, c_int, c_int64, vp]),
         "bk_bench_gemv": (c_int, [vp, c_int, vp, vp, c_int, vp, c_int]),
+        "bk_ref_fsum": (c_float, [vp, c_int]), "bk_ref_exp_fab_n": (None, [vp, vp, vp, c_int]),
+        "bk_ref_silu": (None, [vp, vp, vp, c_int]),
+        "bk_ref_rmsnorm": (None, [vp, vp, c_float, vp, vp, c_int, vp]),
+        "bk_ref_rope": (None, [vp, vp, vp, c_int, vp]),
+        "bk_ref_bfp_quant16": (c_int, [vp, c_int, c_int, c_int, vp, vp]),
+        "bk_ref_bfp_quant8": (c_int, [vp, c_int, c_int, c_int, vp, vp]),
+        "bk_silu_mul": (None, [c_int, vp, vp, vp, vp, vp, c_int]),
+        "bk_attend_kv": (c_int, [c_int, vp, c_int, c_int, c_int, c_float, vp, vp, vp, vp, vp, vp, vp, vp]),
+        "bk_simd": (c_int, []), "bk_threads": (c_int, [vp]), "bk_kernels": (c_int, [vp]),
     }
     for name, (res, args) in sig.items():
         f = getattr(lib, name)
         f.restype, f.argtypes = res, args
     want = [ctypes.sizeof(s) for s in (BkConfig, BkWeights, BkTaps, BkStats)]
     got = [lib.bk_sizeof(i) for i in range(4)]
-    if want != got or lib.bk_api_version() != 1:
+    if want != got or lib.bk_api_version() != API_VERSION:
         raise RuntimeError(f"bk_host ABI mismatch: struct sizes {got} vs the binding's {want}")
     lib._path = str(path)
     _LIBS[str(path)] = lib
@@ -434,9 +455,14 @@ class BkHost:
     """One decode stream. gains: dict attn_norm [L, d], q_norm [L, hd], k_norm [L, hd],
     ffn_norm [L, d], out_norm [d] (a per-layer dict 'l3.attn_norm' ... as in the spec's W is
     accepted too). emb: `emb_from_blocks` / `emb_from_split`. tables: `build_tables*` /
-    `load_tables` (or a path). gemv: Python callable (mat_id, xq, xe, y, same_input)."""
+    `load_tables` (or a path). gemv: Python callable (mat_id, xq, xe, y, same_input).
+    threads: None = $BK_THREADS, else min(4, CPUs); 1 = no worker threads. kernels: None =
+    $BK_KERNELS, else "fast"; "ref" = the scalar reference kernels. spin_us: how long idle
+    workers spin before sleeping (None = $BK_SPIN_US, else 200; 0 = sleep at once).
+    The result does not depend on any of the three."""
 
-    def __init__(self, cfg, gains, emb, tables, gemv=None, max_ctx=None, init_ctx=0, lib=None):
+    def __init__(self, cfg, gains, emb, tables, gemv=None, max_ctx=None, init_ctx=0, lib=None,
+                 threads=None, kernels=None, spin_us=None):
         self.cfg = cfg if isinstance(cfg, HostCfg) else HostCfg.of(cfg)
         c = self.cfg
         self.lib = lib or load_lib()
@@ -471,8 +497,11 @@ class BkHost:
         w.emb_sign_stride, w.emb_scale_stride = emb["sign_stride"], emb["scale_stride"]
         w.exp_tab, w.rs_lo, w.rs_hi = (self._t[k].ctypes.data for k in ("EXP", "RS_LO", "RS_HI"))
         w.cos_tab, w.sin_tab = self._t["COS"].ctypes.data, self._t["SIN"].ctypes.data
+        kern = {None: KERN_AUTO, "auto": KERN_AUTO, "fast": KERN_FAST, "ref": KERN_REF}.get(kernels, kernels)
         bc = BkConfig(c.n_layer, c.d, c.ffn, c.n_head, c.n_kv, c.head_dim, c.vocab, max_ctx, max_pos, init_ctx,
-                      float(np.float32(tables["eps"])), float(np.float32(tables["inv_sqrt_hd"])))
+                      float(np.float32(tables["eps"])), float(np.float32(tables["inv_sqrt_hd"])),
+                      int(threads or 0), 0 if spin_us is None else (int(spin_us) if spin_us > 0 else -1),
+                      int(kern), 0)
         err = c_int(0)
         self._s = self.lib.bk_init(ctypes.byref(bc), ctypes.byref(w), ctypes.byref(err))
         if not self._s:
@@ -480,6 +509,8 @@ class BkHost:
                           if err.value == -7 else "bk_init")
         self._w, self._bc = w, bc
         self.n_mats = self.lib.bk_n_mats(self._s)
+        self.threads = self.lib.bk_threads(self._s)             # as resolved by the library
+        self.kernels = KERN_NAMES[self.lib.bk_kernels(self._s)]
         self.logits = np.zeros(c.vocab, dtype=np.float32)
         self._gemv = gemv
         self._exc = None
@@ -507,10 +538,13 @@ class BkHost:
         h._gguf = g
         return h
 
-    def __del__(self):
+    def close(self):
+        """Free the state and stop its worker threads (also done on garbage collection)."""
         s, self._s = getattr(self, "_s", None), None
         if s:
             self.lib.bk_free(s)
+
+    __del__ = close
 
     # --- GEMV plumbing ---
     def _tramp(self, _ctx, mid, xq_p, xe_p, groups, y_p, rows):
@@ -635,13 +669,19 @@ class BkHost:
                                                (c_int8, np.int8, hd), (c_int8, np.int8, hd // QK)))]
 
     def stats(self, reset=False):
-        """Timing since the last reset: ns per bucket (T_NAMES), host_ns = everything but the
-        callback and the tap copies, plus counters."""
+        """Timing since the last reset: ns per bucket (T_NAMES; wall time on the calling
+        thread, a parallel region's time split over its buckets), host_ns = everything but the
+        callback and the tap copies, cpu_ns = the same buckets summed over the threads, plus
+        counters."""
         st = BkStats()
         self.lib.bk_get_stats(self._s, ctypes.byref(st))
         d = {n: int(st.ns[i]) for i, n in enumerate(T_NAMES)}
+        cpu = {n: int(st.cpu_ns[i]) for i, n in enumerate(T_NAMES)}
         out = dict(ns=d, steps=int(st.steps), gemv_calls=int(st.gemv_calls), att_pos=int(st.att_pos),
-                   gemv_ns=d["gemv"], host_ns=sum(v for k, v in d.items() if k not in ("gemv", "taps")))
+                   gemv_ns=d["gemv"], host_ns=sum(v for k, v in d.items() if k not in ("gemv", "taps")),
+                   cpu_ns=cpu, host_cpu_ns=sum(v for k, v in cpu.items() if k not in ("gemv", "taps")),
+                   regions=int(st.regions), threads=int(st.threads), kernels=KERN_NAMES.get(st.kernels, "?"),
+                   worker_units=int(st.worker_units))
         if reset:
             self.lib.bk_reset_stats(self._s)
         return out
@@ -654,15 +694,47 @@ class BkHost:
 class Prims:
     """numpy front end of the exported spec primitives (unit gates)."""
 
-    def __init__(self, lib=None, tables=None):
+    def __init__(self, lib=None, tables=None, ref=False):
+        """ref=True: the scalar reference kernels (bk_ref_*) where the library has two."""
         self.lib = lib or load_lib()
+        self.ref = bool(ref)
         lo, hi = rsqrt_tables_np()
         t = tables or dict(EXP=exp_table_np(), RS_LO=lo, RS_HI=hi)
         self.EXP, self.LO, self.HI = _f32(t["EXP"]), _f32(t["RS_LO"]), _f32(t["RS_HI"])
 
+    def _fn(self, name):
+        return getattr(self.lib, ("bk_ref_" if self.ref else "bk_") + name)
+
     def fsum(self, x):
         x = _f32(x)
-        return np.float32(self.lib.bk_fsum(_ptr(x), x.size))
+        return np.float32(self._fn("fsum")(_ptr(x), x.size))
+
+    def silu_mul(self, gate, up):
+        """(silu(gate), silu(gate) * up): the FFN activation kernel."""
+        g, u = _f32(gate).reshape(-1), _f32(up).reshape(-1)
+        sil, act = np.empty_like(g), np.empty_like(g)
+        self.lib.bk_silu_mul(KERN_REF if self.ref else KERN_FAST, _ptr(self.EXP), _ptr(g), _ptr(u), _ptr(sil),
+                             _ptr(act), g.size)
+        return sil, act
+
+    def attend(self, q, kq, ke, vq, ve, inv_sqrt_hd=None):
+        """The attention of one kv head. q [rep, hd] fp32, the cache as stored: kq int16
+        [Tk, hd], ke int8 [Tk, hd/16], vq int8 [Tk, hd], ve int8 [Tk, hd/128]. Returns
+        (scores [rep, Tk], p [rep, Tk], ctx [rep, hd])."""
+        q = _f32(q)
+        rep_, hd = q.shape
+        kq, ke = np.ascontiguousarray(kq, dtype=np.int16), np.ascontiguousarray(ke, dtype=np.int8)
+        vq, ve = np.ascontiguousarray(vq, dtype=np.int8), np.ascontiguousarray(ve, dtype=np.int8)
+        Tk = kq.shape[0]
+        assert kq.shape == (Tk, hd) and ke.shape == (Tk, hd // 16) and vq.shape == (Tk, hd) and ve.shape == (Tk, hd // QK)
+        isq = np.float32(1.0) / np.sqrt(np.float32(hd)) if inv_sqrt_hd is None else np.float32(inv_sqrt_hd)
+        sc, pp = np.empty((rep_, Tk), dtype=np.float32), np.empty((rep_, Tk), dtype=np.float32)
+        ctx = np.empty((rep_, hd), dtype=np.float32)
+        rc = self.lib.bk_attend_kv(KERN_REF if self.ref else KERN_FAST, _ptr(self.EXP), hd, rep_, Tk, float(isq),
+                                   _ptr(q), _ptr(kq), _ptr(ke), _ptr(vq), _ptr(ve), _ptr(sc), _ptr(pp), _ptr(ctx))
+        if rc:
+            raise BkError(rc, "bk_attend_kv")
+        return sc, pp, ctx
 
     def rsqrt(self, v):
         v = _f32(v).reshape(-1)
@@ -671,7 +743,7 @@ class Prims:
     def exp(self, x):
         x = _f32(x).reshape(-1)
         y = np.empty_like(x)
-        self.lib.bk_exp_fab_n(_ptr(self.EXP), _ptr(x), _ptr(y), x.size)
+        self._fn("exp_fab_n")(_ptr(self.EXP), _ptr(x), _ptr(y), x.size)
         return y
 
     def exp1(self, x):
@@ -680,19 +752,19 @@ class Prims:
     def silu(self, x):
         x = _f32(x).reshape(-1)
         y = np.empty_like(x)
-        self.lib.bk_silu(_ptr(self.EXP), _ptr(x), _ptr(y), x.size)
+        self._fn("silu")(_ptr(self.EXP), _ptr(x), _ptr(y), x.size)
         return y
 
     def rmsnorm(self, x, w, eps):
         x, w = _f32(x), _f32(w)
         y = np.empty_like(x)
-        self.lib.bk_rmsnorm(_ptr(self.LO), _ptr(self.HI), float(np.float32(eps)), _ptr(x), _ptr(w), x.size, _ptr(y))
+        self._fn("rmsnorm")(_ptr(self.LO), _ptr(self.HI), float(np.float32(eps)), _ptr(x), _ptr(w), x.size, _ptr(y))
         return y
 
     def rope(self, cos, sin, x):
         cos, sin, x = _f32(cos), _f32(sin), _f32(x)
         y = np.empty_like(x)
-        self.lib.bk_rope(_ptr(cos), _ptr(sin), _ptr(x), x.size, _ptr(y))
+        self._fn("rope")(_ptr(cos), _ptr(sin), _ptr(x), x.size, _ptr(y))
         return y
 
     def quant(self, x, bits, group, width=16):
@@ -700,7 +772,7 @@ class Prims:
         x = _f32(x).reshape(-1)
         q = np.zeros(x.size, dtype=np.int16 if width == 16 else np.int8)
         e = np.zeros(x.size // group, dtype=np.int8)
-        fn = self.lib.bk_bfp_quant16 if width == 16 else self.lib.bk_bfp_quant8
+        fn = self._fn("bfp_quant16" if width == 16 else "bfp_quant8")
         rc = fn(_ptr(x), x.size, group, bits, _ptr(q), _ptr(e))
         return q, e, rc
 
@@ -746,19 +818,161 @@ def save_replay(path, cfg, gains, signs, scales, tables, steps):
     np.savez_compressed(path, **d)
 
 
-def replay(path, lib=None, verbose=True):
+def _same(a, b, nan_ok=False):
+    """Bit-identical float32 arrays. nan_ok: a NaN matches any NaN (payloads not compared)."""
+    a, b = _f32(a).reshape(-1), _f32(b).reshape(-1)
+    if a.size != b.size:
+        return False
+    ua, ub = a.view(np.uint32), b.view(np.uint32)
+    if nan_ok:
+        na, nb = np.isnan(a), np.isnan(b)
+        return bool(np.array_equal(na, nb) and np.array_equal(ua[~na], ub[~nb]))
+    return bool(np.array_equal(ua, ub))
+
+
+def _adversarial(rng, n, kind):
+    """float32 [n] test vectors. kind: 'norm', 'wide' (exponents all over fp32), 'tiny'
+    (subnormals and values that underflow), 'edge' (zeros of both signs, ties, limits)."""
+    if n == 0:
+        return np.zeros(0, dtype=np.float32)
+    if kind == "norm":
+        return rng.standard_normal(n).astype(np.float32) * np.float32(rng.choice([1e-3, 1.0, 7.0, 300.0]))
+    if kind == "wide":
+        return (rng.standard_normal(n) * np.exp2(rng.integers(-60, 60, n))).astype(np.float32)
+    if kind == "tiny":
+        return (rng.standard_normal(n) * np.exp2(rng.integers(-160, -110, n))).astype(np.float32)
+    x = rng.standard_normal(n).astype(np.float32)
+    edge = np.array([0.0, -0.0, 1.0, -1.0, 0.5, -0.5, 1.5, 2.5, -2.5, 3.5, 88.0, -88.0, 88.73, -87.34, -103.0,
+                     -104.0, 127.5, 2 ** -126, -2 ** -126, 2 ** -149, 3.4e38, -3.4e38, 1e-30, 4095.5 / 4096,
+                     510.5, 511.5, -511.5, 126.5, 127.49999, 1 + 2 ** -23, 0.999999940395], dtype=np.float32)
+    idx = rng.integers(0, n, max(1, n // 3))
+    x[idx] = edge[rng.integers(0, edge.size, idx.size)]
+    return x
+
+
+def kern_check(lib=None, seed=0, verbose=True, quick=False):
+    """The FAST kernels against the scalar REFERENCE kernels of the same library, bit for
+    bit, on adversarial inputs (sizes around the block boundaries, exponents all over fp32,
+    subnormals, zeros of both signs, ties, the exponents that take the fall-back paths).
+    numpy only, so it runs on the board. Returns (ok, {kernel: (cases, bad)})."""
+    lib = lib or load_lib()
+    rng = np.random.default_rng(seed)
+    F, R = Prims(lib), Prims(lib, ref=True)
+    res = {}
+
+    def note(name, same):
+        c, b = res.get(name, (0, 0))
+        res[name] = (c + 1, b + (not same))
+
+    kinds = ("norm", "wide", "tiny", "edge")
+    sizes = [0, 1, 2, 3, 4, 5, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65, 100, 127, 128, 129, 255, 256, 257,
+             511, 512, 513, 527, 528, 529, 1023, 1024, 1025, 1040, 4096, 12288]
+    if quick:
+        sizes = sizes[::3]
+    for n in sizes:
+        for kind in kinds:
+            x = _adversarial(rng, n, kind)
+            note("fsum", _same(F.fsum(x), R.fsum(x)))
+            if n == 0:
+                continue
+            xe = np.clip(x, -300, 300) if kind != "wide" else x          # exp: also far outside the table range
+            note("exp", _same(F.exp(xe), R.exp(xe)))
+            note("silu", _same(F.silu(xe), R.silu(xe)))
+            u = _adversarial(rng, n, "norm")
+            (s1, a1), (s2, a2) = F.silu_mul(xe, u), R.silu_mul(xe, u)
+            note("silu_mul", _same(s1, s2) and _same(a1, a2))
+            w = _adversarial(rng, n, "norm")
+            for eps in (1e-6, 1e-5):
+                note("rmsnorm", _same(F.rmsnorm(x, w, eps), R.rmsnorm(x, w, eps)))
+            if n % 2 == 0:
+                ang = rng.uniform(-np.pi, np.pi, n // 2)
+                c_, s_ = np.cos(ang).astype(np.float32), np.sin(ang).astype(np.float32)
+                note("rope", _same(F.rope(c_, s_, x), R.rope(c_, s_, x)))
+            for bits_, grp, width in ((10, 16, 16), (10, 128, 16), (8, 128, 8), (8, 16, 8), (10, 8, 16), (10, 24, 16),
+                                      (6, 32, 8)):
+                if n % grp:
+                    continue
+                for xx in (x, np.where(rng.random(n) < 0.5, np.float32(0), x).astype(np.float32),
+                           (np.round(np.clip(x, -1e30, 1e30) * 8) / 16).astype(np.float32)):   # zeros; ties
+                    qf, ef, rf = F.quant(xx, bits_, grp, width)
+                    qr, er, rr = R.quant(xx, bits_, grp, width)
+                    note(f"quant{width}", rf == rr and np.array_equal(qf, qr) and np.array_equal(ef, er))
+    # NaN / inf: exp is bit-identical; silu gives a NaN wherever the reference does
+    for n in (16, 33, 600):
+        x = _adversarial(rng, n, "edge")
+        x[rng.integers(0, n, 3)] = [np.nan, np.inf, -np.inf]
+        note("exp_nan_inf", _same(F.exp(x), R.exp(x)))
+        note("silu_nan_inf", _same(F.silu(x), R.silu(x), nan_ok=True))
+        u = _adversarial(rng, n, "norm")
+        (s1, a1), (s2, a2) = F.silu_mul(x, u), R.silu_mul(x, u)
+        note("silu_nan_inf", _same(s1, s2, nan_ok=True) and _same(a1, a2, nan_ok=True))
+    # attention of one kv head: scores, softmax and context
+    reps = (1, 2, 3, 4, 8, 9)
+    tks = (1, 2, 15, 16, 17, 31, 32, 33, 100, 257)
+    if quick:
+        reps, tks = (1, 3, 4), (1, 16, 17, 100)
+    for hd in (128, 256):
+        for rep_ in reps:
+            for Tk in tks:
+                for mode in ("typ", "wide", "tiny", "peaky", "zeros"):
+                    q = rng.standard_normal((rep_, hd)).astype(np.float32)
+                    kq = rng.integers(-511, 512, (Tk, hd)).astype(np.int16)
+                    vq = rng.integers(-127, 128, (Tk, hd)).astype(np.int8)
+                    ke = rng.integers(-12, -6, (Tk, hd // 16)).astype(np.int8)
+                    ve = rng.integers(-10, -3, (Tk, hd // QK)).astype(np.int8)
+                    if mode == "wide":              # normal fp32 scales of every size, products that go subnormal
+                        ke = rng.integers(-126, -5, (Tk, hd // 16)).astype(np.int8)
+                        ve = rng.integers(-126, 20, (Tk, hd // QK)).astype(np.int8)
+                        q *= np.float32(4.0)
+                    elif mode == "tiny":            # exponents below -126: 2^e is not a normal fp32
+                        ke[rng.random(ke.shape) < 0.2] = rng.integers(-128, -126)
+                        ve[rng.random(ve.shape) < 0.3] = rng.integers(-128, -126)
+                        ve[rng.random(ve.shape) < 0.3] = -120
+                    elif mode == "peaky":           # softmax with zeros and subnormals in p
+                        q *= np.float32(rng.choice([0.5, 3.0, 12.0]))
+                        ke = rng.integers(-9, -2, (Tk, hd // 16)).astype(np.int8)
+                        ve = rng.integers(-126, -100, (Tk, hd // QK)).astype(np.int8)
+                    elif mode == "zeros":           # zero rows / zero q: sums of signed zeros
+                        kq[rng.random(Tk) < 0.5] = 0
+                        vq[rng.random(Tk) < 0.5] = 0
+                        vq[rng.random((Tk, hd)) < 0.5] = 0
+                        q[rng.random(rep_) < 0.3] = 0
+                        q[rng.random((rep_, hd)) < 0.3] *= np.float32(-0.0)
+                    a, b_ = F.attend(q, kq, ke, vq, ve), R.attend(q, kq, ke, vq, ve)
+                    note("att_score", _same(a[0], b_[0]))
+                    note("att_softmax", _same(a[1], b_[1]))
+                    note("att_ctx", _same(a[2], b_[2]))
+    ok = all(b == 0 for _, b in res.values())
+    if lib.bk_simd() == 0:
+        ok = False                                   # nothing was compared: fast == ref in this build
+    if verbose:
+        print(f"HOST_KERN_VERDICT {'PASS' if ok else 'FAIL'} (fast kernels [{SIMD_NAMES[lib.bk_simd()]}] vs the scalar "
+              f"reference kernels, bit for bit: " + ", ".join(f"{k} {c - b}/{c}" for k, (c, b) in res.items())
+              + f"; {platform.machine()}, lib {Path(lib._path).name})")
+    return ok, res
+
+
+def replay(path, lib=None, verbose=True, threads=None, kernels=None, taps=False):
     """Run the C library over a `save_replay` file with the recorded GEMV outputs as the
     callback and compare every GEMV input and every logit with the record. numpy only: this
-    is the bit-identity check to run on the board (aarch64). Returns (ok, summary)."""
+    is the bit-identity check to run on the board (aarch64). Returns (ok, summary).
+    taps=True also returns summary['digest']: a hash over every tap of every step (residual
+    stream, q/k after RoPE, scores, softmax, context, silu, act) and the final KV rows, to
+    compare runs with different thread counts / kernel sets with each other."""
     z = np.load(path, allow_pickle=False)
     cfg = HostCfg(**json.loads(str(z["cfg"])))
     gains = {k: z["gain." + k] for k in (*NORMS, "out_norm")}
     tables = {k[4:]: z[k] for k in z.files if k.startswith("tab.")}
-    host = BkHost(cfg, gains, emb_from_split(z["signs"], z["scales"]), tables, lib=lib)
+    host = BkHost(cfg, gains, emb_from_split(z["signs"], z["scales"]), tables, lib=lib, threads=threads,
+                  kernels=kernels)
     Y, XQ, XE, LG = z["y"].view(np.float32), z["xq"], z["xe"], z["logits"]
     cur = dict(y=0, xq=0, xe=0, lg=0)
     bad = dict(xq=0, xe=0, logits=0)
     n_gemv = 0
+    h = hashlib.sha256()
+    ext = ("x_in", "x_mid", "x_out", "q_rope", "k_rope", "att_s", "att_p", "ctx", "silu", "act", "h_out")
+    if taps:
+        host.enable_taps(("xq", "xe", "y") + ext, att_cap=len(z["tokens"]) + 1)
 
     def gemv(mid, xq, xe, y, same):
         nonlocal n_gemv
@@ -772,20 +986,65 @@ def replay(path, lib=None, verbose=True):
         n_gemv += 1
 
     host.set_gemv(gemv)
-    for tok, want in zip(z["tokens"], z["want"]):
+    for step, (tok, want) in enumerate(zip(z["tokens"], z["want"])):
         lg = host.step(int(tok), bool(want), copy=False)
         if want:
             ref = LG[cur["lg"]:cur["lg"] + cfg.vocab]
             bad["logits"] += int(not np.array_equal(lg.view(np.uint32), ref))
             cur["lg"] += cfg.vocab
+        if taps:
+            for k in ext:
+                t = host.taps[k]
+                if k in ("att_s", "att_p"):
+                    t = t[:, :, :step + 1]
+                elif k == "h_out" and not want:
+                    continue
+                h.update(np.ascontiguousarray(t).tobytes())
+    if taps:
+        for L in range(cfg.n_layer):
+            for g in range(cfg.n_kv):
+                for a in host.kv_rows(L, g):
+                    h.update(a.tobytes())
+    st = host.stats()
     ok = not any(bad.values()) and cur["y"] == Y.size and cur["xq"] == XQ.size
     summ = dict(steps=int(len(z["tokens"])), gemvs=n_gemv, bad=bad, machine=platform.machine(),
-                tables=tables_digest(tables))
+                tables=tables_digest(tables), threads=host.threads, kernels=host.kernels,
+                worker_units=st["worker_units"], regions=st["regions"])
+    if taps:
+        summ["digest"] = h.hexdigest()[:16]
     if verbose:
         print(f"HOST_REPLAY_VERDICT {'PASS' if ok else 'FAIL'} ({summ['steps']} tokens, {n_gemv} GEMV inputs and "
               f"the logits of {int(z['want'].sum())} steps vs the spec's record; mismatching xq {bad['xq']}, "
-              f"xe {bad['xe']}, logits {bad['logits']}; {platform.machine()}, lib {Path(host.lib._path).name})")
+              f"xe {bad['xe']}, logits {bad['logits']}; threads {host.threads}, kernels {host.kernels}; "
+              f"{platform.machine()}, lib {Path(host.lib._path).name})")
+    host.close()
     return ok, summ
+
+
+def threads_check(path, lib=None, threads=(1, 3, 4, 2), verbose=True):
+    """The replay with every thread count x both kernel sets, all taps on: each run must
+    match the spec's record, and all runs must agree on every tap and on the KV cache.
+    numpy only. Returns (ok, [summary per run])."""
+    lib = lib or load_lib()
+    runs, ok = [], True
+    for k in ("ref", "fast"):
+        for th in threads:
+            r_ok, summ = replay(path, lib, verbose=False, threads=th, kernels=k, taps=True)
+            ok &= r_ok
+            runs.append(summ)
+    digests = {r["digest"] for r in runs}
+    ok &= len(digests) == 1
+    # the threaded runs must really have used their workers
+    used = all(r["worker_units"] > 0 for r in runs if r["threads"] > 1)
+    ok &= used
+    if verbose:
+        print(f"HOST_THREADS_VERDICT {'PASS' if ok else 'FAIL'} ({len(runs)} runs of the replay, threads "
+              f"{'/'.join(str(t) for t in threads)} x kernels ref/fast, each vs the spec's record and "
+              f"{'all with the same' if len(digests) == 1 else str(len(digests)) + ' DIFFERENT'} digest over every tap "
+              f"and the KV cache ({runs[0]['digest']}); region units run by workers: "
+              + ", ".join(f"{r['kernels']}/{r['threads']}t {r['worker_units']}" for r in runs if r["threads"] > 1)
+              + f"; {platform.machine()})")
+    return ok, runs
 
 
 # ----------------------------------------------------------------------------- bench
@@ -795,10 +1054,14 @@ SHAPES = {"8b": dict(n_layer=36, d=4096, ffn=12288, n_head=32, n_kv=8, head_dim=
 HOST_BUCKETS = [k for k in T_NAMES if k not in ("gemv", "taps")]
 
 
-def bench(shape="8b", ctxs=(20, 64, 256), reps=5, lib=None, vocab=1024, seed=0, verbose=True):
+def bench(shape="8b", ctxs=(20, 64, 256), reps=5, lib=None, vocab=1024, seed=0, verbose=True,
+          threads=None, kernels=None, spin_us=None, gap_us=0):
     """Host time per token of a model SHAPE with the C stand-in GEMV (random outputs of a
     plausible magnitude, not the model): what the vector path costs on this CPU, by bucket,
-    at each history length Tk in `ctxs`. The callback's time is excluded. Returns a dict."""
+    at each history length Tk in `ctxs`. The callback's time is excluded. gap_us > 0 makes
+    every stand-in GEMV busy-wait that long, as the fabric would: the worker threads then
+    idle between the parallel regions exactly as on the board (with gap_us > spin_us they go
+    to sleep and each region pays their wake-up). Returns a dict."""
     lib = lib or load_lib()
     c = HostCfg(vocab=vocab, yarn_factor=4.0, yarn_orig_ctx=16384, **SHAPES[shape])
     rng = np.random.RandomState(seed)
@@ -808,8 +1071,13 @@ def bench(shape="8b", ctxs=(20, 64, 256), reps=5, lib=None, vocab=1024, seed=0, 
     signs = rng.randint(0, 256, (vocab, c.d // 8)).astype(np.uint8)
     scales = (rng.rand(vocab, c.d // QK) * 0.08 + 0.01).astype(np.float16)
     top = max(ctxs)
-    host = BkHost(c, gains, emb_from_split(signs, scales), build_tables(c, top + 1), lib=lib)
-    host.set_c_gemv(lib.bk_bench_gemv)
+    host = BkHost(c, gains, emb_from_split(signs, scales), build_tables(c, top + 1), lib=lib,
+                  threads=threads, kernels=kernels, spin_us=spin_us)
+    gap = c_int32(int(gap_us))
+    host.set_c_gemv(lib.bk_bench_gemv, ctypes.cast(ctypes.pointer(gap), c_void_p) if gap_us else None)
+    if verbose:
+        print(f"  {shape}: threads {host.threads}, kernels {host.kernels} (simd {SIMD_NAMES[lib.bk_simd()]}), "
+              f"spin_us {'default' if spin_us is None else spin_us}, gap_us {gap_us}", flush=True)
     rows, t = [], 0
     for Tk in sorted(ctxs):
         while host.pos < Tk - 1:                # history: Tk-1 cached positions
@@ -822,16 +1090,23 @@ def bench(shape="8b", ctxs=(20, 64, 256), reps=5, lib=None, vocab=1024, seed=0, 
             host.reset_stats()
             host.step(t % vocab, want_logits=True, copy=False)
             st = host.stats()
-            runs.append(dict(st["ns"], host=st["host_ns"]))
+            runs.append(dict(st["ns"], host=st["host_ns"], cpu=st["host_cpu_ns"]))
         t += 1
         med = {k: float(np.median([r[k] for r in runs])) / 1e6 for k in runs[0]}        # ms, median of reps
         r = dict(Tk=Tk, host_ms=med["host"], host_ms_min=min(r["host"] for r in runs) / 1e6, gemv_ms=med["gemv"],
-                 **{k + "_ms": med[k] for k in HOST_BUCKETS})
+                 host_cpu_ms=med["cpu"], **{k + "_ms": med[k] for k in HOST_BUCKETS})
         rows.append(r)
         if verbose:
             print(f"  Tk {r['Tk']:5d}: host {r['host_ms']:8.3f} ms/token  " +
                   " ".join(f"{k} {r[k + '_ms']:.3f}" for k in HOST_BUCKETS), flush=True)
-    out = dict(shape=shape, cfg=c.asdict(), machine=platform.machine(), lib=Path(lib._path).name, rows=rows)
+    out = dict(shape=shape, cfg=c.asdict(), machine=platform.machine(), lib=Path(lib._path).name, rows=rows,
+               threads=host.threads, kernels=host.kernels, simd=SIMD_NAMES[lib.bk_simd()],
+               spin_us=spin_us, gap_us=gap_us)
+    try:
+        out["loadavg"] = os.getloadavg()[0]
+    except OSError:
+        pass
+    host.close()
     if len(rows) >= 2:                          # attention = a + b * Tk, least squares
         tk = np.array([r["Tk"] for r in rows])
         for k in ("att_score", "att_softmax", "att_ctx"):
@@ -840,9 +1115,13 @@ def bench(shape="8b", ctxs=(20, 64, 256), reps=5, lib=None, vocab=1024, seed=0, 
         fix = [r["host_ms"] - r["att_score_ms"] - r["att_softmax_ms"] - r["att_ctx_ms"] for r in rows]
         out["non_attention_ms"] = float(np.median(fix))
         out["attention_us_per_pos"] = sum(out[k + "_fit"]["us_per_pos"] for k in ("att_score", "att_softmax", "att_ctx"))
+        b, a = np.polyfit(tk, np.array([r["host_ms"] for r in rows]), 1)
+        out["host_fit"] = dict(ms_fixed=float(a), us_per_pos=float(b * 1e3))
         if verbose:
             print(f"  -> non-attention {out['non_attention_ms']:.3f} ms/token + attention "
-                  f"{out['attention_us_per_pos']:.2f} us per cached position per token")
+                  f"{out['attention_us_per_pos']:.2f} us per cached position per token; "
+                  f"host = {a:.2f} ms + {b * 1e3:.1f} us * Tk (least squares); "
+                  f"load average {out.get('loadavg', float('nan')):.2f}")
     return out
 
 
@@ -855,11 +1134,19 @@ def main():
     ap.add_argument("--ctx", default="20,64,256")
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--replay", help="a save_replay .npz: numpy-only bit-identity check")
+    ap.add_argument("--threads-check", metavar="REPLAY", help="the replay with 1/3/4/2 threads x both kernel sets, "
+                    "all taps compared (numpy only)")
+    ap.add_argument("--kern-check", action="store_true", help="fast kernels vs reference kernels on adversarial "
+                    "inputs (numpy only)")
     ap.add_argument("--tables", help="write the tables of --gguf to this .npz")
     ap.add_argument("--gguf")
     ap.add_argument("--max-pos", type=int, default=4096)
     ap.add_argument("--torch", action="store_true", help="--tables: take them from the spec (needs torch)")
     ap.add_argument("--out", help="--bench: write the result as JSON")
+    ap.add_argument("--threads", default=None, help="--bench: thread counts, e.g. 1,4 (default: the library's)")
+    ap.add_argument("--kernels", default=None, choices=("fast", "ref"))
+    ap.add_argument("--spin-us", type=int, default=None)
+    ap.add_argument("--gap-us", type=int, default=0, help="--bench: stand-in GEMV busy-waits this long")
     a = ap.parse_args()
     lib = load_lib()
     print(f"bk_host {lib._path}\n  built: {' '.join(build_cmd(Path(lib._path).name))}")
@@ -874,11 +1161,19 @@ def main():
         t = build_tables_torch(cfg, a.max_pos) if a.torch else build_tables(cfg, a.max_pos)
         print(f"  tables ({t['source']}) digest {save_tables(a.tables, t)} -> {a.tables}")
     if a.replay:
-        ok &= replay(a.replay, lib)[0]
+        ok &= replay(a.replay, lib, kernels=a.kernels)[0]
+    if a.kern_check:
+        ok &= kern_check(lib)[0]
+    if a.threads_check:
+        ok &= threads_check(a.threads_check, lib)[0]
     if a.bench:
-        r = bench(a.shape, tuple(int(x) for x in a.ctx.split(",")), a.reps, lib)
+        res = []
+        for th in (a.threads.split(",") if a.threads else [None]):
+            res.append(bench(a.shape, tuple(int(x) for x in a.ctx.split(",")), a.reps, lib,
+                             threads=int(th) if th else None, kernels=a.kernels, spin_us=a.spin_us,
+                             gap_us=a.gap_us))
         if a.out:
-            Path(a.out).write_text(json.dumps(r, indent=1))
+            Path(a.out).write_text(json.dumps(res if len(res) > 1 else res[0], indent=1))
     sys.exit(0 if ok else 1)
 
 

@@ -9,14 +9,48 @@
  * BUILD (mandatory flags; -ffp-contract=off because gcc on aarch64 fuses a*b+c into an FMA
  * by default, which changes results):
  *
- *     gcc -O2 -ffp-contract=off -fno-fast-math -shared -fPIC -o libbk_host.so bk_host.c
+ *     gcc -O3 -ffp-contract=off -fno-fast-math -pthread -shared -fPIC -o libbk_host.so bk_host.c
  *
- * -O2 is enough to be correct; -O3 (what bk_host.py uses by default) only lets gcc turn the
- * 16-lane loops into SIMD, which roughly halves the host time and cannot change a result
- * (run_host.py checks -O0, -O2, -O3 and -O3 -march=native builds against each other).
- * gcc <= 11 does not vectorise at -O2 at all, so use -O3 there.
+ * Any optimisation level is correct (run_host.py checks -O0, -O2, -O3 and -O3 -march=native
+ * builds against each other); -O3 is what bk_host.py uses and what the timings refer to.
  *
- * No dependency beyond libc, and no libm call in the data path: every transcendental is a
+ * TWO SETS OF KERNELS, same results bit for bit:
+ *   - the REFERENCE kernels: plain scalar C, one statement per spec operation (what the
+ *     first version of this library was). They are the readable statement of the spec.
+ *   - the FAST kernels (default when the target has NEON or SSE2): the same fp32 operations
+ *     in the same per-lane order, written 4 lanes x 4 independent chains at a time so that an
+ *     in-order core (Cortex-A53) is not stalled by one long dependency chain, with the
+ *     attention restructured so the accumulators stay in registers (see bk_host.c).
+ *   bk_config.kernels / $BK_KERNELS=ref|fast select; run_host.py (stage kern) proves fast
+ *   == ref on adversarial inputs and both == the spec; on a target without the gate's torch
+ *   stack: python3 -m fabric.big.host.bk_host --kern-check --threads-check <replay.npz>.
+ *   Inputs a fast kernel does not handle exactly are handed to the reference kernel: NaN in
+ *   exp, block exponents below -126, the float64 quantiser path, odd group sizes, more than
+ *   8 query heads per kv head. silu of a NaN is a NaN in both; its payload is not specified.
+ *
+ * THREADS. A persistent pthread pool (bk_config.n_threads, else $BK_THREADS, else
+ * min(4, online CPUs); 1 = no pool, everything on the caller's thread). Two parallel regions
+ * per layer: the attention (one unit per kv head: q/k norms, RoPE, cache quantise, scores,
+ * softmax, context, quantise of the context) and the FFN (silu * up and its quantise, in
+ * chunks). Units are independent in the spec, each unit is computed by one thread in the
+ * spec's order, so the result does not depend on the thread count. The callback is only
+ * ever called from the thread that called bk_step. Idle workers spin for
+ * bk_config.spin_us / $BK_SPIN_US microseconds (default 200) and then sleep; waking a
+ * sleeping worker costs tens of microseconds per region, spinning costs idle CPU.
+ * (MEASURED on the KV260's A53, 8B shape, 4 threads, 500 us between host sections as when a
+ * GEMV runs in the fabric: 11.1 ms/token at Tk 20 with the default, 8.6 ms with
+ * spin_us = 3000, i.e. sleeping costs about 1 ms per token and spinning keeps three cores
+ * busy through every GEMV. The default favours the other processes on the board.)
+ *
+ * THE A53 (what the fast kernels are written for; measured on the KV260, 1.33 GHz): it
+ * issues in order, at most one 128-bit NEON operation per cycle, and waits when an operand
+ * is not ready; a 128-bit load costs two cycles; integer loads / stores issue next to a NEON
+ * operation. So the kernels are rows of four independent operations, values stay in
+ * registers, and BK_PINV in bk_host.c pins the order against gcc's scheduler. Measured
+ * there: 99 cycles per 64 score products (4 heads x 16 channels; 82 by instruction count),
+ * 63 per 64 context products, 14 cycles per silu element (reference: 50).
+ *
+ * No dependency beyond libc + pthreads, and no libm call in the data path: every transcendental is a
  * table passed in by the caller (built by bk_host.py with the spec's numpy code), and
  * frexp / floor / round are done on the bits or with exactly specified IEEE operations.
  * bk_selftest() (also run by bk_init) refuses to work if the build contracted a*b+c, is
@@ -40,7 +74,8 @@
  *   - a block exponent must fit int8 (the cache and the callback carry int8): a group whose
  *     largest |x| is non-zero but below ~2^-119 returns BK_ERR_EXP_RANGE;
  *   - inf / NaN reaching a quantiser returns BK_ERR_NONFINITE.
- * One bk_state is one decode stream and is not thread-safe; separate states are independent.
+ * One bk_state is one decode stream and is not thread-safe (it runs its own worker threads;
+ * call it from one thread at a time); separate states are independent.
  * KV cache memory: n_layer * n_kv * (3*head_dim + head_dim/16 + head_dim/128) bytes per
  * position (Bonsai-8B: 113 kB), grown by doubling up to max_ctx.
  *
@@ -60,7 +95,7 @@
 extern "C" {
 #endif
 
-#define BK_API_VERSION 1
+#define BK_API_VERSION 2
 #define BK_P        16      /* reduction lanes */
 #define BK_EXP_K    4096    /* exp table: BK_EXP_K + 1 entries */
 #define BK_RS_N     512     /* rsqrt tables: 512 + 512 entries */
@@ -96,7 +131,15 @@ typedef struct {
     int32_t init_ctx;       /* positions allocated up front (0 = 64); grows by doubling */
     float   eps;            /* fp32(cfg.eps) */
     float   inv_sqrt_hd;    /* fp32(1 / sqrt(head_dim)) */
+    /* --- API 2 (all 0 = defaults) --- */
+    int32_t n_threads;      /* 0: $BK_THREADS, else min(4, online CPUs); 1: no pool; max BK_MAX_THREADS */
+    int32_t spin_us;        /* idle workers spin this long before sleeping; 0: $BK_SPIN_US, else 200; < 0: never spin */
+    int32_t kernels;        /* BK_KERN_AUTO ($BK_KERNELS=ref|fast, else fast), BK_KERN_FAST, BK_KERN_REF */
+    int32_t _pad;
 } bk_config;
+
+#define BK_MAX_THREADS 16
+enum { BK_KERN_AUTO = 0, BK_KERN_FAST = 1, BK_KERN_REF = 2 };
 
 /* Everything here is BORROWED: the caller keeps it alive and unchanged while the state lives. */
 typedef struct {
@@ -142,7 +185,10 @@ typedef struct {
     int32_t  _pad;
 } bk_taps;
 
-/* timing buckets, nanoseconds (CLOCK_MONOTONIC), accumulated until bk_reset_stats */
+/* timing buckets, nanoseconds (CLOCK_MONOTONIC), accumulated until bk_reset_stats.
+ * ns[] is wall time on the calling thread and sums to the time spent in bk_step: the wall
+ * time of a parallel region is split over its buckets in proportion to the thread time
+ * spent in each. cpu_ns[] is the thread time itself (== ns[] with one thread). */
 enum {
     BK_T_GEMV = 0,      /* inside the callback */
     BK_T_EMBED,         /* embedding row dequant */
@@ -165,6 +211,12 @@ typedef struct {
     uint64_t steps;         /* bk_step calls completed */
     uint64_t gemv_calls;
     uint64_t att_pos;       /* sum over steps of the history length Tk */
+    /* --- API 2 --- */
+    uint64_t cpu_ns[BK_T_COUNT];
+    uint64_t regions;       /* parallel regions run */
+    int32_t  threads;       /* threads in use (caller included) */
+    int32_t  kernels;       /* BK_KERN_FAST or BK_KERN_REF, as resolved */
+    uint64_t worker_units;  /* region units run by worker threads (the rest ran on the caller) */
 } bk_stats;
 
 typedef struct bk_state bk_state;
@@ -225,9 +277,38 @@ void  bk_bfp_dequant8(const int8_t *q, const int8_t *e, int n, int group, float 
 void  bk_embed_row(const uint8_t *signs, int64_t sign_stride, const uint8_t *scales,
                    int64_t scale_stride, int d, int64_t row, float *x);
 
+/* ---- reference kernels and kernel-level test entry points ---- */
+/* The public primitives above run the fast kernels when the build has them; these always
+ * run the scalar reference kernels. */
+float bk_ref_fsum(const float *x, int n);
+void  bk_ref_exp_fab_n(const float *exp_tab, const float *x, float *y, int n);
+void  bk_ref_silu(const float *exp_tab, const float *x, float *y, int n);
+void  bk_ref_rmsnorm(const float *rs_lo, const float *rs_hi, float eps, const float *x,
+                     const float *w, int n, float *y);
+void  bk_ref_rope(const float *cos_row, const float *sin_row, const float *x, int head_dim, float *y);
+int   bk_ref_bfp_quant16(const float *x, int n, int group, int bits, int16_t *q, int8_t *e);
+int   bk_ref_bfp_quant8(const float *x, int n, int group, int bits, int8_t *q, int8_t *e);
+/* silu(gate) * up in one pass, as the FFN does it: sil (may be NULL, may alias gate) gets
+ * silu(gate), act gets silu(gate) * up. kernels = BK_KERN_FAST / BK_KERN_REF. */
+void  bk_silu_mul(int kernels, const float *exp_tab, const float *gate, const float *up,
+                  float *sil, float *act, int n);
+/* The attention of ONE kv head: `rep` query heads q [rep][hd] against Tk cached rows
+ * (kq int16 [Tk][hd], ke [Tk][hd/16], vq int8 [Tk][hd], ve [Tk][hd/128]).
+ * s_out / p_out [rep][Tk] (may be NULL) get the scores / probabilities, ctx [rep][hd] the
+ * context. kernels = BK_KERN_FAST / BK_KERN_REF. Returns BK_OK / BK_ERR_ARG / BK_ERR_NOMEM. */
+int   bk_attend_kv(int kernels, const float *exp_tab, int hd, int rep, int Tk, float inv_sqrt_hd,
+                   const float *q, const int16_t *kq, const int8_t *ke, const int8_t *vq,
+                   const int8_t *ve, float *s_out, float *p_out, float *ctx);
+/* 0 = this build has no fast kernels (they then alias the reference ones); else 1 NEON, 2 SSE2 */
+int   bk_simd(void);
+int   bk_threads(const bk_state *s);
+int   bk_kernels(const bk_state *s);
+
 /* Deterministic stand-in GEMV for benchmarks (NOT the model): fills y with a fixed
  * pseudo-random pattern of plausible magnitude that depends on mat_id and the input.
- * ctx = NULL. Lets the host cost be timed on a machine that has no PL and no weights. */
+ * ctx = NULL, or a `const int32_t *` holding a number of microseconds to busy-wait before
+ * returning (models the time the fabric takes, during which the worker threads idle).
+ * Lets the host cost be timed on a machine that has no PL and no weights. */
 int bk_bench_gemv(void *ctx, int mat_id, const int16_t *xq, const int8_t *xe, int groups,
                   float *y, int rows);
 

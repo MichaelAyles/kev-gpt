@@ -140,17 +140,13 @@ void bkpl_cache_invalidate(const void *p, size_t n)  /* drop (clean and) cached 
 void bkpl_pack_act(uint8_t *dst, const int16_t *xq, const int8_t *xe, int groups)
 {
     for (int g = 0; g < groups; g++, dst += 256, xq += 128) {
-        uint64_t acc = 0;
-        int nb = 0;
         uint8_t *o = dst;
-        for (int j = 0; j < 128; j++) {
-            acc |= (uint64_t)((uint16_t)xq[j] & 0x3ff) << nb;
-            nb += 10;
-            while (nb >= 8) {
-                *o++ = (uint8_t)acc;
-                acc >>= 8;
-                nb -= 8;
-            }
+        for (int j = 0; j < 128; j += 4, o += 5) {     /* 4 mantissas = 40 bits = 5 bytes */
+            uint64_t v = (uint64_t)((uint16_t)xq[j] & 0x3ff) | (uint64_t)((uint16_t)xq[j + 1] & 0x3ff) << 10 |
+                         (uint64_t)((uint16_t)xq[j + 2] & 0x3ff) << 20 | (uint64_t)((uint16_t)xq[j + 3] & 0x3ff) << 30;
+            memcpy(o, &v, 8);                          /* little-endian; the 3 spare bytes are zero and
+                                                          are overwritten by the next store (the last one
+                                                          zeroes bytes 160..162, byte 160 is set below) */
         }
         dst[160] = (uint8_t)xe[g];
     }

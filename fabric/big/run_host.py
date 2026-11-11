@@ -8,6 +8,13 @@ spec. Stages (--stages, default all):
   prim    every exported primitive against the spec's torch function on adversarial inputs
           (fsum, rsqrt_fab, exp_fab, silu, rmsnorm, rope, bfp_quant in the three formats
           with exact ties and threshold cases, dequant, embedding rows, argmax ties)
+  kern    the library has two sets of kernels: the scalar reference kernels (the readable
+          statement of the spec) and the fast ones (SIMD, hand-ordered for the Cortex-A53).
+          Fast vs reference bit for bit on adversarial inputs (block-boundary sizes,
+          exponents all over fp32, subnormals, signed zeros, ties, NaN / inf, the attention
+          of one kv head for rep 1..9 and Tk 1..257 with exponents that take every fall-back
+          path); the reference kernels vs the spec's vectors of stage prim; a -DBK_NO_SIMD
+          build; bugs planted in the fast kernels only must be seen by fast-vs-reference
   tables  the numpy-only tables == the spec's tables, byte for byte (tiny, 1.7B, 8B
           configs); .npz round trip; writes the table files for the board
   a       tiny random Q1 models on the CPU, free-running: EVERY GEMV input (mantissas and
@@ -17,7 +24,12 @@ spec. Stages (--stages, default all):
           callback is the same ExactBfpGemv. Also: prefill without logits, cache growth,
           truncate + redo, the three build variants (-O3 default, the plain -O2 command,
           -O0, -march=native), and the numpy-only replay file for the board.
-  bugs    planted-bug builds (-DBK_BUG_*) must each be caught by prim or by the free-run
+  threads the tiny models free-running with 1 / 3 / 4 / 2 threads and both kernel sets, all
+          taps of every run against the spec's record (so every run is identical to every
+          other), the worker threads provably used; the same matrix through the numpy-only
+          replay with one digest over all taps and the KV cache
+  bugs    planted-bug builds (-DBK_BUG_*) must each be caught by prim or by the free-run,
+          with the fast kernels (default threads) AND with the reference kernels (1 thread)
   b       real Bonsai-1.7B, a real chat prompt + 20 generated tokens: tokens and every GEMV
           input identical, spec and C library in lockstep (GPU if there is one)
   c       real Bonsai-8B: the golden token file (golden_token.py); the C library runs the
@@ -26,7 +38,7 @@ spec. Stages (--stages, default all):
   time    host ms/token of the 8B shape by function (stand-in GEMV; plus the real-data
           numbers of stage c when it ran) -> fabric/big/results/host_timing.json
 
-    .venv/bin/python -u -m fabric.big.run_host --stages prim,tables,a,bugs,time     # CPU only
+    .venv/bin/python -u -m fabric.big.run_host --stages prim,kern,tables,a,threads,bugs,time   # CPU only
     flock /tmp/kevbuild/gpu.lock env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
         .venv/bin/python -u -m fabric.big.run_host                                  # everything
 """
@@ -331,9 +343,9 @@ def prim_reference(fab):
     return R
 
 
-def prim_check(lib, R):
-    """{name: (ok, detail)} for one library build."""
-    pr = bh.Prims(lib, R["tables"])
+def prim_check(lib, R, ref=False):
+    """{name: (ok, detail)} for one library build. ref: its scalar reference kernels."""
+    pr = bh.Prims(lib, R["tables"], ref=ref)
     out = {}
     xs, ref = R["fsum"]
     bad = sum(not beq(pr.fsum(x), np.float32(r)) for x, r in zip(xs, ref))
@@ -459,12 +471,13 @@ def make_host(fab, lib, tables=None, **kw):
                      tables if tables is not None else bh.build_tables(fab.c, fab.COS.shape[0]), lib=lib, **kw)
 
 
-def freerun_check(fab, lib, rec, prompt, prefill=0, taps=True, init_ctx=0):
+def freerun_check(fab, lib, rec, prompt, prefill=0, taps=True, init_ctx=0, **hkw):
     """The C library free-running against the spec record `rec`; stops at the first step
-    with a mismatch. Returns dict(ok, steps, gemv_inputs, first=...)."""
+    with a mismatch. Returns dict(ok, steps, gemv_inputs, first=...). hkw: threads / kernels
+    of the host."""
     names = names_of(fab.c)
     cb = SpecGemv(fab)
-    host = make_host(fab, lib, gemv=cb, init_ctx=init_ctx)
+    host = make_host(fab, lib, gemv=cb, init_ctx=init_ctx, **hkw)
     if taps:
         host.enable_taps(("xq", "xe", "y") + EXT, att_cap=len(rec) + 1)
     seen = []
@@ -496,8 +509,10 @@ def freerun_check(fab, lib, rec, prompt, prefill=0, taps=True, init_ctx=0):
         else:
             tok = argmax_low(torch.from_numpy(s["logits"]))
     ok = first is None and cb.requant_bad == 0
+    st = host.stats()
     return dict(ok=ok, steps=len(rec), gemv_inputs=n_in, ext_signals=n_ext, first=first, requant_bad=cb.requant_bad,
-                host=host)
+                host=host, host_threads=host.threads, host_kernels=host.kernels, worker_units=st["worker_units"],
+                regions=st["regions"])
 
 
 def truncate_check(fab, lib, rec, prompt):
@@ -576,6 +591,92 @@ def stage_a(ctx):
     return ok, out, f"{tot_steps} tokens / {tot_in} GEMV inputs on {len(TINY)} tiny models"
 
 
+# ----------------------------------------------------------------------------- stage: kern
+FAST_BUGS = {       # bugs planted in the FAST kernels only: the fast-vs-reference check must see them
+    "FAST_FOLD": (["BK_BUG_FAST_FOLD"], "ctx: 2^ve folded into p although p * 2^ve underflowed to zero"),
+    "FAST_CLAMP": (["BK_BUG_FAST_CLAMP"], "silu: exponent clamp at 127 instead of 128 (no overflow to inf)"),
+    "FAST_TINY": (["BK_BUG_FAST_TINY"], "scores: K exponents below -126 not sent to the reference path"),
+}
+
+
+def stage_kern(ctx):
+    """The fast kernels vs the scalar reference kernels (adversarial inputs), the reference
+    kernels vs the spec (the stage `prim` vectors), and the fast-only planted bugs."""
+    lib = ctx["lib"]
+    simd = bh.SIMD_NAMES[lib.bk_simd()]
+    kok, res = bh.kern_check(lib, verbose=False)
+    for k, (c, b) in res.items():
+        log(f"  kern {k:13s} {'ok  ' if b == 0 else 'FAIL'} fast [{simd}] vs reference: {c} cases, {b} differ")
+    pr = prim_check(lib, ctx["prim_ref"], ref=True)
+    rfail = [k for k, v in pr.items() if not v[0]]
+    log(f"  kern reference kernels vs the spec: {len(pr) - len(rfail)}/{len(pr)} primitives"
+        + (f" FAIL {rfail}" if rfail else ""))
+    # a build without SIMD: the fast names are the reference kernels; it must still be the spec
+    ln = bh.load_lib(defines=["BK_NO_SIMD"])
+    pn = prim_check(ln, ctx["prim_ref"])
+    fab, prompt, rec = ctx["tiny"]["A"]
+    rn = freerun_check(fab, ln, rec, prompt)
+    rn.pop("host")
+    nosimd = ln.bk_simd() == 0 and all(v[0] for v in pn.values()) and rn["ok"]
+    log(f"  kern -DBK_NO_SIMD build (simd {bh.SIMD_NAMES[ln.bk_simd()]}): prim + free-run {'ok' if nosimd else 'FAIL'}")
+    bugs, caught = {}, 0
+    for name, (defs, what) in FAST_BUGS.items():
+        lb = bh.load_lib(defines=defs)
+        bok, bres = bh.kern_check(lb, verbose=False)
+        hit = not bok
+        caught += hit
+        bugs[name] = dict(what=what, caught=hit, differ={k: b for k, (c, b) in bres.items() if b})
+        log(f"  kern bug {name:10s} {'CAUGHT' if hit else 'MISSED'}: {what}; differ: {bugs[name]['differ'] or '-'}")
+    ok = kok and not rfail and nosimd and caught == len(FAST_BUGS)
+    n_cases = sum(c for c, _ in res.values())
+    return ok, dict(simd=simd, checks={k: dict(cases=c, bad=b) for k, (c, b) in res.items()}, ref_vs_spec_fail=rfail,
+                    no_simd_build=nosimd, fast_bugs=bugs), \
+        (f"fast [{simd}] == reference kernels on {n_cases} adversarial cases, reference == spec, "
+         f"{caught}/{len(FAST_BUGS)} fast-only bugs caught")
+
+
+# ----------------------------------------------------------------------------- stage: threads
+THREAD_RUNS = ((1, "fast"), (3, "fast"), (4, "fast"), (2, "fast"), (1, "ref"), (3, "ref"), (4, "ref"))
+
+
+def stage_threads(ctx):
+    """Tiny models free-running with 1 / 3 / 4 (/ 2) threads and both kernel sets: every run
+    is compared with the spec's record on every tap (GEMV inputs, residual stream, q/k after
+    RoPE, scores, softmax, context, silu, act, KV rows, logits), so the runs are identical to
+    each other. Then the numpy-only replay with the same matrix (what the board runs)."""
+    ok, out, n_runs = True, {}, 0
+    for name in TINY:
+        fab, prompt, rec = ctx["tiny"][name]
+        rows = {}
+        for th, kern in THREAD_RUNS:
+            r = freerun_check(fab, ctx["lib"], rec, prompt, threads=th, kernels=kern)
+            r.pop("host")
+            used = th == 1 or r["worker_units"] > 0          # the workers must really have run units
+            good = r["ok"] and r["host_threads"] == th and r["host_kernels"] == kern and used
+            ok &= good
+            n_runs += 1
+            rows[f"{kern}/{th}"] = dict(ok=good, first=r["first"], worker_units=r["worker_units"], regions=r["regions"],
+                                        ext_signals=r["ext_signals"], gemv_inputs=r["gemv_inputs"])
+        out[name] = rows
+        log(f"  threads[{name}] {len(rec)} free-running tokens, all taps vs the spec: "
+            + " ".join(f"{k}={'ok' if v['ok'] else 'FAIL(' + str(v['first']) + ')'}[{v['worker_units']}wu]"
+                       for k, v in rows.items()))
+    rp = ctx["vec"] / "host_replay_tiny.npz"
+    if rp.exists():
+        tok, runs = bh.threads_check(rp, ctx["lib"], verbose=False)
+        out["replay"] = dict(ok=tok, digests=sorted({r["digest"] for r in runs}),
+                             runs=[dict(threads=r["threads"], kernels=r["kernels"], worker_units=r["worker_units"],
+                                        bad=r["bad"]) for r in runs])
+        log(f"  threads[replay] {len(runs)} runs (threads 1/3/4/2 x ref/fast): {'one digest ' + runs[0]['digest'] if len(out['replay']['digests']) == 1 else 'DIGESTS DIFFER'}"
+            f" over all taps + KV cache, {'PASS' if tok else 'FAIL'} -> on the board: python3 -m fabric.big.host.bk_host --threads-check <file>")
+        ok &= tok
+        n_runs += len(runs)
+    else:
+        log(f"  threads[replay] {rp} missing (stage a writes it): FAIL")
+        ok = False
+    return ok, out, f"{n_runs} runs with 1/2/3/4 threads x fast/ref kernels bit-identical on every tap"
+
+
 # ----------------------------------------------------------------------------- stage: tables
 def stage_tables(ctx):
     ok, out = True, {}
@@ -635,11 +736,19 @@ def stage_bugs(ctx):
         fails = [k for k, v in pr.items() if not v[0]]
         r = freerun_check(fab, lib, rec, prompt)
         r.pop("host")
-        hit = bool(fails) or not r["ok"]
+        # the same bug in the scalar reference kernels, single-threaded
+        pr_r = prim_check(lib, ctx["prim_ref"], ref=True)
+        fails_r = [k for k, v in pr_r.items() if not v[0]]
+        rr = freerun_check(fab, lib, rec, prompt, kernels="ref", threads=1)
+        rr.pop("host")
+        hit_f, hit_r = bool(fails) or not r["ok"], bool(fails_r) or not rr["ok"]
+        hit = hit_f and hit_r
         caught += hit
-        out[name] = dict(what=what, caught=hit, prim_fail=fails, freerun_first=r["first"])
-        log(f"  bug {name:11s} {'CAUGHT' if hit else 'MISSED'}: {what}\n      prim: {', '.join(fails) or '-'}; "
-            f"free-run: {r['first'] or 'no mismatch'}")
+        out[name] = dict(what=what, caught=hit, caught_fast=hit_f, caught_ref=hit_r, prim_fail=fails,
+                         freerun_first=r["first"], ref_prim_fail=fails_r, ref_freerun_first=rr["first"])
+        log(f"  bug {name:11s} {'CAUGHT' if hit else 'MISSED'}: {what}\n      fast kernels, {r['host_threads']} threads: "
+            f"prim: {', '.join(fails) or '-'}; free-run: {r['first'] or 'no mismatch'}\n      reference kernels, 1 thread: "
+            f"prim: {', '.join(fails_r) or '-'}; free-run: {rr['first'] or 'no mismatch'}")
     n = len(BUGS)
     # the real thing: let the compiler contract (x86 needs -mfma to have an FMA at all)
     if platform.machine() == "x86_64" and "fma" in Path("/proc/cpuinfo").read_text():
@@ -850,12 +959,13 @@ def stage_time(ctx):
         f"8B-shape host {row['host_ms']:.2f} ms/token at Tk {row['Tk']} (x86, excluding the callback)"
 
 
-STAGES = dict(prim=stage_prim, tables=stage_tables, a=stage_a, bugs=stage_bugs, b=stage_b, c=stage_c, time=stage_time)
+STAGES = dict(prim=stage_prim, kern=stage_kern, tables=stage_tables, a=stage_a, threads=stage_threads, bugs=stage_bugs,
+              b=stage_b, c=stage_c, time=stage_time)
 
 
 def main():
     ap = argparse.ArgumentParser(description="gate of the Big-Kev host vector path (bk_host.c) vs fabric_ref.py")
-    ap.add_argument("--stages", default="prim,tables,a,bugs,b,c,time")
+    ap.add_argument("--stages", default="prim,kern,tables,a,threads,bugs,b,c,time")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--data", default="data/big")
     ap.add_argument("--golden", default=str(VEC / "Bonsai-8B-Q1_0_token.npz"))
@@ -877,7 +987,7 @@ def main():
     ctx["vec"].mkdir(parents=True, exist_ok=True)
     log(f"run_host: lib {lib._path}\n  build: {' '.join(bh.build_cmd('libbk_host.so'))}\n  selftest mask {lib.bk_selftest():#x}, "
         f"{platform.machine()}, torch {torch.__version__}, numpy {np.__version__}, device {a.device}")
-    if any(s in stages for s in ("prim", "tables", "a", "bugs")):
+    if any(s in stages for s in ("prim", "kern", "tables", "a", "threads", "bugs")):
         ctx["tiny"] = {}
         for name, spec in TINY.items():
             fab, prompt = tiny_model(spec)

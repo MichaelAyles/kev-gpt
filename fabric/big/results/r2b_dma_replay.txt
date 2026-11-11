@@ -1,0 +1,5 @@
+rep 0 (full LM-head readback): 253/253 bit-exact, fabric 69.38 ms/token (15.34 GB/s incl. 0.40 ms activation fetch; result write tail 0.06 ms), wall 113.3 ms/token = 8.83 tok/s for GEMV + all host io (pack+clean 2.1 ms, regs 0.1, wait 69.5, readback 3.6; 145 activation loads), stall_in 0.035
+rep 1 (fabric argmax): 253/253 bit-exact, fabric 69.29 ms/token (15.36 GB/s incl. 0.41 ms activation fetch; result write tail 0.06 ms), wall 112.3 ms/token = 8.91 tok/s for GEMV + all host io (pack+clean 2.1 ms, regs 0.1, wait 69.5, readback 3.5; 145 activation loads), stall_in 0.034
+rep 2 (fabric argmax): 253/253 bit-exact, fabric 69.28 ms/token (15.36 GB/s incl. 0.41 ms activation fetch; result write tail 0.06 ms), wall 112.0 ms/token = 8.93 tok/s for GEMV + all host io (pack+clean 2.1 ms, regs 0.1, wait 69.5, readback 3.6; 145 activation loads), stall_in 0.034
+rep 3 (fabric argmax): 253/253 bit-exact, fabric 69.23 ms/token (15.37 GB/s incl. 0.40 ms activation fetch; result write tail 0.06 ms), wall 111.7 ms/token = 8.95 tok/s for GEMV + all host io (pack+clean 2.1 ms, regs 0.1, wait 69.4, readback 3.5; 145 activation loads), stall_in 0.033
+GEMV_DMA_VERDICT PASS

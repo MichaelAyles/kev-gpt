@@ -107,6 +107,9 @@ def main():
     ap.add_argument("--max-ctx", type=int, default=1024)
     ap.add_argument("--no-dma", action="store_true", help="use the AXI-Lite path even on a version-2 bitstream")
     ap.add_argument("--full-head", action="store_true", help="with DMA: read all logits back instead of the fabric argmax")
+    ap.add_argument("--xsum", choices=("always", "prefill", "never"), default="always",
+                    help="with DMA: when to read back the per-port beat checksums (15 register reads per matrix). "
+                         "Status, error count, rows and tuples are checked on every matrix regardless")
     ap.add_argument("--out", default="")
     a = ap.parse_args()
     for k, v in dict(chunk=256, slots=0, port_slots="", rebuild=False, spare_pages=64, min_pages=256).items():
@@ -158,12 +161,16 @@ def main():
         host.reset()
         host.reset_stats()
         g.reset()
+        if dma:
+            dma.c.check_xsum = int(a.xsum != "never")
         tp = time.perf_counter()
         for i, t in enumerate(ids):                           # prefill: no LM head until the last token
             lg = host.step(t, want_logits=i == len(ids) - 1, copy=False)
         tp = time.perf_counter() - tp
         print(f"[{name}] prompt {len(ids)} tokens: prefill {tp:.1f}s ({tp / len(ids) * 1e3:.0f} ms/token), "
               f"fabric {g.cyc / fclk * 1e3 / len(ids):.1f} ms/token")
+        if dma and a.xsum == "prefill":
+            dma.c.check_xsum = 0
         gen, per = [], []
         while True:
             nxt = int(np.flatnonzero(lg == lg.max())[0])      # the LOWEST index holding the maximum
@@ -209,7 +216,8 @@ def main():
         res[name] = r
     if a.out:
         with open(a.out, "w") as f:
-            json.dump(dict(fclk=fclk, n_layer=n_layer, verdict="PASS" if all_ok else "FAIL", prompts=res), f, default=float)
+            json.dump(dict(fclk=fclk, n_layer=n_layer, path="dma" if dma else "axilite", xsum=a.xsum if dma else "always",
+                           threads=os.environ.get("BK_THREADS", ""), spin_us=os.environ.get("BK_SPIN_US", ""), verdict="PASS" if all_ok else "FAIL", prompts=res), f, default=float)
     print(f"PL_TOKEN_C_VERDICT {'PASS' if all_ok else 'FAIL'}")
     pool.close(free=False)
     sys.exit(0 if all_ok else 1)
