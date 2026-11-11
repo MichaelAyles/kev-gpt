@@ -1,0 +1,137 @@
+run_host: lib /home/mikeayles/.cache/bk_host/libbk_host-b7a7a3d6c1df.so
+  build: gcc -O3 -ffp-contract=off -fno-fast-math -shared -fPIC -o libbk_host.so /home/mikeayles/Desktop/Projects/kev-gpt/fabric/big/host/bk_host.c
+  selftest mask 0x0, x86_64, torch 2.4.1+cu121, numpy 2.0.2, device cuda
+--- stage prim
+  prim fsum       ok   133 vectors, 0 differ
+  prim rsqrt      ok   158105 values, 0 differ
+  prim exp        ok   800795 values, 0 differ
+  prim silu       ok   600008 values, 0 differ
+  prim exp1       ok   9156 values, 0 differ
+  prim rmsnorm    ok   41 vectors, 0 differ
+  prim rope       ok   40 vectors, 0 differ
+  prim quant_gemv ok   660 groups (bits 10, group 128), 0 differ, 2 out-of-int8 exponents refused
+  prim quant_k    ok   660 groups (bits 10, group 16), 0 differ, 2 out-of-int8 exponents refused
+  prim quant_v    ok   660 groups (bits 8, group 128), 0 differ, 2 out-of-int8 exponents refused
+  prim dequant_k  ok   4096 values, exponents -128..127, 0 differ
+  prim dequant_v  ok   32768 values, exponents -128..127, 0 differ
+  prim embed      ok   64 rows x 2 layouts, 0 differ
+  prim argmax     ok   200 vectors with ties, 0 differ
+--- stage tables
+  tables[A] numpy == spec: yes (inv_freq via numpy+pin), digest 19b2ee86ea6cd487, 96 positions
+  tables[B] numpy == spec: yes (inv_freq via numpy), digest e0b1523cba6878a8, 96 positions
+  tables[C] numpy == spec: yes (inv_freq via numpy+pin), digest 19b2ee86ea6cd487, 96 positions
+  tables[1.7B] numpy == spec: yes (inv_freq via numpy+pin), digest 5c135f85e99f8d93, 4096 positions, saved /tmp/kevbuild/big_vectors/host_tables_1.7B.npz
+  tables[8B] numpy == spec: yes (inv_freq via numpy+pin), digest e872d0951d7340eb, 4096 positions, saved /tmp/kevbuild/big_vectors/host_tables_8B.npz
+  tables: torch's fp32 pow vs the correctly rounded value (head_dim 128, theta 1e6): differs at index [37] (pinned in bk_host._POW_PINS)
+--- stage a
+  a[A] L3 d256 ffn384 heads 4/2 hd128 vocab 320: 48 free-running tokens, 1056 GEMV inputs + outputs + logits + 816 taps/KV rows identical; prefill-without-logits ok; truncate/reset redo ok; builds O2=ok O0=ok native=ok
+  a[B] L2 d384 ffn640 heads 6/2 hd128 vocab 257: 40 free-running tokens, 600 GEMV inputs + outputs + logits + 600 taps/KV rows identical; prefill-without-logits ok; truncate/reset redo ok; builds O2=ok O0=ok native=ok
+  a[C] L2 d128 ffn256 heads 2/2 hd128 vocab 200: 40 free-running tokens, 600 GEMV inputs + outputs + logits + 600 taps/KV rows identical; prefill-without-logits ok; truncate/reset redo ok; builds O2=ok O0=ok native=ok
+  a[replay] /tmp/kevbuild/big_vectors/host_replay_tiny.npz (1348 kB): numpy-only replay PASS (48 tokens, 1050 GEMVs) -> on the board: python3 -m fabric.big.host.bk_host --replay <file>
+--- stage bugs
+  bug TREE        CAUGHT: pairwise tree sums adjacent lanes instead of [0:8]+[8:16]
+      prim: fsum, rmsnorm; free-run: step 0: tap q_rope (122 values), tap att_s (7 values)
+  bug ROUND_AWAY  CAUGHT: bfp_quant rounds half away from zero, not to even
+      prim: quant_gemv, quant_k, quant_v; free-run: step 32: l2.o.xq/xe (1 mantissas, 0 exponents), l2.gate.xq/xe (2 mantissas, 0 exponents), l2.up.xq/xe (2 mantissas, 0 exponents), lm_head.xq/xe (3 mantissas, 0 exponents) (+4 more)
+  bug REASSOC     CAUGHT: RMSNorm sum of squares in one sequential accumulator
+      prim: rmsnorm; free-run: step 0: tap q_rope (729 values), tap k_rope (611 values), tap att_s (3 values)
+  bug FMA         CAUGHT: a*b+c fused in the lane sums (what -ffp-contract=fast emits)
+      prim: rmsnorm; free-run: step 0: tap att_s (8 values)
+  bug EXP_TRUNC   CAUGHT: exp_fab table index truncated instead of RNE
+      prim: exp, silu, exp1; free-run: step 0: l1.down.xq/xe (3 mantissas, 0 exponents), tap silu (368 values), tap act (368 values)
+  bug NEWTON1     CAUGHT: rsqrt_fab with one Newton step
+      prim: rsqrt, rmsnorm; free-run: step 0: tap q_rope (597 values), tap k_rope (370 values), tap att_s (3 values)
+  bug CTX_LANE    CAUGHT: ctx sum: every position in lane 0 (no lane striding)
+      prim: -; free-run: step 2: tap ctx (357 values)
+  bug ARGMAX_LAST CAUGHT: argmax returns the highest index on ties
+      prim: argmax; free-run: no mismatch
+  bug REAL_CONTRACT CAUGHT: built -mfma -ffp-contract=fast, pragma off: selftest mask 0x1, bk_init refused: True; with the selftest skipped: prim rsqrt, rmsnorm, rope; free-run: step 0: tap att_s (8 values)
+      same flags with the source's fp-contract pragma left on: bit-identical
+--- stage b
+The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+  b: Bonsai-1.7B on cuda (L28 d2048 heads 16/8), prompt 24 tokens, loaded in 3s; C tables == spec tables: True
+    b position 0: host   1.64 ms, callback  0.43 s, spec step  0.97 s, ok  (1s)
+    b position 1: host   1.72 ms, callback  0.43 s, spec step  0.68 s, ok  (3s)
+    b position 2: host   1.82 ms, callback  0.43 s, spec step  0.68 s, ok  (4s)
+    b position 3: host   1.84 ms, callback  0.43 s, spec step  0.68 s, ok  (5s)
+    b position 4: host   1.87 ms, callback  0.43 s, spec step  0.68 s, ok  (6s)
+    b position 5: host   1.93 ms, callback  0.43 s, spec step  0.68 s, ok  (7s)
+    b position 6: host   1.94 ms, callback  0.43 s, spec step  0.68 s, ok  (8s)
+    b position 7: host   2.02 ms, callback  0.44 s, spec step  0.68 s, ok  (9s)
+    b position 8: host   1.99 ms, callback  0.43 s, spec step  0.69 s, ok  (10s)
+    b position 9: host   2.03 ms, callback  0.43 s, spec step  0.69 s, ok  (12s)
+    b position 10: host   2.04 ms, callback  0.43 s, spec step  0.68 s, ok  (13s)
+    b position 11: host   2.08 ms, callback  0.43 s, spec step  0.68 s, ok  (14s)
+    b position 12: host   2.14 ms, callback  0.43 s, spec step  0.68 s, ok  (15s)
+    b position 13: host   2.15 ms, callback  0.43 s, spec step  0.68 s, ok  (16s)
+    b position 14: host   2.17 ms, callback  0.43 s, spec step  0.68 s, ok  (17s)
+    b position 15: host   2.23 ms, callback  0.43 s, spec step  0.68 s, ok  (18s)
+    b position 16: host   2.24 ms, callback  0.43 s, spec step  0.68 s, ok  (19s)
+    b position 17: host   2.26 ms, callback  0.43 s, spec step  0.68 s, ok  (21s)
+    b position 18: host   2.31 ms, callback  0.43 s, spec step  0.68 s, ok  (22s)
+    b position 19: host   2.32 ms, callback  0.43 s, spec step  0.68 s, ok  (23s)
+    b position 20: host   2.39 ms, callback  0.43 s, spec step  0.68 s, ok  (24s)
+    b position 21: host   2.42 ms, callback  0.43 s, spec step  0.68 s, ok  (25s)
+    b position 22: host   2.43 ms, callback  0.43 s, spec step  0.68 s, ok  (26s)
+    b position 23: host   2.45 ms, callback  0.50 s, spec step  0.68 s, ok  (27s)
+    b position 24: host   2.59 ms, callback  0.50 s, spec step  0.68 s, ok  (29s)
+    b position 25: host   2.53 ms, callback  0.50 s, spec step  0.68 s, ok  (30s)
+    b position 26: host   2.58 ms, callback  0.50 s, spec step  0.68 s, ok  (31s)
+    b position 27: host   2.57 ms, callback  0.50 s, spec step  0.68 s, ok  (32s)
+    b position 28: host   2.63 ms, callback  0.50 s, spec step  0.68 s, ok  (33s)
+    b position 29: host   2.65 ms, callback  0.50 s, spec step  0.68 s, ok  (35s)
+    b position 30: host   2.67 ms, callback  0.50 s, spec step  0.68 s, ok  (36s)
+    b position 31: host   2.69 ms, callback  0.50 s, spec step  0.68 s, ok  (37s)
+    b position 32: host   2.82 ms, callback  0.50 s, spec step  0.68 s, ok  (38s)
+    b position 33: host   2.81 ms, callback  0.51 s, spec step  0.68 s, ok  (39s)
+    b position 34: host   2.87 ms, callback  0.51 s, spec step  0.68 s, ok  (41s)
+    b position 35: host   2.83 ms, callback  0.50 s, spec step  0.69 s, ok  (42s)
+    b position 36: host   2.91 ms, callback  0.50 s, spec step  0.68 s, ok  (43s)
+    b position 37: host   2.89 ms, callback  0.50 s, spec step  0.70 s, ok  (44s)
+    b position 38: host   3.08 ms, callback  0.50 s, spec step  0.69 s, ok  (45s)
+    b position 39: host   2.97 ms, callback  0.50 s, spec step  0.68 s, ok  (47s)
+    b position 40: host   3.03 ms, callback  0.50 s, spec step  0.68 s, ok  (48s)
+    b position 41: host   3.10 ms, callback  0.50 s, spec step  0.68 s, ok  (49s)
+    b position 42: host   3.11 ms, callback  0.50 s, spec step  0.68 s, ok  (50s)
+    b position 43: host   3.07 ms, callback  0.50 s, spec step  0.68 s, ok  (51s)
+  b: 44 tokens (24 prompt + 20 generated): 8645 GEMV inputs and 10317 taps / KV rows compared, steps with a mismatch 0; logits differing 0; tokens differing 0; text 'The sky appears blue because of the way sunlight interacts with the atmosphere, where shorter wavelengths of light ('
+--- stage c
+  c: Bonsai-8B on cuda (L36 d4096 ffn12288 heads 32/8), 18 prompt tokens, golden position 17, loaded in 3s; C tables == spec tables: True
+    c position 0: host   4.12 ms, callback  1.52 s, spec step  2.13 s, ok  (4s)
+    c position 1: host   4.25 ms, callback  1.52 s, spec step  1.99 s, ok  (7s)
+    c position 2: host   4.38 ms, callback  1.52 s, spec step  1.99 s, ok  (11s)
+    c position 3: host   4.29 ms, callback  1.52 s, spec step  2.00 s, ok  (14s)
+    c position 4: host   4.38 ms, callback  1.52 s, spec step  2.00 s, ok  (18s)
+    c position 5: host   4.45 ms, callback  1.52 s, spec step  2.00 s, ok  (21s)
+    c position 6: host   4.65 ms, callback  1.53 s, spec step  1.99 s, ok  (25s)
+    c position 7: host   4.68 ms, callback  1.52 s, spec step  1.99 s, ok  (28s)
+    c position 8: host   4.73 ms, callback  1.52 s, spec step  1.98 s, ok  (32s)
+    c position 9: host   4.86 ms, callback  1.53 s, spec step  1.99 s, ok  (36s)
+    c position 10: host   4.88 ms, callback  1.52 s, spec step  1.99 s, ok  (39s)
+    c position 11: host   4.85 ms, callback  1.52 s, spec step  1.98 s, ok  (43s)
+    c position 12: host   4.95 ms, callback  1.52 s, spec step  1.98 s, ok  (46s)
+    c position 13: host   5.09 ms, callback  1.52 s, spec step  1.98 s, ok  (50s)
+    c position 14: host   5.10 ms, callback  1.52 s, spec step  1.98 s, ok  (53s)
+    c position 15: host   5.16 ms, callback  1.53 s, spec step  1.98 s, ok  (57s)
+    c position 16: host   5.23 ms, callback  1.52 s, spec step  2.00 s, ok  (60s)
+    c position 17: host   5.36 ms, callback  1.90 s, spec step  1.99 s, ok  (64s)
+  c: golden file, position 17: 253 GEMVs, inputs differing 0, outputs differing 0; argmax 40 vs golden 40; lockstep with the spec over positions 0..17: 4537 GEMV inputs + 5365 taps / KV rows, steps with a mismatch 0
+--- stage time
+  time: 8B shape (L36 d4096 ffn12288 heads 32/8 hd128), stand-in GEMV, 12th Gen Intel(R) Core(TM) i7-12700H, 1 thread, median of 5
+  build: gcc -O3 -ffp-contract=off -fno-fast-math -shared -fPIC -o libbk_host.so /home/mikeayles/Desktop/Projects/kev-gpt/fabric/big/host/bk_host.c
+  Tk     1: host    3.203 ms/token  embed 0.002 rmsnorm 0.178 quant 0.951 rope 0.052 kvq 0.114 att_score 0.042 att_softmax 0.052 att_ctx 0.462 silu 1.310 resid 0.039 other 0.000
+  Tk    20: host    4.420 ms/token  embed 0.002 rmsnorm 0.179 quant 0.956 rope 0.052 kvq 0.112 att_score 0.607 att_softmax 0.125 att_ctx 1.047 silu 1.304 resid 0.039 other 0.000
+  Tk    64: host    7.547 ms/token  embed 0.002 rmsnorm 0.200 quant 0.955 rope 0.053 kvq 0.123 att_score 1.951 att_softmax 0.351 att_ctx 2.442 silu 1.316 resid 0.046 other 0.000
+  Tk   256: host   19.596 ms/token  embed 0.002 rmsnorm 0.222 quant 0.957 rope 0.055 kvq 0.129 att_score 7.400 att_softmax 1.329 att_ctx 8.101 silu 1.317 resid 0.044 other 0.000
+  Tk  1024: host   68.610 ms/token  embed 0.002 rmsnorm 0.241 quant 0.962 rope 0.062 kvq 0.138 att_score 29.371 att_softmax 5.305 att_ctx 31.157 silu 1.348 resid 0.053 other 0.000
+  -> non-attention 2.765 ms/token + attention 63.76 us per cached position per token
+  time[O2]: gcc -O2 -ffp-contract=off -fno-fast-math -shared -fPIC -o libbk_host.so /home/mikeayles/Desktop/Projects/kev-gpt/fabric/big/host/bk_host.c
+  Tk    20: host    8.779 ms/token  embed 0.018 rmsnorm 0.424 quant 1.308 rope 0.134 kvq 0.122 att_score 0.901 att_softmax 0.133 att_ctx 3.568 silu 2.015 resid 0.160 other 0.000
+  Tk   256: host   47.174 ms/token  embed 0.018 rmsnorm 0.449 quant 1.324 rope 0.141 kvq 0.138 att_score 11.266 att_softmax 1.460 att_ctx 30.245 silu 2.021 resid 0.149 other 0.000
+  -> non-attention 4.190 ms/token + attention 162.58 us per cached position per token
+  time[O3_native]: gcc -O3 -march=native -ffp-contract=off -fno-fast-math -shared -fPIC -o libbk_host.so /home/mikeayles/Desktop/Projects/kev-gpt/fabric/big/host/bk_host.c
+  Tk    20: host    2.468 ms/token  embed 0.001 rmsnorm 0.156 quant 0.298 rope 0.051 kvq 0.049 att_score 0.430 att_softmax 0.112 att_ctx 0.686 silu 0.658 resid 0.023 other 0.000
+  Tk   256: host   12.557 ms/token  embed 0.002 rmsnorm 0.192 quant 0.300 rope 0.054 kvq 0.061 att_score 5.222 att_softmax 0.911 att_ctx 5.119 silu 0.676 resid 0.027 other 0.000
+  -> non-attention 1.273 ms/token + attention 42.48 us per cached position per token
+  time: host ms/token at Tk 20: total 4.42 = rmsnorm 0.18 + quant 0.96 + attention 1.78 + silu 1.30 + rest 0.20 (rope 0.052, kv-quant 0.112, residual 0.039, embed 0.002); attention grows 63.8 us per cached position
+HOST_VERDICT PASS (prim: 14/14 primitives; tables: numpy tables == spec for 5 configs; a: 128 tokens / 2256 GEMV inputs on 3 tiny models; bugs: 9/9 planted bugs caught; b: 1.7B 44 tokens (24+20) / 8645 GEMV inputs; c: 8B golden position 17: 253/253 inputs, 253/253 outputs, argmax ok, lockstep 4537 inputs over 18 positions; time: 8B-shape host 4.42 ms/token at Tk 20 (x86, excluding the callback); 214s)
