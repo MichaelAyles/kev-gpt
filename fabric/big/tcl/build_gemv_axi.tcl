@@ -32,7 +32,7 @@ file mkdir $bdir
 create_project gemv_axi "$bdir/gemv_axi" -part $part -force
 set_property board_part $board [current_project]
 set srcs [list "$root/fabric/big/rtl/gemv_axi.v" "$root/fabric/big/rtl/gemv_stream.v"]
-foreach f {axi_rd_stream.v} {
+foreach f {axi_rd_stream.v axi_aux_dma.v} {
     if {[file exists "$root/fabric/big/rtl/$f"]} { lappend srcs "$root/fabric/big/rtl/$f" }
 }
 add_files -norecurse $srcs

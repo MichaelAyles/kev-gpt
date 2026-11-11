@@ -185,7 +185,10 @@ module axi_rd_stream #(
         if (fl_q) begin
             bursts_left <= 32'd0; none_left <= 1'b1; can_r <= 1'b0; free <= DEPTH;
             fin_seen <= 1'b0;
-            chunk_q <= 9'd1; step_q <= 32'd0; maxout_q <= 9'd1; next_addr <= {AW{1'b0}};
+            step_q <= 32'd0; maxout_q <= 9'd1; next_addr <= {AW{1'b0}};
+            // ARLEN is chunk_q: it must not move under an AR that is still waiting for ARREADY
+            // (a SOFT_RST in the middle of a run), so it is only cleared when none is pending
+            if (!arvalid) chunk_q <= 9'd1;
         end else begin
             if (go_q) begin
                 bursts_left <= cfg_bursts;
