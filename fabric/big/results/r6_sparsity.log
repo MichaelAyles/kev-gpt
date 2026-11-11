@@ -1,0 +1,13 @@
+The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+dense tinystories: 256 tokens, NLL 2.0655, 3s
+dense readme: 256 tokens, NLL 3.4581, 3s
+dense master_doc: 256 tokens, NLL 3.5777, 3s
+dense chat_selfgen: 256 tokens, NLL 0.9636, 3s
+R6 gate keep 0.75: bytes -12.0% (1.14x, DERIVED), top-1 vs dense 95.00%, dNLL +0.0114 (per text tinystories +0.000, readme +0.012, master_doc +0.010, chat_selfgen +0.024), kept |x| mass layers 0/17/35: 0.96/0.92/0.98, 13s
+R6 gate keep 0.50: bytes -24.0% (1.32x, DERIVED), top-1 vs dense 83.53%, dNLL +0.0909 (per text tinystories +0.056, readme +0.051, master_doc +0.104, chat_selfgen +0.152), kept |x| mass layers 0/17/35: 0.83/0.73/0.94, 13s
+R6 gate keep 0.35: bytes -31.2% (1.45x, DERIVED), top-1 vs dense 71.18%, dNLL +0.3335 (per text tinystories +0.281, readme +0.261, master_doc +0.394, chat_selfgen +0.398), kept |x| mass layers 0/17/35: 0.71/0.59/0.90, 13s
+R6 gate keep 0.25: bytes -36.0% (1.56x, DERIVED), top-1 vs dense 56.57%, dNLL +0.8909 (per text tinystories +0.688, readme +1.094, master_doc +0.929, chat_selfgen +0.853), kept |x| mass layers 0/17/35: 0.60/0.50/0.86, 13s
+R6 gate keep 0.15: bytes -40.8% (1.69x, DERIVED), top-1 vs dense 28.24%, dNLL +3.1506 (per text tinystories +3.247, readme +3.509, master_doc +2.865, chat_selfgen +2.982), kept |x| mass layers 0/17/35: 0.47/0.42/0.76, 13s
+R6 prod keep 0.50: bytes -12.0% (1.14x, DERIVED), top-1 vs dense 96.47%, dNLL +0.0092 (per text tinystories +0.021, readme +0.000, master_doc +0.001, chat_selfgen +0.015), kept |x| mass layers 0/17/35: 0.91/0.87/0.97, 13s
+R6 prod keep 0.25: bytes -18.0% (1.22x, DERIVED), top-1 vs dense 88.14%, dNLL +0.0617 (per text tinystories +0.095, readme +0.015, master_doc +0.063, chat_selfgen +0.074), kept |x| mass layers 0/17/35: 0.72/0.65/0.91, 13s
+R6 prod keep 0.10: bytes -21.6% (1.28x, DERIVED), top-1 vs dense 69.61%, dNLL +0.3527 (per text tinystories +0.324, readme +0.304, master_doc +0.352, chat_selfgen +0.430), kept |x| mass layers 0/17/35: 0.48/0.42/0.77, 13s

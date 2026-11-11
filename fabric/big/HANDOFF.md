@@ -33,7 +33,10 @@ Rules of the house (from CLAUDE.md, and they apply here):
 | **R2a on silicon** weight stream + GEMV | **DONE, MEASURED, bit-exact** | One real token's 253 GEMVs (36 layers × q,k,v,o,gate,up,down + LM head) streamed from DDR at 333 MHz: **253/253 bit-exact vs the spec in 9 of 9 runs; 1,064.1 MB in 68.9–69.3 ms = 15.40 GB/s (median) = 14.47 tok/s weights-only (14.43–14.51)**. 250 MHz: 11.86 GB/s, 11.15 tok/s, bit-exact. Engine starved 3.7% of cycles (DDR is the limit, 96% of 3 beats/cycle). Dense 3-slot layout == R0's 4-slot stripe (15.41 vs 15.39 GB/s on 6 layers), so the format stays dense. Build: WNS −0.096 ns at 3.0 ns (3 endpoints, in the result-readback RAM cascade), 13.2k LUT, 19.7k FF, 37 BRAM tiles, 6 DSP. Host loads activations / reads results over AXI-Lite; that time is not in the number. |
 | **R2b stage 1** hybrid (fabric GEMVs + A53 vector path) | **DONE, MEASURED, tokens identical** | `board/pl_token.py`: the torch spec on the A53 with the GEMV swapped for the PL. **240/240 generated tokens identical to the spec free-run** (3 prompts × 80), 253/253 GEMV inputs+outputs identical at the golden position. End to end **0.15–0.25 tok/s, host-bound** (Python + AXI-Lite); fabric 70–72 ms/token. A correctness baseline, not a speed result. |
 | **R2b stage 2** hybrid with a C host | **DONE, MEASURED, tokens identical** | `host/bk_host.c` (spec's vector path in C; `HOST_VERDICT PASS` on x86, `HOST_REPLAY_VERDICT PASS` on the A53) + `board/pl_token_c.py`: **240/240 tokens identical, 1.16–1.21 tok/s** at context 23..103 with the v1 bitstream. Per token: fabric 73 ms, C host ~100 ms single-threaded (35 ms + 0.89 ms per cached position), AXI-Lite ~570 ms (1 µs per register write, 130 ns per word read), LM-head re-streams 51 ms. |
-| **R2b** fast host path / fabric vector unit | in progress | (1) bit-exact C host kernel (`host/`), (2) `gemv_axi` v2: activation from DDR, results to DDR, argmax in fabric (AXI-Lite alone costs ~130 ms/token, MEASURED 52 ns/word read, 204 ns/word written), (3) then the vector unit in fabric. Whole-token roofline **~14.0 tok/s** (DERIVED: 1,064 MB weights + ~44 MB KV per token at ctx 512). |
+| **R2b stage 3** `gemv_axi` v2 on silicon | **DONE, MEASURED, tokens identical** | Activations fetched from DDR and results written to DDR by a small aux master on HP2, LM-head argmax in fabric. `GEMV_DMA_VERDICT PASS` (253/253 bit-exact, 4/4 runs, 333 MHz). Hybrid with the single-thread C host: **240/240 tokens identical, 5.24–5.53 tok/s end to end** at context 23..103 (fabric 71–76 ms, C host 92–98 ms, activation pack 12 ms, readback 4 ms); 3.4–4.3 tok/s at context ~130–240 because the host grows ~0.9 ms per cached position. Build: 14.2k LUT, WNS +0.229 ns **at 3.333 ns** (see §3: the BD builds are constrained at 300 MHz, the board runs them at 333). `results/r2b_hybrid_dma.json`, `results/impl_gemv_axi_v2.txt`. |
+| **R2b** next | in progress | (1) C host tuning on the A53 (threads, attention kernel), (2) batch-K GEMV: several positions per weight pass (`gemv_stream` NB, register map VERSION 3), (3) the vector unit in fabric. Whole-token roofline **~14.0 tok/s** (DERIVED: 1,064 MB weights + ~44 MB KV per token at ctx 512). |
+| **R4 entry** prompt-lookup drafting | **MEASURED (replay)** | `ref/r4_draft.py` over board-generated greedy transcripts (`results/r4_transcripts.json`): plain chat **1.05–1.12 tokens per pass** (959 tokens), copy-heavy answers **1.45–1.91** (446 tokens). The lookup drafter is worth ~1.1× on chat; R4's multiplier needs a real drafter. |
+| **R6 entry** contextual sparsity | **MEASURED, parked** | `ref/r6_sparsity.py`: keeping 75% of FFN units per token = −12% bytes at ΔNLL +0.011 (top-1 95.0%); 50% = −24% at +0.091 (83.5%). Not sparse enough for a cheap 2× (`results/r6_sparsity.json`, table in doc 10 R6). |
 | **R3a** scale compression (study) | **DONE, not in RTL** | `bfp3` (3-bit scales, 16-bit header per 32 groups): 1,064.1 → 975.4 MB/token (**−8.3%**, 15.93 tok/s weights-only DERIVED), ΔNLL +0.0019 ± 0.0018 on the R1c set, +0.0047 ± 0.0013 pooled with a second set, 97.6–98.0% argmax kept. Lossless dictionary: −4.8% but needs scale codes packed across rows. Never clamp the largest scales (+3.4 nats). |
 | **R3b** sub-1-bit signs (study) | **KILL** | signs are incompressible (0.9979 bits/sign lossless); at ≤0.875 total bpw the best code costs +0.42 nats vs a 0.05 bar. Would need retraining with the code in the loop. So realistic R3 = R3a only, and R4's arithmetic is ~15.25 × speculative gain, not 50. |
 
@@ -138,6 +141,16 @@ EOF
 - **Vivado licence** is node-locked to the laptop's home-network MAC (or the dock ethernet).
   On a hotspot NetworkManager randomises the MAC and synthesis cannot check out a licence:
   `nmcli connection modify "<profile>" wifi.cloned-mac-address permanent`, then reconnect.
+  Without touching the connection (hotel wifi): run Vivado in a network namespace that holds a
+  dummy interface with the wifi card's permanent address (`ethtool -P <wifi>`). FlexLM only sees
+  an interface from `/proc/net/dev` there, and Vivado needs the system libudev preloaded:
+  `sudo ip netns add vlic; sudo ip netns exec vlic ip link add eth0 type dummy;`
+  `sudo ip netns exec vlic ip link set eth0 address <permanent MAC> up;`
+  `sudo ip netns exec vlic sudo -u $USER -H env LD_PRELOAD=/lib64/libudev.so.1 bash -c 'source .../settings64.sh && vivado ...'`.
+- **The BD clock is not what you asked for.** `build_gemv_axi.tcl` with FREQMHZ 333 gets
+  300.03 MHz from the PS clock generator and Vivado constrains 3.333 ns. The board driver forces
+  333.33 MHz, so silicon runs ~10% past the constraint (bit-exact so far). Pass the 5th tcl
+  argument (e.g. `3.000`) to constrain implementation at the real period (added, not yet tried).
 - Ternary GGUFs for R1d live in `data/big/` (`Ternary-Bonsai-4B-Q2_0.gguf`, `-1.7B-`); the
   tokenizer is identical to Bonsai-8B's.
 
@@ -161,9 +174,8 @@ only). What is open now, in order:
 3. ~~Stream layout decision~~ **done:** dense 3-slot == 4-slot stripe on silicon; format stays dense.
 4. ~~Ternary-8B quality ceiling~~ **done:** pooled NLL 2.438 vs binary-8B 2.516, but 1,633 MB per
    token at best packing vs 1,064 (9.5 vs 14.6 tok/s weights-only, DERIVED).
-5. **R6 entry experiment** (contextual sparsity, `docs/10-big-kevin.md`): threshold sweep on
-   the FFN `down` input, skipped fraction vs top-1 / ΔNLL, all layers (~15 min GPU). If R6 is
-   taken up, `down` wants a column-major stream: decide before item 2 hardens the format.
+5. ~~R6 entry experiment~~ **done, parked:** see §1 and doc 10 R6. If reopened, per-layer
+   budgets first; `down` would want a column-major stream.
 
 6. **R2b** (next): the rest of a token on the board. fp32 vector unit (RMSNorm, SiLU, residual,
    BFP10 requantise), attention with the KV cache in DDR (K BFP10 g16, V BFP8), RoPE, softmax,
