@@ -133,8 +133,8 @@ class Gemv:
         return c
 
     def results(self, n):
-        a = R.RES_BASE >> 2
-        return np.array(self.w32[a:a + n], dtype=np.uint32)
+        # a bulk copy of the window: ~50 ns/word (a ctypes slice costs ~760 ns/word)
+        return np.frombuffer(self.m, dtype="<u4", count=n, offset=R.RES_BASE).copy()
 
 
 def port_xsums(img: np.ndarray, lay: Layout):
@@ -165,15 +165,19 @@ def build_image(a, lay: Layout, names):
     if not a.rebuild and idx_path.exists() and os.path.exists(a.pool):
         old = json.loads(idx_path.read_text())
         same = all(old["key"][k] == key[k] for k in key if k != "names") and set(names) <= set(old["mats"])
-        if same and os.path.getsize(a.pool) == old["pages"] * HP:      # a superset image is fine
+        if same and HugePool.reusable(old["pages"], a.pool):           # a superset image is fine
             pool = HugePool(old["pages"], a.pool)
             mats = {}
-            for n, m in old["mats"].items():
-                m["region"] = pool.region(m["pa"], m["size"])
-                m["xsum"] = [int(x, 16) for x in m["xsum"]]
-                mats[n] = m
-            print(f"IMAGE re-used: {len(mats)} matrices, {pool.report()}")
-            return pool, mats
+            try:
+                for n, m in old["mats"].items():
+                    m["region"] = pool.region(m["pa"], m["size"])
+                    m["xsum"] = [int(x, 16) for x in m["xsum"]]
+                    mats[n] = m
+                print(f"IMAGE re-used: {len(mats)} matrices, {pool.report()}")
+                return pool, mats
+            except RuntimeError as ex:                        # the kernel migrated a hugepage
+                print(f"IMAGE stale ({ex}): repacking")
+                pool.close(free=True)
     if os.path.exists(a.pool):
         os.unlink(a.pool)
     hp_settle(release_free=True)          # give an old pool's pages back first: re-used ones come back scattered
@@ -202,7 +206,7 @@ def build_image(a, lay: Layout, names):
     evict()
     print(f"IMAGE packed {len(mats)} matrices, {total / 1e6:.1f} MB, in {time.time() - t0:.0f}s")
     idx_path.parent.mkdir(parents=True, exist_ok=True)
-    idx_path.write_text(json.dumps(dict(key=key, pages=pool.n, mats={
+    idx_path.write_text(json.dumps(dict(key=key, pages=pool.req, mats={
         n: dict(pa=m["pa"], size=m["size"], entry=m["entry"], bytes=m["bytes"],
                 xsum=[hex(x) for x in m["xsum"]]) for n, m in mats.items()})))
     return pool, mats
