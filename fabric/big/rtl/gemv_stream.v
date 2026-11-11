@@ -412,7 +412,13 @@ module gemv_stream #(
     output wire                  m_valid,
     input  wire                  m_ready,
     output wire [31:0]           m_data,
-    output wire                  m_last                 // last row of the matrix
+    output wire                  m_last,                // last row of the matrix
+    // telemetry taps for the board wrapper (gemv_axi): registered copies of the tuple
+    // handshake state, one cycle late. No functional effect; leave unconnected otherwise.
+    output reg                   dbg_pop,               // a DATA tuple was popped (pad tuples not counted)
+    output reg                   dbg_stall_in,          // in a run, no pop: some port had no beat
+    output reg                   dbg_stall_out,         // in a run, every port had a beat, no output credit
+    output reg  [NPORTS-1:0]     dbg_empty              // the ports that had no beat (while in a run)
 );
     localparam integer BW    = (NPORTS > 1) ? $clog2(NPORTS) : 1;
     localparam integer DEPTH = (GMAX + NPORTS - 1) / NPORTS;        // words per lane bank
@@ -554,6 +560,17 @@ module gemv_stream #(
         end
     end
     assign busy = (st != ST_IDLE) | out_pending;
+
+    always @(posedge clk) begin
+        if (rst) begin
+            dbg_pop <= 1'b0; dbg_stall_in <= 1'b0; dbg_stall_out <= 1'b0; dbg_empty <= {NPORTS{1'b0}};
+        end else begin
+            dbg_pop       <= fire;
+            dbg_stall_in  <= (st != ST_IDLE) && !all_valid;
+            dbg_stall_out <= (st == ST_RUN) && all_valid && !cred_ok;
+            dbg_empty     <= (st != ST_IDLE) ? ~k_valid : {NPORTS{1'b0}};
+        end
+    end
 
     // ------------------------------------------------------------ stage 1: steer
     function [15:0] pick16;         // fp16 slot i of a scale beat
