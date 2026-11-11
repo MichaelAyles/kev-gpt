@@ -1,0 +1,26 @@
+gemv_axi VERSION 3, NB=4 (batch of 4 activation vectors per weight pass) NPORTS=3 GMAX=96, full BD build (PS + SmartConnect + gemv_axi), xck26-sfvc784-2LV-c, Vivado 2026.1, 333 MHz requested, constrained at 3.333 ns (300.03 MHz). Run on silicon at 333.33 MHz
+      0.017        0.000                      0               207676        0.010        0.000                      0               207676        0.166        0.000                       0                 79456  
+| Block RAM Tile    | 38.5 |     0 |          0 |       144 | 26.74 |
+| CARRY8                     |  3498 |     0 |          0 |     14640 | 23.89 |
+| CARRY8   |  3498 |                 CLB |
+| CLB LUTs                   | 39760 |     0 |          0 |    117120 | 33.95 |
+| CLB Registers                              | 61114 |     0 |          0 |    234240 | 26.09 |
+| CLB Registers              | 61114 |     0 |          0 |    234240 | 26.09 |
+| DSPs           |   12 |     0 |          0 |      1248 |  0.96 |
+|   LUT as Logic             | 30499 |     0 |          0 |    117120 | 26.04 |
+| LUT as Logic                               | 30499 |     0 |          0 |    117120 | 26.04 |
+|   LUT as Memory            |  9261 |     0 |          0 |     57600 | 16.08 |
+| LUT as Memory                              |  9261 |     0 |          0 |     57600 | 16.08 |
+* Note: Each Block RAM Tile only has one FIFO logic available and therefore can accommodate only one FIFO36E2 or one FIFO18E2. However, if a FIFO18E2 occupies a Block RAM Tile, that tile can still accommodate a RAMB18E2
+|   RAMB18          |    3 |     0 |          0 |       288 |  1.04 |
+|   RAMB36/FIFO*    |   37 |     0 |          0 |       144 | 25.69 |
+| URAM              |    0 |     0 |          0 |        64 |  0.00 |
+Slack (MET) :             0.017ns  (required time - arrival time)
+  Source:                 design_1_i/eng/inst/u_core/rep1.cp[1].badr_c_reg[1]/C
+                            (rising edge-triggered cell FDRE clocked by clk_pl_0  {rise@0.000ns fall@1.666ns period=3.333ns})
+  Destination:            design_1_i/eng/inst/u_core/lane[0].bat[1].s1_q_reg[241]/D
+                            (rising edge-triggered cell FDRE clocked by clk_pl_0  {rise@0.000ns fall@1.666ns period=3.333ns})
+  Path Group:             clk_pl_0
+  Path Type:              Setup (Max at Slow Process Corner)
+  Requirement:            3.333ns  (clk_pl_0 rise@3.333ns - clk_pl_0 rise@0.000ns)
+  Data Path Delay:        3.306ns  (logic 0.306ns (9.257%)  route 3.000ns (90.743%))

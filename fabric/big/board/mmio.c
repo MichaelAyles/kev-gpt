@@ -337,13 +337,24 @@ int bkpl_gemv_batch(void *vctx, int mat_id, int nb, const int16_t *const *xq, co
         const float *s = (const float *)(const void *)c->res_va;   /* row r, element b at r * nb + b */
         if (nb == 1)
             memcpy(y[0], s, (size_t)rows * 4);
-        else
-            for (int b = 0; b < nb; b++) {
-                float *d = y[b];
-                const float *q = s + b;
-                for (int r = 0; r < rows; r++, q += nb)
-                    d[r] = *q;
+        else if (nb == 2) {                            /* one sequential read stream, nb write streams */
+            float *d0 = y[0], *d1 = y[1];
+            for (int r = 0; r < rows; r++, s += 2) {
+                d0[r] = s[0];
+                d1[r] = s[1];
             }
+        } else if (nb == 4) {
+            float *d0 = y[0], *d1 = y[1], *d2 = y[2], *d3 = y[3];
+            for (int r = 0; r < rows; r++, s += 4) {
+                d0[r] = s[0];
+                d1[r] = s[1];
+                d2[r] = s[2];
+                d3[r] = s[3];
+            }
+        } else
+            for (int r = 0; r < rows; r++, s += nb)
+                for (int b = 0; b < nb; b++)
+                    y[b][r] = s[b];
     }
     c->ns_read += now_ns() - t3;
     return 0;
