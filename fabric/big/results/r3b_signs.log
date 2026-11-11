@@ -1,0 +1,39 @@
+
+R3b summary. dNLL vs stock binary-8B (nats/token, paired SE, 1,020 tokens, float reference, MEASURED). total bpw = sign bpw on the targeted matrices (1.0 elsewhere) + 0.03125 bpw of scales (the R3a row-aligned 4-bit scheme). rand* rows: sign bpw is the rate-distortion bound 1 - h(f), i.e. what an ideal code of unbounded block length would need for that many flips.
+scheme                 target      flips sign bpw total bpw  tok/s |         dNLL +- SE ex-selfgen   top1
+rand0.001              all       0.1000%   0.9886    1.0198  16.11 |   -0.0041 +- 0.0048    -0.0045 0.9569
+rand0.003              all       0.3000%   0.9705    1.0018  16.40 |   +0.0105 +- 0.0088    +0.0096 0.8941
+rand0.01               all       1.0001%   0.9192    0.9505  17.29 |   +0.0769 +- 0.0185    +0.0843 0.8304
+rand0.03               all       2.9998%   0.8056    0.8369  19.63 |   +0.3702 +- 0.0358    +0.3948 0.6794
+ham127                 all       0.7751%   0.9453    0.9766  16.82 |   +0.0436 +- 0.0139    +0.0432 0.8618
+ham63                  all       1.5381%   0.9062    0.9375  17.52 |   +0.1214 +- 0.0209    +0.1218 0.7902
+ham31                  all       3.0273%   0.8438    0.8750  18.78 |   +0.4176 +- 0.0350    +0.4277 0.6618
+ham15                  all       5.8593%   0.7500    0.7812  21.03 |   +2.9923 +- 0.0912    +3.2880 0.2480
+ham31+refit            all       3.0273%   0.8438    0.8750  18.78 |   +0.4638 +- 0.0371    +0.4760 0.6549
+ham15+refit            all       5.8593%   0.7500    0.7812  21.03 |   +3.9762 +- 0.0976    +4.1214 0.1784
+ham127+refit           all       0.7751%   0.9453    0.9766  16.82 |   +0.0380 +- 0.0139    +0.0351 0.8578
+vq16_4096              all       5.8591%   0.7500    0.7812  21.03 |   +2.9398 +- 0.0854    +3.2465 0.2775
+vq16_4096+refit        all       5.8591%   0.7500    0.7812  21.03 |   +3.8011 +- 0.0905    +3.9281 0.2304
+vq16_8192              all       5.4684%   0.8125    0.8438  19.47 |   +2.3312 +- 0.0782    +2.6005 0.3333
+vq8_64                 all       9.9150%   0.7500    0.7812  21.03 |  +17.5592 +- 0.1854   +17.0692 0.0000
+vq16_256               all      16.0925%   0.5000    0.5312  30.93 |  +15.9021 +- 0.1773   +16.4510 0.0000
+ham31@ffn              ffn       3.0273%   0.8438    0.9190  17.88 |   +0.1630 +- 0.0235    +0.1499 0.7824
+ham31@attn             attn      3.0273%   0.8438    1.0001  16.43 |   +0.0952 +- 0.0173    +0.1094 0.8196
+ham31@layer17          layer17   3.0273%   0.8438    1.0273  15.99 |   +0.0042 +- 0.0036    +0.0078 0.9637
+ham31@lm_head          lm_head   3.0272%   0.8438    1.0184  16.13 |   +0.0397 +- 0.0112    +0.0306 0.8676
+ham31+refit@ffn        ffn       3.0273%   0.8438    0.9190  17.88 |   +0.2634 +- 0.0308    +0.2497 0.7314
+vq16_4096@ffn          ffn       5.8591%   0.7500    0.8517  19.29 |   +0.6519 +- 0.0500    +0.6494 0.6088
+vq16_4096@layer17      layer17   5.8597%   0.7500    1.0249  16.03 |   +0.0057 +- 0.0052    +0.0081 0.9451
+rand0.0003             all       0.0300%   0.9961    1.0273  15.99 |   +0.0010 +- 0.0025    +0.0014 0.9735
+rand0.0001             all       0.0100%   0.9985    1.0298  15.95 |   -0.0009 +- 0.0017    -0.0003 0.9853
+rand0.01@ffn           ffn       1.0001%   0.9192    0.9732  16.88 |   +0.0300 +- 0.0121    +0.0291 0.8804
+rand0.01@attn          attn      1.0002%   0.9192    1.0151  16.18 |   +0.0178 +- 0.0099    +0.0150 0.8990
+rand0.01@layer17       layer17   0.9995%   0.9192    1.0292  15.96 |   +0.0003 +- 0.0021    +0.0012 0.9892
+rand0.01@layer0        layer0    0.9995%   0.9192    1.0292  15.96 |   +0.0040 +- 0.0029    +0.0043 0.9765
+rand0.01@layer35       layer35   0.9995%   0.9192    1.0292  15.96 |   +0.0174 +- 0.0042    +0.0185 0.9451
+rand0.01@lm_head       lm_head   1.0002%   0.9192    1.0246  16.03 |   +0.0098 +- 0.0064    +0.0093 0.9294
+rand0.01+refit         all       1.0001%   0.9192    0.9505  17.29 |   +0.0716 +- 0.0186    +0.0764 0.8275
+ham31^p1               all       2.9954%   0.8438    0.8766  18.74 |   +0.3717 +- 0.0342    +0.3731 0.6873
+ham31^p10              all       2.7108%   0.8438    0.8913  18.43 |   +0.2871 +- 0.0302    +0.2845 0.7245
+ham63^p10              all       1.3773%   0.9062    0.9473  17.34 |   +0.0873 +- 0.0182    +0.0880 0.8147
+R3B_VERDICT KILL: lossless sign bpw 0.9979 (best compressor 0.9982 of raw); best all-matrix setting at <= 0.875 total bpw: ham31 (0.8750 bpw, 3.03% of signs flipped) dNLL +0.418 +- 0.035, top-1 0.662; random sign flips cost 0.05 nats at about 0.77% flipped (interpolated between 0.3%: +0.010 and 1.0%: +0.077), which even an ideal code of unbounded block length turns into only h(0.0077) = 0.065 bpw saved; 0.75 bpw needs >= 4.2% flipped; smallest all-matrix setting under 0.05 nats: ham127 at 0.9766 total bpw (16.82 tok/s weights-only), dNLL +0.044 +- 0.014, top-1 0.862; closed-form scale re-fit: rand0.01 +0.077 -> +0.072, ham127 +0.044 -> +0.038, ham31 +0.418 -> +0.464, ham15 +2.992 -> +3.976, vq16_4096 +2.940 -> +3.801 (it does not help). What it would take instead: retraining (quantisation-aware, with the codebook / code constraint in the loop) so the model learns signs that live on the code, which is out of scope here; the realistic R3 saving is therefore R3a only: bfp3 scales, 1064.1 -> 975.4 MB/token, 14.60 -> 15.93 tok/s weights-only (14.03 -> 15.25 with KV at ctx 512), DERIVED.

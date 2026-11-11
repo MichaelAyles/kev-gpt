@@ -1,0 +1,125 @@
+
+R3a summary. bytes = full stream order (253 matrices), weights only; tok/s DERIVED = 15.54e9 B/s (R0 MEASURED) / bytes; +KV = with 43.8 MB of KV read per token at ctx 512. 'packed' = scale codes packed across rows; 'rowal' = today's row-aligned tuples. dNLL = teacher-forced float NLL minus stock binary-8B, nats/token, +- paired SE, on the R1c set (1,020 tokens) and on the confirmation set (2040 tokens of other text), MEASURED. top1 = argmax agreement with stock.
+scheme                   bpw   MB/tok  tok/s    +KV | rowal bpw       MB  tok/s |  dNLL +- SE (R1c set)   top1 |  dNLL +- SE (confirm)   top1 | rms log2
+stock_fp16            1.1250   1064.1  14.60  14.03 |    1.1250   1064.1  14.60 |  lossless (bit-exact)        |                              |   0.0000
+bf16_12               1.1000   1040.5  14.94  14.33 |    1.1250   1064.1  14.60 |  lossless (bit-exact)        |                              |   0.0000
+bf16_10               1.0833   1024.7  15.17  14.54 |    1.1175   1057.1  14.70 |   +0.00000 +- 0.00000 1.0000 |                              |   0.0000
+dict_lossless         1.0711   1013.2  15.34  14.70 |    1.1177   1057.2  14.70 |  lossless (bit-exact)        |                              |   0.0000
+cb8                   1.0626   1005.1  15.46  14.82 |    1.1102   1050.1  14.80 |   +0.07970 +- 0.01075 0.9206 |                              |   0.0066
+u8                    1.0626   1005.1  15.46  14.82 |    1.1102   1050.1  14.80 |   +0.02504 +- 0.00416 0.9716 |                              |   0.0032
+ulog8                 1.0625   1005.0  15.46  14.82 |    1.1101   1050.0  14.80 |   +0.00004 +- 0.00027 0.9980 |   +0.00018 +- 0.00024 0.9931 |   0.0037
+g256                  1.0625   1005.0  15.46  14.82 |    1.1100   1050.0  14.80 |   +0.06394 +- 0.00966 0.9069 |                              |   0.0786
+entropy_H0            1.0526    995.6  15.61  14.95 |     bound                 |  lossless (bit-exact)        |                              |   0.0000
+entropy_sep_resid     1.0477    991.0  15.68  15.02 |     bound                 |  lossless (bit-exact)        |                              |   0.0000
+cb6                   1.0477    991.0  15.68  15.02 |    1.1101   1050.0  14.80 |   +0.13485 +- 0.01581 0.8706 |                              |   0.0144
+u6                    1.0477    991.0  15.68  15.02 |    1.1101   1050.0  14.80 |   +0.25321 +- 0.02390 0.7824 |                              |   0.0117
+ulog6                 1.0477    991.0  15.68  15.02 |    1.1101   1050.0  14.80 |   +0.00178 +- 0.00116 0.9863 |   +0.00035 +- 0.00184 0.9745 |   0.0149
+entropy_ctx_left_up   1.0471    990.4  15.69  15.03 |     bound                 |  lossless (bit-exact)        |                              |   0.0000
+ulog5                 1.0400    983.7  15.80  15.12 |    1.1101   1050.0  14.80 |   +0.00007 +- 0.00217 0.9735 |   -0.00042 +- 0.00245 0.9618 |   0.0303
+bfp4                  1.0352    979.1  15.87  15.19 |    1.1100   1050.0  14.80 |   +0.00098 +- 0.00121 0.9882 |   +0.00246 +- 0.00091 0.9828 |   0.0126
+sep4                  1.0346    978.6  15.88  15.20 |    1.1101   1050.0  14.80 |   +0.14877 +- 0.01692 0.8333 |                              |   0.0136
+sepu4                 1.0346    978.6  15.88  15.20 |    1.1101   1050.0  14.80 |   -0.00380 +- 0.00260 0.9765 |   -0.00372 +- 0.00225 0.9618 |   0.0314
+g256_cb8              1.0314    975.6  15.93  15.24 |    1.0314    975.6  15.93 |   +0.20627 +- 0.01996 0.8373 |                              |   0.0788
+cb4                   1.0313    975.5  15.93  15.25 |    1.0313    975.5  15.93 |   +1.37272 +- 0.07462 0.3990 |                              |   0.0331
+u4                    1.0313    975.5  15.93  15.25 |    1.0313    975.5  15.93 |   +3.91263 +- 0.14903 0.1892 |                              |   0.0375
+ulog4                 1.0313    975.5  15.93  15.25 |    1.0313    975.5  15.93 |   +0.01165 +- 0.00576 0.9265 |   +0.00933 +- 0.00425 0.9157 |   0.0626
+cmp4                  1.0313    975.5  15.93  15.25 |    1.0313    975.5  15.93 |   -0.00568 +- 0.00480 0.9343 |   -0.00343 +- 0.00390 0.9240 |   0.0393
+g512                  1.0313    975.4  15.93  15.25 |    1.0313    975.4  15.93 |   +0.08450 +- 0.01233 0.8873 |                              |   0.0956
+bfp3                  1.0277    972.1  15.99  15.30 |    1.0313    975.4  15.93 |   +0.00189 +- 0.00181 0.9804 |   +0.00617 +- 0.00177 0.9735 |   0.0246
+sep3                  1.0271    971.5  16.00  15.31 |    1.0313    975.5  15.93 |   +0.26686 +- 0.02439 0.7608 |                              |   0.0228
+sepu3                 1.0271    971.5  16.00  15.31 |    1.0313    975.5  15.93 |   +0.00206 +- 0.00541 0.9451 |   +0.00102 +- 0.00447 0.9230 |   0.0672
+sepc3                 1.0271    971.5  16.00  15.31 |    1.0313    975.5  15.93 |   +0.00949 +- 0.00372 0.9559 |                              |   0.0379
+cb3                   1.0238    968.4  16.05  15.35 |    1.0313    975.5  15.93 |   +4.14580 +- 0.15161 0.1608 |                              |   0.0555
+ulog3                 1.0238    968.4  16.05  15.35 |    1.0313    975.5  15.93 |   +0.20414 +- 0.02016 0.7382 |                              |   0.1351
+cmp3                  1.0238    968.4  16.05  15.35 |    1.0313    975.5  15.93 |   +0.13123 +- 0.01757 0.7833 |                              |   0.0850
+bfp2                  1.0195    964.3  16.11  15.41 |    1.0313    975.4  15.93 |   +0.01168 +- 0.00435 0.9529 |   +0.01555 +- 0.00404 0.9466 |   0.0487
+sep2                  1.0189    963.8  16.12  15.42 |    1.0313    975.5  15.93 |   +0.47191 +- 0.03544 0.6402 |                              |   0.0404
+sepu2                 1.0189    963.8  16.12  15.42 |    1.0313    975.5  15.93 |   +0.02900 +- 0.01322 0.8745 |                              |   0.1457
+sepc2                 1.0189    963.8  16.12  15.42 |    1.0313    975.5  15.93 |   +0.03171 +- 0.01445 0.9039 |                              |   0.0863
+cb2                   1.0156    960.7  16.18  15.47 |    1.0313    975.5  15.93 |   +8.83527 +- 0.23607 0.0686 |                              |   0.1001
+g1024                 1.0156    960.7  16.18  15.47 |    1.0313    975.4  15.93 |   +0.21197 +- 0.02116 0.8422 |                              |   0.1093
+sep1                  1.0111    956.4  16.25  15.54 |    1.0313    975.5  15.93 |   +1.39683 +- 0.07194 0.3824 |                              |   0.0681
+sep0                  1.0033    949.0  16.38  15.65 |    1.0313    975.5  15.93 |   +1.63235 +- 0.07865 0.3422 |                              |   0.1064
+row_only              1.0033    949.0  16.38  15.65 |    1.0313    975.4  15.93 |   +1.12335 +- 0.06019 0.4784 |                              |   0.1190
+matrix_const          1.0000    945.9  16.43  15.70 |    1.0238    968.4  16.05 |  +11.62798 +- 0.16608 0.0088 |                              |   0.3158
+decoders:
+  stock_fp16           none (today's stream)
+  bf16_12              wire only: 5-bit exponent + 7-bit mantissa (sign and low 3 mantissa bits are always 0)
+  bf16_10              3-bit exponent offset + 7-bit mantissa; one 5-bit add of a per-matrix exponent base
+  dict_lossless        per-matrix dictionary of its distinct fp16 values: 1024 x 16 b RAM per lane, loaded from a matrix header
+  cb8                  per-matrix 256 x 16 b LUT (Lloyd, log domain), loaded from a 512 B matrix header
+  u8                   uniform log levels: per-matrix 256 x 16 b LUT (or base + k*step into a mantissa ROM)
+  ulog8                full-range uniform log: code * step + base (two per-matrix constants) into the mantissa ROM, or a per-matrix 256 x 16 b LUT
+  g256                 none: one fp16 scale held for 2 sign beats
+  entropy_H0           variable-length entropy decoder at ~2.6 scales/cycle (a bound, not a design)
+  entropy_sep_resid    variable-length entropy decoder at ~2.6 scales/cycle (a bound, not a design)
+  cb6                  per-matrix 64 x 16 b LUT, 128 B header
+  u6                   uniform log levels: per-matrix 64 x 16 b LUT
+  ulog6                full-range uniform log: per-matrix 64 x 16 b LUT, 128 B header
+  entropy_ctx_left_up  variable-length entropy decoder at ~2.6 scales/cycle (a bound, not a design)
+  ulog5                full-range uniform log: per-matrix 32 x 16 b LUT, 64 B header
+  bfp4                 as bfp3 with 4-bit codes (a header + 32 codes no longer fit one beat)
+  sep4                 sep0 + 4-bit residual: second add of a 16-entry offset table
+  sepu4                sep0 + 4-bit full-range uniform residual (16-entry offset table)
+  g256_cb8             256 x 16 b LUT, one code held for 2 sign beats
+  cb4                  per-matrix 16 x 16 b LUT, 32 B header
+  u4                   uniform log levels: per-matrix 16 x 16 b LUT
+  ulog4                full-range uniform log: per-matrix 16 x 16 b LUT, 32 B header
+  cmp4                 companded full-range levels (density^0.15): per-matrix 16 x 16 b LUT, 32 B header
+  g512                 none: one fp16 scale held for 4 sign beats
+  bfp3                 block floating point: one scale beat per 32 sign beats = 16-bit header (10-bit top log code, 3-bit shift) + 32 x 3-bit codes; per group one shift, one 10-bit subtract, 64-entry mantissa ROM; no per-matrix tables
+  sep3                 sep0 + 3-bit residual: second add of an 8-entry offset table
+  sepu3                sep0 + 3-bit full-range uniform residual (8-entry offset table)
+  sepc3                sep0 + 3-bit companded full-range residual (8-entry offset table)
+  cb3                  per-matrix 8 x 16 b LUT, 16 B header
+  ulog3                full-range uniform log: per-matrix 8 x 16 b LUT, 16 B header
+  cmp3                 companded full-range levels: per-matrix 8 x 16 b LUT, 16 B header
+  bfp2                 as bfp3 with 2-bit codes (80 bits per 32 groups)
+  sep2                 sep0 + 2-bit residual: second add of a 4-entry offset table
+  sepu2                sep0 + 2-bit full-range uniform residual (4-entry offset table)
+  sepc2                sep0 + 2-bit companded full-range residual (4-entry offset table)
+  cb2                  per-matrix 4 x 16 b LUT, 8 B header
+  g1024                none: one fp16 scale held for 8 sign beats
+  sep1                 sep0 + 1-bit residual: second add of a 2-entry offset table
+  sep0                 rank-1: 16-bit log code per row + 8-bit log code per group column (G-entry table per matrix); one add, 64-entry mantissa ROM, exponent = high bits
+  row_only             one 16-bit log code per row, mantissa ROM
+  matrix_const         one scale per matrix (anchor: how much do the scales matter at all)
+diagnostics (not codecs): where the sensitivity to scale error lives
+  noise_grp1           rel L2 0.0100  dNLL  +0.00034 +- 0.00101  ex-selfgen  +0.00045  top1 0.9941
+  noise_row1           rel L2 0.0100  dNLL  -0.00046 +- 0.00305  ex-selfgen  -0.00167  top1 0.9578
+  noise_col1           rel L2 0.0098  dNLL  +0.00118 +- 0.00098  ex-selfgen  +0.00044  top1 0.9882
+  noise_mat1           rel L2 0.0105  dNLL  -0.00238 +- 0.00152  ex-selfgen  -0.00537  top1 0.9843
+  noise_grp3           rel L2 0.0300  dNLL  +0.00351 +- 0.00305  ex-selfgen  +0.00388  top1 0.9667
+  noise_row0.3         rel L2 0.0030  dNLL  -0.00095 +- 0.00091  ex-selfgen  -0.00130  top1 0.9902
+  u6@q                 rel L2 0.0019  dNLL  +0.00018 +- 0.00018  ex-selfgen  +0.00013  top1 0.9961
+  u6@k                 rel L2 0.0009  dNLL  +0.00004 +- 0.00013  ex-selfgen  +0.00008  top1 0.9961
+  u6@v                 rel L2 0.0008  dNLL  +0.00016 +- 0.00013  ex-selfgen  +0.00014  top1 0.9971
+  u6@o                 rel L2 0.0062  dNLL  +0.22438 +- 0.02232  ex-selfgen  +0.22953  top1 0.7833
+  u6@gate              rel L2 0.0044  dNLL  -0.00044 +- 0.00032  ex-selfgen  -0.00045  top1 0.9941
+  u6@up                rel L2 0.0030  dNLL  -0.00044 +- 0.00024  ex-selfgen  -0.00073  top1 0.9961
+  u6@down              rel L2 0.0042  dNLL  +0.01258 +- 0.00226  ex-selfgen  +0.01515  top1 0.9794
+  u6@lm_head           rel L2 0.0024  dNLL  +0.00180 +- 0.00181  ex-selfgen  +0.00231  top1 0.9824
+  clip_hi0.1           rel L2 0.0132  dNLL  +3.40191 +- 0.13680  ex-selfgen  +3.34303  top1 0.2176
+  clip_lo0.1           rel L2 0.0016  dNLL  +0.00001 +- 0.00090  ex-selfgen  +0.00045  top1 0.9941
+  noise_grp6           rel L2 0.0602  dNLL  +0.01364 +- 0.00609  ex-selfgen  +0.01448  top1 0.9314
+  noise_grp10          rel L2 0.1009  dNLL  +0.03802 +- 0.01020  ex-selfgen  +0.03968  top1 0.8892
+  clip_hi0.01          rel L2 0.0050  dNLL  +0.14609 +- 0.01642  ex-selfgen  +0.15844  top1 0.8598
+  noisetop0.1_3        rel L2 0.0019  dNLL  +0.00018 +- 0.00052  ex-selfgen  +0.00063  top1 0.9931
+  noisetop0.1_10       rel L2 0.0062  dNLL  +0.00023 +- 0.00167  ex-selfgen  +0.00140  top1 0.9814
+  noisetop1_10         rel L2 0.0159  dNLL  +0.00510 +- 0.00329  ex-selfgen  +0.00500  top1 0.9608
+pooled over both token sets (stratified): dNLL +- SE, upper 95% bound
+  bfp2         964.3 MB  +0.01426 +- 0.00306  ucb +0.02038  top1 0.9487         
+  sepu3        971.5 MB  +0.00137 +- 0.00348  ucb +0.00833  top1 0.9304  rule-A non-inferior@0.01
+  bfp3         972.1 MB  +0.00474 +- 0.00132  ucb +0.00739  top1 0.9758  rule-A non-inferior@0.01
+  ulog4        975.5 MB  +0.01010 +- 0.00342  ucb +0.01694  top1 0.9193         
+  cmp4         975.5 MB  -0.00418 +- 0.00306  ucb +0.00193  top1 0.9275  rule-A non-inferior@0.01
+  sepu4        978.6 MB  -0.00374 +- 0.00173  ucb -0.00028  top1 0.9667  rule-A non-inferior@0.01
+  bfp4         979.1 MB  +0.00197 +- 0.00073  ucb +0.00342  top1 0.9846  rule-A non-inferior@0.01
+  ulog5        983.7 MB  -0.00026 +- 0.00178  ucb +0.00331  top1 0.9657  rule-A non-inferior@0.01
+  ulog6        991.0 MB  +0.00083 +- 0.00128  ucb +0.00339  top1 0.9784  rule-A non-inferior@0.01
+  ulog8       1005.0 MB  +0.00013 +- 0.00018  ucb +0.00050  top1 0.9948  rule-A non-inferior@0.01
+R3A_VERDICT DONE
+R3A_RECOMMEND bfp3 [rowal stream] 1.0313 bpw, 975.4 MB/token, 15.93 tok/s weights-only, 15.25 with KV at ctx 512; dNLL +0.0019 +- 0.0018 on the R1c set, +0.0062 +- 0.0018 on the second set, pooled +0.0047 +- 0.0013; top-1 0.980 / 0.974. Stock: 1064.1 MB, 14.60 / 14.03 tok/s (DERIVED).
+R3A_ALSO smallest confirmed with a packed scale stream: sepu3 [packed stream] 1.0271 bpw, 971.5 MB/token, 16.00 tok/s weights-only, 15.31 with KV at ctx 512; dNLL +0.0021 +- 0.0054 on the R1c set, +0.0010 +- 0.0045 on the second set, pooled +0.0014 +- 0.0035; top-1 0.945 / 0.923
+R3A_ALSO smallest confirmed that also keeps >= 99% of stock's argmaxes: ulog8 [packed stream] 1.0625 bpw, 1005.0 MB/token, 15.46 tok/s weights-only, 14.82 with KV at ctx 512; dNLL +0.0000 +- 0.0003 on the R1c set, +0.0002 +- 0.0002 on the second set, pooled +0.0001 +- 0.0002; top-1 0.998 / 0.993
+R3A_ALSO lossless, fixed rate: dict_lossless [packed stream] 1.0711 bpw, 1013.2 MB/token, 15.34 tok/s weights-only, 14.70 with KV at ctx 512; bit-exact

@@ -1,0 +1,18 @@
+The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[eval] model loaded (4s)
+R3A_SANITY stock binary-8B pooled NLL 2.516205 vs r1c_gate float_nll 2.516205 |d|=0.00e+00 over 1020 tokens PASS
+The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[eval] HOLDOUT set: 8 texts, 2040 tokens, stock NLL 3.3212
+  bfp3          dNLL +0.00617 +- 0.00177  ex-selfgen +0.00617 +- 0.00177  top1 0.9735  (build 24s, eval 25s)
+  ulog8         dNLL +0.00018 +- 0.00024  ex-selfgen +0.00018 +- 0.00024  top1 0.9931  (build 4s, eval 25s)
+  sepu3         dNLL +0.00102 +- 0.00447  ex-selfgen +0.00102 +- 0.00447  top1 0.9230  (build 5s, eval 25s)
+  bfp2          dNLL +0.01555 +- 0.00404  ex-selfgen +0.01555 +- 0.00404  top1 0.9466  (build 26s, eval 25s)
+  ulog5         dNLL -0.00042 +- 0.00245  ex-selfgen -0.00042 +- 0.00245  top1 0.9618  (build 4s, eval 25s)
+  cmp4          dNLL -0.00343 +- 0.00390  ex-selfgen -0.00343 +- 0.00390  top1 0.9240  (build 5s, eval 25s)
+  ulog4         dNLL +0.00933 +- 0.00425  ex-selfgen +0.00933 +- 0.00425  top1 0.9157  (build 5s, eval 26s)
+  sepu4         dNLL -0.00372 +- 0.00225  ex-selfgen -0.00372 +- 0.00225  top1 0.9618  (build 6s, eval 26s)
+  ulog6         dNLL +0.00035 +- 0.00184  ex-selfgen +0.00035 +- 0.00184  top1 0.9745  (build 4s, eval 25s)
+  bfp4          dNLL +0.00246 +- 0.00091  ex-selfgen +0.00246 +- 0.00091  top1 0.9828  (build 26s, eval 25s)
+[eval] budget of 400.0s reached: rerun to continue
+[eval] GPU peak 2.01 GB, 405s
+flock /tmp/kevbuild/gpu.lock env  .venv/bin/python -u -m  --stage eval   400   370.37s user 185.20s system 135% cpu 6:48.62 total

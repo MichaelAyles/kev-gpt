@@ -1,0 +1,22 @@
+The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[eval] model loaded (5s)
+R3A_SANITY stock binary-8B pooled NLL 2.516205 vs r1c_gate float_nll 2.516205 |d|=0.00e+00 over 1020 tokens PASS
+  ulog8         dNLL +0.00004 +- 0.00027  ex-selfgen -0.00001 +- 0.00034  top1 0.9980  (build 4s, eval 13s)
+  ulog6         dNLL +0.00178 +- 0.00116  ex-selfgen +0.00238 +- 0.00147  top1 0.9863  (build 4s, eval 13s)
+  ulog5         dNLL +0.00007 +- 0.00217  ex-selfgen -0.00002 +- 0.00269  top1 0.9735  (build 4s, eval 13s)
+  ulog4         dNLL +0.01165 +- 0.00576  ex-selfgen +0.00764 +- 0.00722  top1 0.9265  (build 4s, eval 13s)
+  ulog3         dNLL +0.20414 +- 0.02016  ex-selfgen +0.19817 +- 0.02455  top1 0.7382  (build 4s, eval 13s)
+  cmp4          dNLL -0.00568 +- 0.00480  ex-selfgen -0.01146 +- 0.00575  top1 0.9343  (build 4s, eval 13s)
+  cmp3          dNLL +0.13123 +- 0.01757  ex-selfgen +0.12261 +- 0.02100  top1 0.7833  (build 5s, eval 13s)
+  sepu4         dNLL -0.00380 +- 0.00260  ex-selfgen -0.00863 +- 0.00295  top1 0.9765  (build 6s, eval 13s)
+  sepu3         dNLL +0.00206 +- 0.00541  ex-selfgen -0.00293 +- 0.00682  top1 0.9451  (build 6s, eval 13s)
+  sepu2         dNLL +0.02900 +- 0.01322  ex-selfgen +0.02199 +- 0.01649  top1 0.8745  (build 6s, eval 13s)
+  sepc3         dNLL +0.00949 +- 0.00372  ex-selfgen +0.01253 +- 0.00423  top1 0.9559  (build 6s, eval 13s)
+  sepc2         dNLL +0.03171 +- 0.01445  ex-selfgen +0.00678 +- 0.01637  top1 0.9039  (build 6s, eval 13s)
+  clip_hi0.1    dNLL +3.40191 +- 0.13680  ex-selfgen +3.34303 +- 0.15781  top1 0.2176  (build 1s, eval 13s)
+  clip_lo0.1    dNLL +0.00001 +- 0.00090  ex-selfgen +0.00045 +- 0.00114  top1 0.9941  (build 1s, eval 13s)
+  noise_grp6    dNLL +0.01364 +- 0.00609  ex-selfgen +0.01448 +- 0.00755  top1 0.9314  (build 3s, eval 13s)
+  noise_grp10   dNLL +0.03802 +- 0.01020  ex-selfgen +0.03968 +- 0.01258  top1 0.8892  (build 3s, eval 13s)
+  clip_hi0.01   dNLL +0.14609 +- 0.01642  ex-selfgen +0.15844 +- 0.01934  top1 0.8598  (build 1s, eval 13s)
+[eval] GPU peak 2.01 GB, 302s
+flock /tmp/kevbuild/gpu.lock env  .venv/bin/python -u -m  --stage eval  420    270.46s user 150.38s system 137% cpu 5:05.43 total

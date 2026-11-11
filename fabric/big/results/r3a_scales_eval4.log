@@ -1,0 +1,11 @@
+The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[eval] model loaded (5s)
+R3A_SANITY stock binary-8B pooled NLL 2.516205 vs r1c_gate float_nll 2.516205 |d|=0.00e+00 over 1020 tokens PASS
+  bfp4          dNLL +0.00098 +- 0.00121  ex-selfgen +0.00084 +- 0.00139  top1 0.9882  (build 24s, eval 13s)
+  bfp3          dNLL +0.00189 +- 0.00181  ex-selfgen +0.00147 +- 0.00231  top1 0.9804  (build 24s, eval 13s)
+  bfp2          dNLL +0.01168 +- 0.00435  ex-selfgen +0.01562 +- 0.00531  top1 0.9529  (build 24s, eval 13s)
+  noisetop0.1_3 dNLL +0.00018 +- 0.00052  ex-selfgen +0.00063 +- 0.00065  top1 0.9931  (build 3s, eval 13s)
+  noisetop0.1_10 dNLL +0.00023 +- 0.00167  ex-selfgen +0.00140 +- 0.00206  top1 0.9814  (build 3s, eval 13s)
+  noisetop1_10  dNLL +0.00510 +- 0.00329  ex-selfgen +0.00500 +- 0.00410  top1 0.9608  (build 3s, eval 13s)
+[eval] GPU peak 2.01 GB, 176s
+flock /tmp/kevbuild/gpu.lock env  .venv/bin/python -u -m  --stage eval  300    164.20s user 57.28s system 123% cpu 2:59.43 total

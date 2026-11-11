@@ -1,0 +1,32 @@
+The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[eval] model loaded (5s)
+R3B_SANITY stock binary-8B pooled NLL 2.516205 vs r1c_gate float_nll 2.516205 |d|=0.00e+00 over 1020 tokens PASS
+  rand0.001              flips 0.1000% of 100.0% of the bits: dNLL -0.0041 +- 0.0048  ex-selfgen -0.0045  top1 0.9569  (build 2s, total 15s)
+  rand0.003              flips 0.3000% of 100.0% of the bits: dNLL +0.0105 +- 0.0088  ex-selfgen +0.0096  top1 0.8941  (build 2s, total 15s)
+  rand0.01               flips 1.0001% of 100.0% of the bits: dNLL +0.0769 +- 0.0185  ex-selfgen +0.0843  top1 0.8304  (build 2s, total 15s)
+  rand0.03               flips 2.9998% of 100.0% of the bits: dNLL +0.3702 +- 0.0358  ex-selfgen +0.3948  top1 0.6794  (build 2s, total 15s)
+  ham127                 flips 0.7751% of 100.0% of the bits: dNLL +0.0436 +- 0.0139  ex-selfgen +0.0432  top1 0.8618  (build 2s, total 16s)
+  ham63                  flips 1.5381% of 100.0% of the bits: dNLL +0.1214 +- 0.0209  ex-selfgen +0.1218  top1 0.7902  (build 3s, total 16s)
+  ham31                  flips 3.0273% of 100.0% of the bits: dNLL +0.4176 +- 0.0350  ex-selfgen +0.4277  top1 0.6618  (build 3s, total 16s)
+  ham15                  flips 5.8593% of 100.0% of the bits: dNLL +2.9923 +- 0.0912  ex-selfgen +3.2880  top1 0.2480  (build 3s, total 16s)
+  ham31+refit            flips 3.0273% of 100.0% of the bits: dNLL +0.4638 +- 0.0371  ex-selfgen +0.4760  top1 0.6549  (build 3s, total 16s)
+  ham15+refit            flips 5.8593% of 100.0% of the bits: dNLL +3.9762 +- 0.0976  ex-selfgen +4.1214  top1 0.1784  (build 3s, total 16s)
+  ham127+refit           flips 0.7751% of 100.0% of the bits: dNLL +0.0380 +- 0.0139  ex-selfgen +0.0351  top1 0.8578  (build 2s, total 16s)
+  vq16_4096              flips 5.8591% of 100.0% of the bits: dNLL +2.9398 +- 0.0854  ex-selfgen +3.2465  top1 0.2775  (build 0s, total 14s)
+  vq16_4096+refit        flips 5.8591% of 100.0% of the bits: dNLL +3.8011 +- 0.0905  ex-selfgen +3.9281  top1 0.2304  (build 0s, total 14s)
+  vq16_8192              flips 5.4684% of 100.0% of the bits: dNLL +2.3312 +- 0.0782  ex-selfgen +2.6005  top1 0.3333  (build 0s, total 14s)
+  vq8_64                 flips 9.9150% of 100.0% of the bits: dNLL +17.5592 +- 0.1854  ex-selfgen +17.0692  top1 0.0000  (build 0s, total 14s)
+  vq16_256               flips 16.0925% of 100.0% of the bits: dNLL +15.9021 +- 0.1773  ex-selfgen +16.4510  top1 0.0000  (build 0s, total 14s)
+  ham31@ffn              flips 3.0273% of 71.8% of the bits: dNLL +0.1630 +- 0.0235  ex-selfgen +0.1499  top1 0.7824  (build 2s, total 15s)
+  ham31@attn             flips 3.0273% of 20.0% of the bits: dNLL +0.0952 +- 0.0173  ex-selfgen +0.1094  top1 0.8196  (build 1s, total 13s)
+  ham31@layer17          flips 3.0273% of 2.5% of the bits: dNLL +0.0042 +- 0.0036  ex-selfgen +0.0078  top1 0.9637  (build 0s, total 13s)
+  ham31@lm_head          flips 3.0272% of 8.2% of the bits: dNLL +0.0397 +- 0.0112  ex-selfgen +0.0306  top1 0.8676  (build 0s, total 13s)
+  ham31+refit@ffn        flips 3.0273% of 71.8% of the bits: dNLL +0.2634 +- 0.0308  ex-selfgen +0.2497  top1 0.7314  (build 2s, total 15s)
+  vq16_4096@ffn          flips 5.8591% of 71.8% of the bits: dNLL +0.6519 +- 0.0500  ex-selfgen +0.6494  top1 0.6088  (build 0s, total 14s)
+  vq16_4096@layer17      flips 5.8597% of 2.5% of the bits: dNLL +0.0057 +- 0.0052  ex-selfgen +0.0081  top1 0.9451  (build 0s, total 13s)
+  rand0.0003             flips 0.0300% of 100.0% of the bits: dNLL +0.0010 +- 0.0025  ex-selfgen +0.0014  top1 0.9735  (build 2s, total 15s)
+  rand0.0001             flips 0.0100% of 100.0% of the bits: dNLL -0.0009 +- 0.0017  ex-selfgen -0.0003  top1 0.9853  (build 2s, total 15s)
+[eval] budget of 380.0s reached: rerun to continue
+R3B_RESTORE stock model after all schemes: per-token NLL identical = True
+[eval] GPU peak 2.01 GB, 399s
+flock /tmp/kevbuild/gpu.lock env  .venv/bin/python -u -m  --stage eval  380  353.42s user 211.96s system 141% cpu 6:40.56 total

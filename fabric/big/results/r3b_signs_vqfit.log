@@ -1,0 +1,17 @@
+[vqfit] histograms of 253 matrices (6s)
+  vq16_8192  0.8125 sign bpw: flips per-matrix codebook 5.4684%, generic codebook 5.4684% (on uniform blocks 5.4688%, from two cosets of hamming[15,11] + 1 raw bit), rate-distortion bound for random bits 2.8635%  (21s)
+      per kind: q 5.4687%  k 5.4687%  v 5.4681%  o 5.4678%  gate 5.4687%  up 5.4685%  down 5.4684%  lm_head 5.4681%
+  vq16_4096  0.7500 sign bpw: flips per-matrix codebook 5.8591%, generic codebook 5.8591% (on uniform blocks 5.8594%, from hamming[15,11] + 1 raw bit), rate-distortion bound for random bits 4.1693%  (28s)
+      per kind: q 5.8595%  k 5.8599%  v 5.8587%  o 5.8585%  gate 5.8591%  up 5.8591%  down 5.8591%  lm_head 5.8587%
+  vq8_64     0.7500 sign bpw: flips per-matrix codebook 9.9150%, generic codebook 10.1056% (on uniform blocks 10.1074%, from random start 2), rate-distortion bound for random bits 4.1693%  (29s)
+      per kind: q 9.9336%  k 9.9262%  v 9.9596%  o 9.9435%  gate 9.8836%  up 9.9214%  down 9.9119%  lm_head 9.9384%
+  vq16_256   0.5000 sign bpw: flips per-matrix codebook 16.0925%, generic codebook 16.0925% (on uniform blocks 16.0924%, from random start 2), rate-distortion bound for random bits 11.0028%  (30s)
+      per kind: q 16.0923%  k 16.0939%  v 16.0949%  o 16.0921%  gate 16.0930%  up 16.0929%  down 16.0920%  lm_head 16.0917%
+  vq8_16     0.5000 sign bpw: flips per-matrix codebook 18.8118%, generic codebook 19.3388% (on uniform blocks 19.3359%, from random start 1), rate-distortion bound for random bits 11.0028%  (30s)
+      per kind: q 18.7848%  k 18.8145%  v 18.7562%  o 18.8107%  gate 18.7760%  up 18.8040%  down 18.7996%  lm_head 19.0141%
+  ham7       0.5781 sign bpw: flips 12.3047% (DERIVED), bound 8.5678%
+  ham15      0.7500 sign bpw: flips 5.8594% (DERIVED), bound 4.1693%
+  ham31      0.8438 sign bpw: flips 3.0273% (DERIVED), bound 2.2683%
+  ham63      0.9062 sign bpw: flips 1.5381% (DERIVED), bound 1.1996%
+  ham127     0.9453 sign bpw: flips 0.7751% (DERIVED), bound 0.6241%
+flock /tmp/kevbuild/gpu.lock env  .venv/bin/python -u -m  --stage vqfit  151.85s user 2.97s system 471% cpu 32.832 total

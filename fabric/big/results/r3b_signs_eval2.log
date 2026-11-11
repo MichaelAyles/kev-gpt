@@ -1,0 +1,16 @@
+The tokenizer you are loading from 'data/big/Bonsai-8B-meta' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[eval] model loaded (6s)
+R3B_SANITY stock binary-8B pooled NLL 2.516205 vs r1c_gate float_nll 2.516205 |d|=0.00e+00 over 1020 tokens PASS
+  rand0.01@ffn           flips 1.0001% of 71.8% of the bits: dNLL +0.0300 +- 0.0121  ex-selfgen +0.0291  top1 0.8804  (build 1s, total 15s)
+  rand0.01@attn          flips 1.0002% of 20.0% of the bits: dNLL +0.0178 +- 0.0099  ex-selfgen +0.0150  top1 0.8990  (build 0s, total 13s)
+  rand0.01@layer17       flips 0.9995% of 2.5% of the bits: dNLL +0.0003 +- 0.0021  ex-selfgen +0.0012  top1 0.9892  (build 0s, total 13s)
+  rand0.01@layer0        flips 0.9995% of 2.5% of the bits: dNLL +0.0040 +- 0.0029  ex-selfgen +0.0043  top1 0.9765  (build 0s, total 13s)
+  rand0.01@layer35       flips 0.9995% of 2.5% of the bits: dNLL +0.0174 +- 0.0042  ex-selfgen +0.0185  top1 0.9451  (build 0s, total 13s)
+  rand0.01@lm_head       flips 1.0002% of 8.2% of the bits: dNLL +0.0098 +- 0.0064  ex-selfgen +0.0093  top1 0.9294  (build 0s, total 13s)
+  rand0.01+refit         flips 1.0001% of 100.0% of the bits: dNLL +0.0716 +- 0.0186  ex-selfgen +0.0764  top1 0.8275  (build 2s, total 15s)
+  ham31^p1               flips 2.9954% of 98.9% of the bits: dNLL +0.3717 +- 0.0342  ex-selfgen +0.3731  top1 0.6873  (build 3s, total 16s)
+  ham31^p10              flips 2.7108% of 89.5% of the bits: dNLL +0.2871 +- 0.0302  ex-selfgen +0.2845  top1 0.7245  (build 3s, total 16s)
+  ham63^p10              flips 1.3773% of 89.5% of the bits: dNLL +0.0873 +- 0.0182  ex-selfgen +0.0880  top1 0.8147  (build 3s, total 16s)
+R3B_RESTORE stock model after all schemes: per-token NLL identical = True
+[eval] GPU peak 2.01 GB, 174s
+flock /tmp/kevbuild/gpu.lock env  .venv/bin/python -u -m  --stage eval  400  156.10s user 95.93s system 142% cpu 2:56.66 total
