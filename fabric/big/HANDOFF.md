@@ -194,6 +194,22 @@ GPU jobs must run one at a time on a 4 GB card.
   there except bytes per token (R3a) and fewer full passes per token (R4).
 - **R2b:** fp32 vector unit, attention with KV in DDR, layer sequencing, board driver.
 
+## 5b. The aggregate plan (chosen by the user 2026-11-11: "go for aggregate")
+
+Target: **100 tok/s aggregate** on the 8B = several users sharing each weight pass (doc 10 R5,
+promoted). Single-stream stays ~11–14 tok/s; that is said out loud wherever the number appears.
+
+A pass costs the weight stream (69.4 ms MEASURED) plus whatever the K positions cost outside it.
+
+| step | what | expected aggregate (all DERIVED until run) |
+|---|---|---|
+| A | batch-K GEMV (`gemv_stream` NB, regs VERSION 3) + batched C host (streams, truncate) + board glue, NB = 4 bitstream | ~30 tok/s at context ~60, ~19 at ~250 (host CPU 14.3 ms + 0.355 ms per cached position per position single-thread, ~3.6× from 4 threads; io ~5.6 ms per position) |
+| B | NB = 8 bitstream (DERIVED ~70k LUT for the core: fits, timing unproven) | ~41 at context ~60, ~23 at ~250: the A53's attention is the wall |
+| C | vector path in fabric: fp32 operator library + silu / exp / rsqrt / quant / fsum cores (agent running), then attention with KV in DDR, norms, sequencer | NB = 8: ~100 at context 200 (1,064 MB + 8 × 17 MB KV per pass), ~87 at context 512 (8 × 44 MB KV) |
+
+Honest limits: KV traffic is per stream, so the aggregate falls with context; and step C is the
+large one (it is the R2b of doc 10: the whole token in fabric).
+
 ## 6. Board / production safety (only if you touch the Kria)
 
 The KV260 also serves a live public chat demo.
