@@ -39,7 +39,7 @@ def _pfn(va: int) -> int:
     if not (e >> 63) & 1:
         raise RuntimeError("page not present")
     pfn = e & ((1 << 55) - 1)
-    if pfn == 0:
+    if pfn == 0 and os.geteuid() != 0:               # (as root PFN 0 is real: ZynqMP DDR starts at 0x0)
         raise RuntimeError("pagemap PFN hidden (need root)")
     return pfn
 
