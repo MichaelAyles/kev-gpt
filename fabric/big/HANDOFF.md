@@ -31,7 +31,8 @@ Rules of the house (from CLAUDE.md, and they apply here):
 | **R1d** ternary-4B vs binary-8B | **DONE, no flag** | pooled NLL 2.598 vs 2.516 (binary wins by ~2σ, tied on neutral text); bytes equal as stored, ternary 18.5% smaller at 5 trits/byte. Ternary-8B is the quality ceiling (2.438) at 1.53× the bytes. R2 stays on binary-8B |
 | **R2a (sim)** packer + streaming GEMV RTL | **PASS in iverilog** | `GEMV_STREAM_VERDICT PASS` (136 sims, bit-exact vs `ExactBfpGemv`), 2.637 groups/cycle at 3 ports, 1,064.1 MB/token packed. **OOC place+route at 3.0 ns (333 MHz): WNS +0.197 ns, 9.3k LUT (8%), 13.3k FF, 6 DSP, 0 BRAM** (PROJECTED, core only) |
 | **R2a on silicon** weight stream + GEMV | **DONE, MEASURED, bit-exact** | One real token's 253 GEMVs (36 layers × q,k,v,o,gate,up,down + LM head) streamed from DDR at 333 MHz: **253/253 bit-exact vs the spec in 9 of 9 runs; 1,064.1 MB in 68.9–69.3 ms = 15.40 GB/s (median) = 14.47 tok/s weights-only (14.43–14.51)**. 250 MHz: 11.86 GB/s, 11.15 tok/s, bit-exact. Engine starved 3.7% of cycles (DDR is the limit, 96% of 3 beats/cycle). Dense 3-slot layout == R0's 4-slot stripe (15.41 vs 15.39 GB/s on 6 layers), so the format stays dense. Build: WNS −0.096 ns at 3.0 ns (3 endpoints, in the result-readback RAM cascade), 13.2k LUT, 19.7k FF, 37 BRAM tiles, 6 DSP. Host loads activations / reads results over AXI-Lite; that time is not in the number. |
-| **R2b** vector unit, attention, sequencer | not started | whole-token roofline **~14.0 tok/s** (DERIVED: 1,064 MB weights + ~44 MB KV per token at ctx 512). No full token has been generated on the board yet. |
+| **R2b stage 1** hybrid (fabric GEMVs + A53 vector path) | **DONE, MEASURED, tokens identical** | `board/pl_token.py`: the torch spec on the A53 with the GEMV swapped for the PL. **240/240 generated tokens identical to the spec free-run** (3 prompts × 80), 253/253 GEMV inputs+outputs identical at the golden position. End to end **0.15–0.25 tok/s, host-bound** (Python + AXI-Lite); fabric 70–72 ms/token. A correctness baseline, not a speed result. |
+| **R2b** fast host path / fabric vector unit | in progress | (1) bit-exact C host kernel (`host/`), (2) `gemv_axi` v2: activation from DDR, results to DDR, argmax in fabric (AXI-Lite alone costs ~130 ms/token, MEASURED 52 ns/word read, 204 ns/word written), (3) then the vector unit in fabric. Whole-token roofline **~14.0 tok/s** (DERIVED: 1,064 MB weights + ~44 MB KV per token at ctx 512). |
 | **R3a** scale compression (study) | **DONE, not in RTL** | `bfp3` (3-bit scales, 16-bit header per 32 groups): 1,064.1 → 975.4 MB/token (**−8.3%**, 15.93 tok/s weights-only DERIVED), ΔNLL +0.0019 ± 0.0018 on the R1c set, +0.0047 ± 0.0013 pooled with a second set, 97.6–98.0% argmax kept. Lossless dictionary: −4.8% but needs scale codes packed across rows. Never clamp the largest scales (+3.4 nats). |
 | **R3b** sub-1-bit signs (study) | **KILL** | signs are incompressible (0.9979 bits/sign lossless); at ≤0.875 total bpw the best code costs +0.42 nats vs a 0.05 bar. Would need retraining with the code in the loop. So realistic R3 = R3a only, and R4's arithmetic is ~15.25 × speculative gain, not 50. |
 
@@ -50,6 +51,10 @@ Key facts you would otherwise rediscover:
   in-use count marks pages *surplus* and makes later "grow by N" allocate nothing (`hp_settle`);
   a small pool comes back as scattered single pages, so ask for ≥ 256 pages and free the old
   pool before building a new one.
+- **Hugepages MOVE.** They are movable allocations on arm64; ones the kernel placed in the CMA
+  area (1000 MB at 0x37400000) are migrated by any CMA allocation, and `fpgautil -b` is one.
+  `HugePool` rejects every page a trial long-term pin (io_uring fixed buffers) refuses, replaces
+  it, and pins the rest. Keep the per-port image checksum check in any driver.
 - **Bonsai Q1_0 format** (ggml type 41): per 128 weights along a row, one fp16 scale + 16 bytes
   of signs; weight j = bit (j%8) of byte (j//8), 1 = +scale. Every matrix is 1-bit, including the
   embedding and LM head. Pinned against PrismML's unpacked release.
@@ -88,6 +93,7 @@ Key facts you would otherwise rediscover:
 | `ref/golden_token.py` | one whole token as a replay file: input (BFP10) and fp32 output of all 253 GEMVs |
 | `board/physmem.py` | physically contiguous memory from hugepages (see the gotchas above) |
 | `board/pl_gemv.py` | **R2a board driver**: packs the image on the Kria, replays the golden token, checks every result word + per-port image checksums, reports GB/s and tok/s (`GEMV_BOARD_VERDICT`) → `results/r2a_board.json` |
+| `board/pl_token.py` | **the hybrid**: generate text with the fabric doing the GEMVs and the A53 running the spec's vector path (`PL_TOKEN_VERDICT`) → `results/r2b_hybrid.json`. Needs torch on the board (`~/bigkev/venv`). |
 | `ref/r3a_scales.py`, `ref/r3b_signs.py` | R3 compression study → `results/r3a_scales.*`, `results/r3b_signs.*` |
 | `results/` | raw R0 sweeps, R1b sweep, R1c gate, the R1 leftover results, cached float chat text (`Bonsai-8B-Q1_0_chatgen_T256.json`, which took 35 min to make) |
 
