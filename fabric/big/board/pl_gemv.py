@@ -59,11 +59,36 @@ def pack10(xq: np.ndarray) -> np.ndarray:
     return np.packbits(bits, axis=1, bitorder="little").view("<u4")
 
 
+def load_mmio():
+    """the C register-access helper (board/mmio.c), built on first use; None without a compiler."""
+    import hashlib
+    import subprocess
+    src = Path(__file__).with_name("mmio.c")
+    try:
+        tag = hashlib.sha1(src.read_bytes()).hexdigest()[:12]
+        out = Path(os.environ.get("BK_CACHE", os.path.expanduser("~/.cache/bk_host"))) / f"libbk_mmio-{tag}.so"
+        if not out.exists():
+            out.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run([os.environ.get("CC", "gcc"), "-O2", "-shared", "-fPIC", "-o", str(out), str(src)], check=True)
+        lib = ctypes.CDLL(str(out))
+    except (OSError, subprocess.CalledProcessError) as ex:
+        print(f"NOTE no mmio helper ({ex}); using slow Python register access")
+        return None
+    vp, u32, sz = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_size_t
+    lib.mmio_rd32.argtypes, lib.mmio_rd32.restype = [vp, vp, sz], None
+    lib.mmio_wr32.argtypes, lib.mmio_wr32.restype = [vp, vp, sz], None
+    lib.mmio_load_act.argtypes, lib.mmio_load_act.restype = [vp, vp, vp, ctypes.c_int, ctypes.c_int, u32, u32, u32, u32], None
+    lib.mmio_wait.argtypes, lib.mmio_wait.restype = [vp, u32, ctypes.c_uint64], u32
+    return lib
+
+
 class Gemv:
     def __init__(self):
         self.fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
         self.m = mmap.mmap(self.fd, 1 << R.ADDR_BITS, offset=R.BASE_ADDR)
         self.w32 = (ctypes.c_uint32 * ((1 << R.ADDR_BITS) // 4)).from_buffer(self.m)
+        self.base = ctypes.addressof(self.w32)
+        self.mmio = load_mmio()
         idc = self.rd(R.IDCODE)
         if idc != R.IDCODE_VALUE:
             sys.exit(f"IDCODE {idc:08x} != GEMV — is gemv_axi.bit loaded?")
@@ -86,7 +111,13 @@ class Gemv:
         if self._act == key:
             return 0.0
         t0 = time.perf_counter()
-        words = pack10(xq)
+        words = np.ascontiguousarray(pack10(xq))
+        if self.mmio is not None:
+            ex = np.ascontiguousarray(xe, dtype=np.int8)
+            self.mmio.mmio_load_act(self.base, words.ctypes.data, ex.ctypes.data, words.shape[0], R.ACT_MANT_WORDS,
+                                    R.ACT_GROUP, R.ACT_EXP, R.ACT_MANT, R.ACT_COMMIT)
+            self._act = key
+            return time.perf_counter() - t0
         w32, base = self.w32, R.ACT_MANT >> 2
         for g in range(words.shape[0]):
             w32[R.ACT_GROUP >> 2] = g
@@ -115,6 +146,11 @@ class Gemv:
         self.wr(R.CTRL, 1)
         t0 = time.perf_counter()
         while not self.rd(R.STATUS) & 2:
+            if self.mmio is not None and os.environ.get("BK_POLL", "c") == "c" and \
+                    self.mmio.mmio_wait(self.base + R.STATUS, 2, 2_000_000) & 2:
+                break
+            if os.environ.get("BK_POLL") == "sleep":
+                time.sleep(0.0002)
             if time.perf_counter() - t0 > timeout:
                 raise TimeoutError(f"{e['name']}: no DONE after {timeout}s, STATUS={self.rd(R.STATUS):#x} "
                                    f"rows_done={self.rd(R.ROWS_DONE)} tuples={self.rd(R.TUPLES)}")
@@ -133,8 +169,13 @@ class Gemv:
         return c
 
     def results(self, n):
-        # a bulk copy of the window: ~50 ns/word (a ctypes slice costs ~760 ns/word)
-        return np.frombuffer(self.m, dtype="<u4", count=n, offset=R.RES_BASE).copy()
+        # never a library memcpy on device memory (wide / unaligned accesses -> bus error)
+        if self.mmio is not None:
+            out = np.empty(n, dtype=np.uint32)
+            self.mmio.mmio_rd32(self.base + R.RES_BASE, out.ctypes.data, n)
+            return out
+        a = R.RES_BASE >> 2
+        return np.array(self.w32[a:a + n], dtype=np.uint32)
 
 
 def port_xsums(img: np.ndarray, lay: Layout):
