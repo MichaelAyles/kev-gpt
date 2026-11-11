@@ -36,7 +36,7 @@ import numpy as np
 from .. import gemv_axi_regs as R
 from ..pack_weights import Layout, gguf_matrix, gguf_name, pack
 from ..ref.gguf_q1 import GGUF
-from .physmem import HP, HugePool, evict
+from .physmem import HP, HugePool, evict, hp_settle
 
 FCLK = "/sys/devices/platform/fclk0/set_rate"
 KINDS = ("q", "k", "v", "o", "gate", "up", "down")
@@ -149,7 +149,7 @@ def port_xsums(img: np.ndarray, lay: Layout):
 
 def build_image(a, lay: Layout, names):
     """-> (pool, {name: dict(pa, size, entry, xsum, bytes, region)})"""
-    idx_path = Path(a.pool + ".json") if not a.pool.startswith("/dev/hugepages") else Path(a.work) / "image_index.json"
+    idx_path = Path(a.work) / (os.path.basename(a.pool) + "_index.json")
     key = dict(gguf=os.path.basename(a.gguf), nports=lay.nports, chunk=lay.chunk, slots=lay.slots,
                port_slots=list(lay.port_slots), names=names)
     g = GGUF(a.gguf)
@@ -164,7 +164,8 @@ def build_image(a, lay: Layout, names):
     pages = max(need + a.spare_pages, a.min_pages)   # small pools come back as isolated 2 MB fragments
     if not a.rebuild and idx_path.exists() and os.path.exists(a.pool):
         old = json.loads(idx_path.read_text())
-        if old["key"] == key and os.path.getsize(a.pool) == old["pages"] * HP:
+        same = all(old["key"][k] == key[k] for k in key if k != "names") and set(names) <= set(old["mats"])
+        if same and os.path.getsize(a.pool) == old["pages"] * HP:      # a superset image is fine
             pool = HugePool(old["pages"], a.pool)
             mats = {}
             for n, m in old["mats"].items():
@@ -175,6 +176,7 @@ def build_image(a, lay: Layout, names):
             return pool, mats
     if os.path.exists(a.pool):
         os.unlink(a.pool)
+    hp_settle(release_free=True)          # give an old pool's pages back first: re-used ones come back scattered
     for f in ("/proc/sys/vm/drop_caches", "/proc/sys/vm/compact_memory"):
         try:
             with open(f, "w") as fh:

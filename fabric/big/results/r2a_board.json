@@ -1,0 +1,520 @@
+{
+ "note": "R2a on silicon (KV260, gemv_axi NPORTS=3 on HP0/HP1/HP3, one golden token = 253 GEMVs of Bonsai-8B-Q1_0). cyc = PL cycles GO->last result row, summed over the matrices of a run. Raw per-matrix rows: board jsonl (not committed).",
+ "runs": [
+  {
+   "file": "r2a_333_dense",
+   "fclk_mhz": 333.33,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 253,
+   "bit_exact": 253,
+   "image_ok": 253,
+   "mb": 1064.1,
+   "ms": 69.13,
+   "gbs": 15.393,
+   "stall_in": 0.0376,
+   "fifo_max": 892,
+   "gbs_by_kind": {
+    "q": 15.25,
+    "k": 14.67,
+    "v": 15.01,
+    "o": 15.35,
+    "gate": 15.39,
+    "up": 15.46,
+    "down": 15.47,
+    "lm_head": 15.51
+   },
+   "tok_s_weights_only": 14.466
+  },
+  {
+   "file": "r2a_333_dense",
+   "fclk_mhz": 333.33,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 253,
+   "bit_exact": 253,
+   "image_ok": 253,
+   "mb": 1064.1,
+   "ms": 69.234,
+   "gbs": 15.37,
+   "stall_in": 0.039,
+   "fifo_max": 859,
+   "gbs_by_kind": {
+    "q": 15.32,
+    "k": 14.73,
+    "v": 15.04,
+    "o": 15.39,
+    "gate": 15.4,
+    "up": 15.32,
+    "down": 15.46,
+    "lm_head": 15.52
+   },
+   "tok_s_weights_only": 14.444
+  },
+  {
+   "file": "r2a_333_dense",
+   "fclk_mhz": 333.33,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 253,
+   "bit_exact": 253,
+   "image_ok": 253,
+   "mb": 1064.1,
+   "ms": 69.113,
+   "gbs": 15.397,
+   "stall_in": 0.0373,
+   "fifo_max": 873,
+   "gbs_by_kind": {
+    "q": 15.32,
+    "k": 14.71,
+    "v": 15.14,
+    "o": 15.41,
+    "gate": 15.46,
+    "up": 15.36,
+    "down": 15.46,
+    "lm_head": 15.55
+   },
+   "tok_s_weights_only": 14.469
+  },
+  {
+   "file": "r2a_333_dense",
+   "fclk_mhz": 333.33,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 253,
+   "bit_exact": 253,
+   "image_ok": 253,
+   "mb": 1064.1,
+   "ms": 68.921,
+   "gbs": 15.44,
+   "stall_in": 0.0346,
+   "fifo_max": 753,
+   "gbs_by_kind": {
+    "q": 15.43,
+    "k": 14.57,
+    "v": 15.11,
+    "o": 15.43,
+    "gate": 15.51,
+    "up": 15.46,
+    "down": 15.48,
+    "lm_head": 15.49
+   },
+   "tok_s_weights_only": 14.509
+  },
+  {
+   "file": "r2a_333_dense",
+   "fclk_mhz": 333.33,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 253,
+   "bit_exact": 253,
+   "image_ok": 253,
+   "mb": 1064.1,
+   "ms": 69.161,
+   "gbs": 15.386,
+   "stall_in": 0.038,
+   "fifo_max": 622,
+   "gbs_by_kind": {
+    "q": 15.33,
+    "k": 14.67,
+    "v": 15.08,
+    "o": 15.43,
+    "gate": 15.43,
+    "up": 15.41,
+    "down": 15.4,
+    "lm_head": 15.52
+   },
+   "tok_s_weights_only": 14.459
+  },
+  {
+   "file": "r2a_333_dense",
+   "fclk_mhz": 333.33,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 253,
+   "bit_exact": 253,
+   "image_ok": 253,
+   "mb": 1064.1,
+   "ms": 69.302,
+   "gbs": 15.355,
+   "stall_in": 0.0399,
+   "fifo_max": 558,
+   "gbs_by_kind": {
+    "q": 15.38,
+    "k": 14.65,
+    "v": 14.96,
+    "o": 15.35,
+    "gate": 15.38,
+    "up": 15.35,
+    "down": 15.41,
+    "lm_head": 15.45
+   },
+   "tok_s_weights_only": 14.43
+  },
+  {
+   "file": "r2a_333_dense",
+   "fclk_mhz": 333.33,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 253,
+   "bit_exact": 253,
+   "image_ok": 253,
+   "mb": 1064.1,
+   "ms": 68.999,
+   "gbs": 15.422,
+   "stall_in": 0.0357,
+   "fifo_max": 740,
+   "gbs_by_kind": {
+    "q": 15.38,
+    "k": 14.7,
+    "v": 15.01,
+    "o": 15.38,
+    "gate": 15.49,
+    "up": 15.41,
+    "down": 15.49,
+    "lm_head": 15.54
+   },
+   "tok_s_weights_only": 14.493
+  },
+  {
+   "file": "r2a_fclk_sweep",
+   "fclk_mhz": 250.0,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 253,
+   "bit_exact": 253,
+   "image_ok": 253,
+   "mb": 1064.1,
+   "ms": 89.693,
+   "gbs": 11.864,
+   "stall_in": 0.0109,
+   "fifo_max": 210,
+   "gbs_by_kind": {
+    "q": 11.87,
+    "k": 11.82,
+    "v": 11.81,
+    "o": 11.87,
+    "gate": 11.86,
+    "up": 11.88,
+    "down": 11.88,
+    "lm_head": 11.88
+   },
+   "tok_s_weights_only": 11.149
+  },
+  {
+   "file": "r2a_fclk_sweep",
+   "fclk_mhz": 333.33,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 253,
+   "bit_exact": 253,
+   "image_ok": 253,
+   "mb": 1064.1,
+   "ms": 68.993,
+   "gbs": 15.424,
+   "stall_in": 0.0357,
+   "fifo_max": 690,
+   "gbs_by_kind": {
+    "q": 15.11,
+    "k": 14.66,
+    "v": 14.97,
+    "o": 15.39,
+    "gate": 15.52,
+    "up": 15.44,
+    "down": 15.52,
+    "lm_head": 15.55
+   },
+   "tok_s_weights_only": 14.494
+  },
+  {
+   "file": "r2a_fclk_sweep",
+   "fclk_mhz": 333.33,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 253,
+   "bit_exact": 253,
+   "image_ok": 253,
+   "mb": 1064.1,
+   "ms": 69.028,
+   "gbs": 15.416,
+   "stall_in": 0.0361,
+   "fifo_max": 858,
+   "gbs_by_kind": {
+    "q": 15.42,
+    "k": 14.73,
+    "v": 15.1,
+    "o": 15.41,
+    "gate": 15.46,
+    "up": 15.43,
+    "down": 15.43,
+    "lm_head": 15.53
+   },
+   "tok_s_weights_only": 14.487
+  },
+  {
+   "file": "r2a_fclk_sweep",
+   "fclk_mhz": 500.0,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 253,
+   "bit_exact": 0,
+   "image_ok": 253,
+   "mb": 1064.1,
+   "ms": 66.532,
+   "gbs": 15.994,
+   "stall_in": 0.3333,
+   "fifo_max": 42,
+   "gbs_by_kind": {
+    "q": 15.93,
+    "k": 14.96,
+    "v": 15.25,
+    "o": 15.84,
+    "gate": 16.08,
+    "up": 16.04,
+    "down": 16.06,
+    "lm_head": 16.14
+   },
+   "tok_s_weights_only": 15.03
+  },
+  {
+   "file": "r2a_333_dense6",
+   "fclk_mhz": 333.33,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 42,
+   "bit_exact": 42,
+   "image_ok": 42,
+   "mb": 162.8,
+   "ms": 10.567,
+   "gbs": 15.406,
+   "stall_in": 0.0367,
+   "fifo_max": 86,
+   "gbs_by_kind": {
+    "q": 15.42,
+    "k": 14.73,
+    "v": 14.94,
+    "o": 15.43,
+    "gate": 15.54,
+    "up": 15.43,
+    "down": 15.37
+   }
+  },
+  {
+   "file": "r2a_333_dense6",
+   "fclk_mhz": 333.33,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 42,
+   "bit_exact": 42,
+   "image_ok": 42,
+   "mb": 162.8,
+   "ms": 10.553,
+   "gbs": 15.427,
+   "stall_in": 0.0354,
+   "fifo_max": 63,
+   "gbs_by_kind": {
+    "q": 15.44,
+    "k": 14.7,
+    "v": 15.11,
+    "o": 15.19,
+    "gate": 15.53,
+    "up": 15.43,
+    "down": 15.52
+   }
+  },
+  {
+   "file": "r2a_333_dense6",
+   "fclk_mhz": 333.33,
+   "slots": 3,
+   "port_slots": [
+    0,
+    1,
+    2
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 42,
+   "bit_exact": 42,
+   "image_ok": 42,
+   "mb": 162.8,
+   "ms": 10.544,
+   "gbs": 15.439,
+   "stall_in": 0.0346,
+   "fifo_max": 74,
+   "gbs_by_kind": {
+    "q": 15.46,
+    "k": 14.71,
+    "v": 15.03,
+    "o": 15.43,
+    "gate": 15.44,
+    "up": 15.48,
+    "down": 15.53
+   }
+  },
+  {
+   "file": "r2a_333_slot4",
+   "fclk_mhz": 333.33,
+   "slots": 4,
+   "port_slots": [
+    0,
+    1,
+    3
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 42,
+   "bit_exact": 42,
+   "image_ok": 42,
+   "mb": 162.8,
+   "ms": 10.608,
+   "gbs": 15.347,
+   "stall_in": 0.0404,
+   "fifo_max": 78,
+   "gbs_by_kind": {
+    "q": 15.39,
+    "k": 14.81,
+    "v": 15.06,
+    "o": 15.3,
+    "gate": 15.51,
+    "up": 15.13,
+    "down": 15.52
+   }
+  },
+  {
+   "file": "r2a_333_slot4",
+   "fclk_mhz": 333.33,
+   "slots": 4,
+   "port_slots": [
+    0,
+    1,
+    3
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 42,
+   "bit_exact": 42,
+   "image_ok": 42,
+   "mb": 162.8,
+   "ms": 10.598,
+   "gbs": 15.361,
+   "stall_in": 0.0395,
+   "fifo_max": 42,
+   "gbs_by_kind": {
+    "q": 14.98,
+    "k": 14.27,
+    "v": 14.93,
+    "o": 15.43,
+    "gate": 15.53,
+    "up": 15.33,
+    "down": 15.5
+   }
+  },
+  {
+   "file": "r2a_333_slot4",
+   "fclk_mhz": 333.33,
+   "slots": 4,
+   "port_slots": [
+    0,
+    1,
+    3
+   ],
+   "chunk": 256,
+   "maxout": 8,
+   "matrices": 42,
+   "bit_exact": 42,
+   "image_ok": 42,
+   "mb": 162.8,
+   "ms": 10.539,
+   "gbs": 15.447,
+   "stall_in": 0.0342,
+   "fifo_max": 46,
+   "gbs_by_kind": {
+    "q": 15.41,
+    "k": 14.65,
+    "v": 14.97,
+    "o": 15.43,
+    "gate": 15.49,
+    "up": 15.5,
+    "down": 15.51
+   }
+  }
+ ]
+}

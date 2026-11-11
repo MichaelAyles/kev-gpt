@@ -44,6 +44,30 @@ def _pfn(va: int) -> int:
     return pfn
 
 
+def hp_counts() -> dict:
+    """HugePages_{Total,Free,Rsvd,Surp} from /proc/meminfo."""
+    out = {}
+    with open("/proc/meminfo") as f:
+        for ln in f:
+            if ln.startswith("HugePages_"):
+                k, v = ln.split(":")
+                out[k[10:]] = int(v)
+    return out
+
+
+def hp_settle(release_free: bool = False) -> int:
+    """Make nr_hugepages equal the real pool size and return it. Writing nr_hugepages below the
+    number of pages in use does not free them, it marks them SURPLUS, and nr_hugepages then
+    reads low; a later 'grow by N' would only relabel surplus pages and allocate nothing.
+    release_free=True also gives the unused pages back to the kernel."""
+    c = hp_counts()
+    want = c["Total"] - (c["Free"] - c["Rsvd"] if release_free else 0)
+    with open(NR, "w") as f:
+        f.write(str(want))
+    with open(NR) as f:
+        return int(f.read())
+
+
 class Region:
     """`size` bytes at physical address `pa`, physically contiguous. `slots` = the virtual page
     index of each 2 MB page it touches, `off0` = offset of `pa` inside the first of them."""
@@ -76,8 +100,7 @@ class HugePool:
     def __init__(self, pages: int, path: str | None = None):
         """pages 2 MB hugepages; path = a hugetlbfs file to back them (persistent) or None."""
         self.path, self.reused = path, False
-        with open(NR) as f:
-            self.before = int(f.read())
+        self.before = hp_settle()
         if path and os.path.exists(path) and os.path.getsize(path) == pages * HP:
             self.reused = True                           # pages already allocated and pinned
         else:
@@ -153,10 +176,7 @@ class HugePool:
         if free:
             if self.path and os.path.exists(self.path):
                 os.unlink(self.path)
-            with open(NR) as f:
-                now = int(f.read())
-            with open(NR, "w") as f:
-                f.write(str(max(0, now - self.n)))
+            hp_settle(release_free=True)
 
 
 def evict(mb: int = 64, passes: int = 3) -> None:

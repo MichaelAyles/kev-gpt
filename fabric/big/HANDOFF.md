@@ -1,4 +1,4 @@
-# Big Kev — handoff (2026-11-10, updated after the R1 leftovers and R2a sim)
+# Big Kev — handoff (2026-11-11, updated after R2a on silicon and the R3 study)
 
 **Goal.** Run a 1-bit 8B LLM (PrismML **Bonsai-8B**, Qwen3-8B architecture) on a $250 Xilinx
 Kria KV260, streaming its weights from DDR as fast as the bus allows. Single-stream decode is
@@ -7,8 +7,8 @@ DDR-resident counterpart to the repo's on-chip "Kevin" model. Optimistic target 
 14 from line-rate streaming, then sub-1-bit weight compression (R3) and speculative decoding
 with an on-chip draft model (R4).
 
-Branch `big-kev` (off `main`, not pushed). Everything lives under `fabric/big/`. The design
-docs (`docs/10-big-kevin.md`, `docs/big-kev-r0.md`, `docs/big-kev-r1.md`) are **local-only**
+Branch `big-kev` (off `main`, pushed to origin; not merged). Everything lives under `fabric/big/`. The design
+docs (`docs/10-big-kevin.md`, `docs/big-kev-r0.md`, `-r1.md`, `-r2.md`, `-r3.md`) are **local-only**
 because `docs/` is gitignored, so this file carries the context those docs hold.
 
 Rules of the house (from CLAUDE.md, and they apply here):
@@ -30,7 +30,10 @@ Rules of the house (from CLAUDE.md, and they apply here):
 | **R1 free-run** | **PASS** | 3 prompts × 80 greedy tokens: fabric output identical to float greedy at every position |
 | **R1d** ternary-4B vs binary-8B | **DONE, no flag** | pooled NLL 2.598 vs 2.516 (binary wins by ~2σ, tied on neutral text); bytes equal as stored, ternary 18.5% smaller at 5 trits/byte. Ternary-8B is the quality ceiling (2.438) at 1.53× the bytes. R2 stays on binary-8B |
 | **R2a (sim)** packer + streaming GEMV RTL | **PASS in iverilog** | `GEMV_STREAM_VERDICT PASS` (136 sims, bit-exact vs `ExactBfpGemv`), 2.637 groups/cycle at 3 ports, 1,064.1 MB/token packed. **OOC place+route at 3.0 ns (333 MHz): WNS +0.197 ns, 9.3k LUT (8%), 13.3k FF, 6 DSP, 0 BRAM** (PROJECTED, core only) |
-| **R2** streaming engine on silicon | not started | roofline **~14.0 tok/s** (DERIVED: 1,064 MB weights + ~44 MB KV per token at ctx 512) |
+| **R2a on silicon** weight stream + GEMV | **DONE, MEASURED, bit-exact** | One real token's 253 GEMVs (36 layers × q,k,v,o,gate,up,down + LM head) streamed from DDR at 333 MHz: **253/253 bit-exact vs the spec in 9 of 9 runs; 1,064.1 MB in 68.9–69.3 ms = 15.40 GB/s (median) = 14.47 tok/s weights-only (14.43–14.51)**. 250 MHz: 11.86 GB/s, 11.15 tok/s, bit-exact. Engine starved 3.7% of cycles (DDR is the limit, 96% of 3 beats/cycle). Dense 3-slot layout == R0's 4-slot stripe (15.41 vs 15.39 GB/s on 6 layers), so the format stays dense. Build: WNS −0.096 ns at 3.0 ns (3 endpoints, in the result-readback RAM cascade), 13.2k LUT, 19.7k FF, 37 BRAM tiles, 6 DSP. Host loads activations / reads results over AXI-Lite; that time is not in the number. |
+| **R2b** vector unit, attention, sequencer | not started | whole-token roofline **~14.0 tok/s** (DERIVED: 1,064 MB weights + ~44 MB KV per token at ctx 512). No full token has been generated on the board yet. |
+| **R3a** scale compression (study) | **DONE, not in RTL** | `bfp3` (3-bit scales, 16-bit header per 32 groups): 1,064.1 → 975.4 MB/token (**−8.3%**, 15.93 tok/s weights-only DERIVED), ΔNLL +0.0019 ± 0.0018 on the R1c set, +0.0047 ± 0.0013 pooled with a second set, 97.6–98.0% argmax kept. Lossless dictionary: −4.8% but needs scale codes packed across rows. Never clamp the largest scales (+3.4 nats). |
+| **R3b** sub-1-bit signs (study) | **KILL** | signs are incompressible (0.9979 bits/sign lossless); at ≤0.875 total bpw the best code costs +0.42 nats vs a 0.05 bar. Would need retraining with the code in the loop. So realistic R3 = R3a only, and R4's arithmetic is ~15.25 × speculative gain, not 50. |
 
 Key facts you would otherwise rediscover:
 - **KV260 DDR is DDR4-2133** (read from the DPLL/DDR_CTRL/MSTR registers), so the peak is
@@ -38,7 +41,15 @@ Key facts you would otherwise rediscover:
 - **HP1 and HP2 share a DDR controller port.** Use HP0+HP1+HP3 at 333 MHz (15.5 GB/s), or HP0–3
   at 250 MHz (14.6). The HPC ports only hurt. Far-apart per-port regions thrash DRAM rows
   (~10.8 GB/s); interleave instead.
-- fclk0 cannot make 300 MHz. It snaps to 333.3 / 250 / 200.
+- fclk0 cannot make 300 MHz. It snaps to 333.3 / 250 / 200 (and 500: at 500 MHz the DDR
+  transport still checks out at ~16.0 GB/s but the GEMV arithmetic fails, as expected).
+- **Weight image without a reboot:** 2 MB hugepages in a hugetlbfs file (`/dev/hugepages/bigkev`),
+  physical addresses from `/proc/self/pagemap`, each matrix bump-allocated in a physically
+  contiguous run (`board/physmem.py`). Packing the 8B on the Kria takes 95 s; later runs re-attach
+  in ~20 s. Gotchas: physical page 0 is real RAM on ZynqMP; writing `nr_hugepages` below the
+  in-use count marks pages *surplus* and makes later "grow by N" allocate nothing (`hp_settle`);
+  a small pool comes back as scattered single pages, so ask for ≥ 256 pages and free the old
+  pool before building a new one.
 - **Bonsai Q1_0 format** (ggml type 41): per 128 weights along a row, one fp16 scale + 16 bytes
   of signs; weight j = bit (j%8) of byte (j//8), 1 = +scale. Every matrix is 1-bit, including the
   embedding and LM head. Pinned against PrismML's unpacked release.
@@ -71,6 +82,13 @@ Key facts you would otherwise rediscover:
 | `pack_weights.py` | **R2a weight packer**: Q1 matrices → port-interleaved 128-bit beat stream (docstring is the stream-format spec) |
 | `rtl/gemv_stream.v`, `tb/tb_gemv_stream.sv`, `run_gemv_stream.py` | **R2a streaming GEMV** + iverilog gate (`GEMV_STREAM_VERDICT`) |
 | `tcl/ooc_gemv_stream.tcl` | OOC synth + place + route of the GEMV core (~7 min) → `results/ooc_gemv_stream.txt` |
+| `gemv_axi_regs.py` | **register map** of the board wrapper (single source for RTL, sim, driver) |
+| `rtl/gemv_axi.v`, `rtl/axi_rd_stream.v`, `tb/tb_gemv_axi.sv`, `tb/axi_rd_mem_slave.sv`, `run_gemv_axi.py` | **R2a board wrapper**: AXI-Lite + NPORTS read masters with credit FIFOs (RREADY always 1) + result capture RAM + counters; iverilog gate (`GEMV_AXI_VERDICT`) |
+| `tcl/build_gemv_axi.tcl` | BD + synth/impl/bitstream: `-tclargs <NPORTS> <MHz> <dir> [GMAX]` (~40 min) → `results/impl_gemv_axi.txt` |
+| `ref/golden_token.py` | one whole token as a replay file: input (BFP10) and fp32 output of all 253 GEMVs |
+| `board/physmem.py` | physically contiguous memory from hugepages (see the gotchas above) |
+| `board/pl_gemv.py` | **R2a board driver**: packs the image on the Kria, replays the golden token, checks every result word + per-port image checksums, reports GB/s and tok/s (`GEMV_BOARD_VERDICT`) → `results/r2a_board.json` |
+| `ref/r3a_scales.py`, `ref/r3b_signs.py` | R3 compression study → `results/r3a_scales.*`, `results/r3b_signs.*` |
 | `results/` | raw R0 sweeps, R1b sweep, R1c gate, the R1 leftover results, cached float chat text (`Bonsai-8B-Q1_0_chatgen_T256.json`, which took 35 min to make) |
 
 The fabric spec in one breath: the GEMV input goes to BFP10 per 128; per group an exact integer
@@ -126,30 +144,32 @@ only). What is open now, in order:
 1. ~~OOC synth of `gemv_stream`~~ **done:** post-route WNS +0.197 ns at 3.0 ns, 9.3k LUT, 13.3k FF,
    6 DSP (`results/ooc_gemv_stream.txt`). Worst path = fan-out of the sign-beat steering select.
    The margin is thin and core-only: re-time in context once the AXI masters are attached.
-2. **R2a on silicon** (needs the board, §6): AXI read masters + address generator around
-   `gemv_stream` (reuse `rtl/axi_rd_probe.v`'s burst logic), a packed image in reserved DDR,
-   a driver that loads activations and reads fp32 rows back. **Accept:** bit-exact against the
-   golden vectors (`ref/golden.py`) on real 8B matrices, then a MEASURED GB/s and the DERIVED
-   tok/s it implies.
-3. **Stream layout decision:** the packer's dense 3-slot stripe has no silicon number; R0's
-   15.54 GB/s used a 4-slot stripe with HP2's slot unread (`--slots 4 --port-slots 0,1,3`, 4/3
-   the image size). Measure both with the R0 probe before fixing the format.
+2. ~~R2a on silicon~~ **done** (§1): bit-exact on all 253 GEMVs of a real token, 15.40 GB/s,
+   14.47 tok/s weights-only MEASURED. Reproduce: build with `tcl/build_gemv_axi.tcl`, copy the
+   `.bin` to `~/kevbit/gemv_axi.bit.bin`, `sudo fpgautil -b` it, then on the Kria (tree at
+   `~/bigkev`, GGUF + `Bonsai-8B-Q1_0_token.npz` in `~/bigkev/data`)
+   `sudo python3 -m fabric.big.board.pl_gemv --fclk 333.333e6 --reps 6`.
+3. ~~Stream layout decision~~ **done:** dense 3-slot == 4-slot stripe on silicon; format stays dense.
 4. ~~Ternary-8B quality ceiling~~ **done:** pooled NLL 2.438 vs binary-8B 2.516, but 1,633 MB per
    token at best packing vs 1,064 (9.5 vs 14.6 tok/s weights-only, DERIVED).
 5. **R6 entry experiment** (contextual sparsity, `docs/10-big-kevin.md`): threshold sweep on
    the FFN `down` input, skipped fraction vs top-1 / ΔNLL, all layers (~15 min GPU). If R6 is
    taken up, `down` wants a column-major stream: decide before item 2 hardens the format.
 
+6. **R2b** (next): the rest of a token on the board. fp32 vector unit (RMSNorm, SiLU, residual,
+   BFP10 requantise), attention with the KV cache in DDR (K BFP10 g16, V BFP8), RoPE, softmax,
+   layer sequencer, argmax. Accept: tokens identical to `fabric_ref` free-run, then MEASURED
+   whole-token tok/s. The R2a wrapper's activation RAM and result FIFO are the seams.
+7. **R3a in RTL** if wanted: `bfp3` scale decode in `gemv_stream` (shift, 10-bit subtract,
+   64-entry ROM) + packer change; the reference then becomes "Bonsai-8B with bfp3 scales".
+   Still open on the study side: `bfp3` through the bit-true spec, free-run and long context.
+
 GPU jobs must run one at a time on a 4 GB card.
 
 ## 5. R2 plan
 
-- **R2a:** a weight packer that emits R0's port-interleaved layout, plus a streaming 1-bit ×
-  BFP10 GEMV RTL across HP0/1/3. **Packer and RTL are done and gated bit-exact in iverilog**
-  (own test cases plus real 8B rows, not yet the golden-vector files). Remaining: synth, then
-  run it on silicon at line rate (§4 items 1–3). First Big-Kev silicon number.
-  - Risk: ~330 weights/cycle at 333 MHz is aggressive for timing. Fallback is HP0–3 at 250 MHz
-    (14.6 GB/s).
+- **R2a: done on silicon** (§1). The weight stream runs at the R0 ceiling; nothing left to gain
+  there except bytes per token (R3a) and fewer full passes per token (R4).
 - **R2b:** fp32 vector unit, attention with KV in DDR, layer sequencing, board driver.
 
 ## 6. Board / production safety (only if you touch the Kria)
@@ -161,4 +181,9 @@ The KV260 also serves a live public chat demo.
 - Restore afterwards with `systemctl --user start kevin-rotation.service`, which reloads the
   production bitstream and reconnects the chat server. Then verify the public chat end to end.
 - Never `pgrep -f a53_daemon` inside an ssh command line; it matches and kills your own shell.
-- Get the owner's go-ahead before any of this. **None of tasks 1–4 needs the board.**
+- Get the owner's go-ahead before any of this.
+- When the serving box is down (as on 2026-11-11) the rotation is not running: kill the
+  daemon by explicit PID before `fpgautil`, and restore with `ssh kria bash ~/activate_model.sh
+  kevin` (reloads the production bitstream at 200 MHz, restarts the daemon, runs the health
+  probe). The hugepage weight image survives that and costs the Kria 1.2 GB of RAM until freed
+  (`pl_gemv --free`, or delete `/dev/hugepages/bigkev` and shrink `nr_hugepages`).
