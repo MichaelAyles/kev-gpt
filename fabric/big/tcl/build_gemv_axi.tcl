@@ -1,7 +1,8 @@
 # R2a on silicon — PS + gemv_axi (AXI-Lite slave + NPORTS 128-bit read masters straight into
 # the PS HP ports), then synth + impl + bitstream in one go.
 #   vivado -mode batch -source fabric/big/tcl/build_gemv_axi.tcl -tclargs <NPORTS> <FREQMHZ> <BDIR> [GMAX]
-# Master -> port map (R0's best sets): 3 ports = HP0, HP1, HP3; 4 ports = HP0..HP3.
+# Master -> port map (R0's best sets): 3 ports = HP0, HP1, HP3 (aux on HP2); 4 ports = HP0..HP3
+# (aux on HPC0).
 set nports [lindex $argv 0]
 set freq   [lindex $argv 1]
 set bdir   [lindex $argv 2]
@@ -16,10 +17,12 @@ set board "xilinx.com:kv260_som:part0:1.4"
 set root  [file normalize [file dirname [info script]]/../../..]
 
 switch $nports {
-    3 { set slaves {S_AXI_HP0_FPD S_AXI_HP1_FPD S_AXI_HP3_FPD} }
-    4 { set slaves {S_AXI_HP0_FPD S_AXI_HP1_FPD S_AXI_HP2_FPD S_AXI_HP3_FPD} }
+    3 { set slaves {S_AXI_HP0_FPD S_AXI_HP1_FPD S_AXI_HP3_FPD}; set auxs S_AXI_HP2_FPD }
+    4 { set slaves {S_AXI_HP0_FPD S_AXI_HP1_FPD S_AXI_HP2_FPD S_AXI_HP3_FPD}; set auxs S_AXI_HPC0_FPD }
     default { error "NPORTS 3 or 4" }
 }
+# aux_axi (activation fetch + result write-back, a few MB per token) gets the port the weight
+# stream does not use: HP2 shares a DDR-controller port with HP1, HPC0 is the fallback.
 # PS slave-port index (PSU__USE__S_AXI_GPn) and clock pin of each S_AXI_*_FPD interface
 array set gpn {S_AXI_HPC0_FPD 0 S_AXI_HPC1_FPD 1 S_AXI_HP0_FPD 2 S_AXI_HP1_FPD 3 S_AXI_HP2_FPD 4 S_AXI_HP3_FPD 5}
 array set clk {S_AXI_HPC0_FPD saxihpc0_fpd_aclk S_AXI_HPC1_FPD saxihpc1_fpd_aclk S_AXI_HP0_FPD saxihp0_fpd_aclk \
@@ -42,7 +45,7 @@ set cfg [list \
     CONFIG.PSU__USE__M_AXI_GP0 {1} CONFIG.PSU__USE__M_AXI_GP1 {0} \
     CONFIG.PSU__USE__M_AXI_GP2 {0} CONFIG.PSU__FPGA_PL0_ENABLE {1} \
     CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ $freq]
-foreach s $slaves {
+foreach s [concat $slaves $auxs] {
     lappend cfg CONFIG.PSU__USE__S_AXI_GP$gpn($s) {1} CONFIG.PSU__SAXIGP$gpn($s)__DATA_WIDTH {128}
 }
 set_property -dict $cfg [get_bd_cells ps]
@@ -61,6 +64,10 @@ foreach s $slaves {
     connect_bd_intf_net [get_bd_intf_pins eng/m${k}_axi] [get_bd_intf_pins ps/$s]
     connect_bd_net [get_bd_pins ps/pl_clk0] [get_bd_pins ps/$clk($s)]
     incr k
+}
+if {[llength [get_bd_intf_pins -quiet eng/aux_axi]]} {
+    connect_bd_intf_net [get_bd_intf_pins eng/aux_axi] [get_bd_intf_pins ps/$auxs]
+    connect_bd_net [get_bd_pins ps/pl_clk0] [get_bd_pins ps/$clk($auxs)]
 }
 
 assign_bd_address
