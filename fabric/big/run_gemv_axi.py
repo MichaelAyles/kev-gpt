@@ -56,8 +56,42 @@ FIFO back-pressures the core, STALL_OUT > 0, still bit-exact); RRESP / BRESP err
 (`dma_err`); SOFT_RST during the fetch / the run / the write-back (`dma_abort`); the cycle cost with
 ideal slaves (`dma_cost`, GEMV_AXI_DMA_COST lines).
 
+REGISTER MAP VERSION 3 (BATCH: rtl parameter NB, register BATCH; `gemv_axi_regs.py`). Everything
+above runs on the NB = 1 build with scripts that never write BATCH: version-2 scripts, unchanged
+(only PARAMS reads 3 / NB). Then, on NB = 2 and NB = 4 builds, for EVERY BATCH from 1 to NB:
+
+  * `bat_modes`: all eight MODE values, with the activations fetched from DDR (BATCH * G records,
+    element b / group g at ACT_ADDR + 256 (b G + g)), loaded through the registers (ACT_GROUP[9:8]
+    = bank) or left over from the run before (banks keep their contents);
+  * the adversarial cases and the real rows again, BATCH cycling from run to run, a DIFFERENT
+    activation in every batch element (`run_gemv_stream.add_alts`: same mantissas / other
+    exponents, negated, all-zero, exponents at the domain edges, random; real cases: the layer
+    input of other tokens), the run's own activation rotating through the elements;
+  * what is compared, per batch element b, against the reference run ON THAT ACTIVATION ALONE:
+      - MODE.RES_DMA: every fp32 word in "DDR", row r / element b at RES_ADDR + 4 (r BATCH + b),
+        bit for bit (and the rest of the aux memory untouched, last beat zero padded);
+      - any MODE: ARGMAX_B + 8b (lowest index of the IEEE maximum) and CHK_B + 16b (SUM, XOR of
+        the element's words); an element >= BATCH must read 0. Without RES_DMA these are the
+        only view of elements >= 1 the hardware offers (the AXI-Lite window is element 0);
+      - element 0: the window, SUM / XOR, ARGMAX_IDX / VAL exactly as in versions 1 / 2;
+  * the aux bus carried exactly ceil(BATCH G / 16) read bursts / 16 BATCH G beats and
+    ceil(BATCH R / 4) write beats; CYC_ACT / CYC_RES / DONE as defined for version 2;
+  * directed: BATCH clamping (0 -> 1, > NB -> NB) and read-back; banks that survive runs with a
+    smaller BATCH, a fetch that reloads only banks < BATCH, one bank reloaded through the
+    registers, commits that must be ignored (ACT_GROUP[31:10] != 0, group >= GMAX, bank >= NB),
+    BATCH written right before GO and rewritten while the run is busy (`bat_banks`; `bat_nb1` =
+    the same on the NB = 1 build, where BATCH always runs as 1); a write slave slower than the
+    engine while BATCH words per row arrive (`bat_stall`); SOFT_RST during
+    the fetch / the run / the write-back of a batch (`bat_abort`); RES_START windowing of element
+    0 (`bat_window`); argmax ties in every element (`bat_tie`); cycle cost with ideal slaves
+    (`bat_cost`, GEMV_AXI_BATCH_COST lines);
+  * batch MUTATIONS on the NB = 4 build (record stride of elements >= 1, result stride, argmax of
+    element 1 reported for element 0, ...), on top of the version-1 / 2 ones.
+
     python -m fabric.big.run_gemv_axi                 # full gate -> GEMV_AXI_VERDICT
-    python -m fabric.big.run_gemv_axi --quick         # adversarial subset, NPORTS 3, no mutations
+    python -m fabric.big.run_gemv_axi --quick         # adversarial subset, NPORTS 3, NB 1 and 2, no mutations
+    python -m fabric.big.run_gemv_axi --nb 4 --only bat_modes      # one build / a name filter
+    (simulations run --jobs at a time; the lines are printed in the order of the cases)
     python -m fabric.big.run_gemv_axi --replay fabric/big/results/gemv_axi_golden.json
 
 GOLDEN FILES (for unit-testing the board driver against the simulated top): the full gate
@@ -107,7 +141,9 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -130,7 +166,7 @@ GMAX, EXW = gs.GMAX, gs.EXW
 M32 = 0xFFFFFFFF
 RES_LG_SIM = 8                      # result window in most sims (256 rows); the RTL default is 14
 MEM_LG = 18                         # beats of slave memory (4 MB)
-AUX_LG = 15                         # beats of the aux slave's memory (512 KB)
+AUX_LG = 16                         # beats of the aux slave's memory (1 MB)
 AUX_BASE = 0x9_2000_0000            # where the aux slave's memory sits unless a caller says otherwise
 ACT_DMA, RES_DMA, RES_NOCAP = 1, 2, 4      # MODE bits
 
@@ -148,11 +184,12 @@ def pack10(q) -> list:
     return out
 
 
-def ops_act(q, e) -> list:
-    """the driver's activation load: per group ACT_GROUP, ACT_EXP, 40 x ACT_MANT, ACT_COMMIT."""
+def ops_act(q, e, bank: int = 0) -> list:
+    """the driver's activation load: per group ACT_GROUP, ACT_EXP, 40 x ACT_MANT, ACT_COMMIT.
+    bank: the batch element (version 3: ACT_GROUP[9:8]; 0 = the version-2 write)."""
     ops = []
     for g, words in enumerate(pack10(q)):
-        ops.append(("w", R.ACT_GROUP, g))
+        ops.append(("w", R.ACT_GROUP, R.act_group_word(g, bank)))
         ops.append(("w", R.ACT_EXP, int(e[g]) & M32))
         ops += [("w", R.ACT_MANT + 4 * i, w) for i, w in enumerate(words)]
         ops.append(("w", R.ACT_COMMIT, 1))
@@ -193,9 +230,22 @@ def act_records(q, e, fill=None) -> np.ndarray:
 
 
 def res_image(rows) -> np.ndarray:
-    """MODE.RES_DMA result image: row r = little-endian fp32 word at 4r, zero padded to a 16-byte beat."""
-    b = np.asarray(rows).astype("<u4").view(np.uint8)
+    """MODE.RES_DMA result image: row r = little-endian fp32 word at 4r, zero padded to a 16-byte beat.
+    rows: [R], or (version 3) a list of BATCH arrays [R], element b's rows -> row r / element b at
+    4 (r BATCH + b): row-major, the elements of a row adjacent."""
+    a = np.asarray(rows)
+    if a.ndim == 2:
+        a = a.T.reshape(-1)
+    b = np.ascontiguousarray(a).astype("<u4").view(np.uint8)
     return np.concatenate([b, np.zeros((-b.size) % 16, dtype=np.uint8)])
+
+
+def act_image(els, fill=None) -> np.ndarray:
+    """MODE.ACT_DMA activation image of a batch: els = [(q, e)] per batch element -> element b's
+    G records at 256 b G (version 3). fill: uint8 [BATCH * G, 256], the bytes the fabric ignores."""
+    G = np.asarray(els[0][0]).size // 128
+    return np.concatenate([act_records(q, e, None if fill is None else fill[b * G:(b + 1) * G])
+                           for b, (q, e) in enumerate(els)])
 
 
 def ops_mode(mode: int, act_addr: int, res_addr: int) -> list:
@@ -222,10 +272,14 @@ COUNTERS = (("cyc_lo", R.CYC_LO), ("cyc_hi", R.CYC_HI), ("str_lo", R.CYC_STREAM_
             ("amax_idx", R.ARGMAX_IDX), ("amax_val", R.ARGMAX_VAL), ("cyc_act", R.CYC_ACT), ("cyc_res", R.CYC_RES))
 
 
-def ops_readback(nports: int, nres: int) -> list:
+def ops_readback(nports: int, nres: int, v3: bool = False) -> list:
     """STATUS, every counter, every per-port register, then nres words of the result window.
-    -> [(op, key)]"""
+    v3: also the per-batch-element registers of all NB_MAX elements. -> [(op, key)]"""
     out = [(("r", R.STATUS), "status")] + [(("r", a), k) for k, a in COUNTERS]
+    if v3:
+        for b in range(R.NB_MAX):
+            out += [(("r", R.argmax_reg(b)), f"bidx{b}"), (("r", R.argmax_reg(b, True)), f"bval{b}")]
+            out += [(("r", R.chk_reg(b, w)), f"b{k}{b}") for w, k in enumerate(("sl", "sh", "xor", "z"))]
     for p in range(nports):
         out += [(("r", R.port_reg(p, R.P_BEATS)), f"beats{p}"), (("r", R.port_reg(p, R.P_EMPTY)), f"empty{p}"),
                 (("r", R.port_reg(p, R.P_FIFO_MAX)), f"fmax{p}")]
@@ -291,26 +345,31 @@ class SimOut:
 
 
 _built = {}
+_build_lock = threading.Lock()
+_key_locks = {}
 
 
-def build(nports: int, res_lg: int, fifo_lg: int, rtl_dir: Path | None = None) -> Path:
-    key = (nports, res_lg, fifo_lg, str(rtl_dir))
-    if key in _built:
-        return _built[key]
-    SIM.mkdir(parents=True, exist_ok=True)
-    d = Path(rtl_dir) if rtl_dir else HERE / "rtl"
-    tagd = hashlib.md5(str(rtl_dir).encode()).hexdigest()[:6] if rtl_dir else "rtl"
-    out = SIM / f"tb_n{nports}_r{res_lg}_f{fifo_lg}_{tagd}.vvp"
-    cmd = [IVERILOG, "-g2012", f"-Ptb_gemv_axi.NPORTS={nports}", f"-Ptb_gemv_axi.GMAX={GMAX}",
-           f"-Ptb_gemv_axi.RES_LG={res_lg}", f"-Ptb_gemv_axi.FIFO_LG={fifo_lg}",
-           f"-Ptb_gemv_axi.MEM_LG={MEM_LG}", "-o", str(out)]
-    cmd += [str(d / f) for f in RTL_FILES]
-    cmd.insert(2, f"-Ptb_gemv_axi.AUX_LG={AUX_LG}")
-    cmd += [str(HERE / "tb" / "axi_rd_mem_slave.sv"), str(HERE / "tb" / "axi_rw_mem_slave.sv"),
-            str(HERE / "tb" / "tb_gemv_axi.sv")]
-    subprocess.run(cmd, check=True)
-    _built[key] = out
-    return out
+def build(nports: int, res_lg: int, fifo_lg: int, rtl_dir: Path | None = None, nb: int = 1) -> Path:
+    key = (nports, res_lg, fifo_lg, str(rtl_dir), nb)
+    with _build_lock:
+        lock = _key_locks.setdefault(key, threading.Lock())
+    with lock:                                       # one compile per configuration, others in parallel
+        if key in _built:
+            return _built[key]
+        SIM.mkdir(parents=True, exist_ok=True)
+        d = Path(rtl_dir) if rtl_dir else HERE / "rtl"
+        tagd = hashlib.md5(str(rtl_dir).encode()).hexdigest()[:6] if rtl_dir else "rtl"
+        out = SIM / f"tb_n{nports}_r{res_lg}_f{fifo_lg}_b{nb}_{tagd}.vvp"
+        cmd = [IVERILOG, "-g2012", f"-Ptb_gemv_axi.NPORTS={nports}", f"-Ptb_gemv_axi.GMAX={GMAX}",
+               f"-Ptb_gemv_axi.RES_LG={res_lg}", f"-Ptb_gemv_axi.FIFO_LG={fifo_lg}",
+               f"-Ptb_gemv_axi.MEM_LG={MEM_LG}", f"-Ptb_gemv_axi.NB={nb}", "-o", str(out)]
+        cmd += [str(d / f) for f in RTL_FILES]
+        cmd.insert(2, f"-Ptb_gemv_axi.AUX_LG={AUX_LG}")
+        cmd += [str(HERE / "tb" / "axi_rd_mem_slave.sv"), str(HERE / "tb" / "axi_rw_mem_slave.sv"),
+                str(HERE / "tb" / "tb_gemv_axi.sv")]
+        subprocess.run(cmd, check=True)
+        _built[key] = out
+        return out
 
 
 OPC = {"w": 0, "r": 1, "poll": 2, "delay": 3, "mark": 4, "wq": 5}
@@ -318,7 +377,7 @@ OPC = {"w": 0, "r": 1, "poll": 2, "delay": 3, "mark": 4, "wq": 5}
 
 def simulate_ops(ops, image, image_base: int, nports: int = 3, *, stim: Stim = Stim(), res_lg: int = 14,
                  fifo_lg: int = 11, rtl_dir=None, workdir=None, timeout_cycles: int = 0,
-                 aux_image=None, aux_base: int = AUX_BASE) -> SimOut:
+                 aux_image=None, aux_base: int = AUX_BASE, nb: int = 1) -> SimOut:
     """Replay a register script on the simulated gemv_axi top.
     ops: sequence of ("w", addr, data) | ("r", addr[, ...]) | ("poll", addr, mask, value) |
          ("delay", cycles) | ("mark", tag) | ("wq", addr, data)   (lists from JSON work too; extra
@@ -328,7 +387,8 @@ def simulate_ops(ops, image, image_base: int, nports: int = 3, *, stim: Stim = S
     activation records to fetch, room for the result rows. Its contents after the script come back
     in SimOut.aux. Without it any access of the aux master is a protocol error.
     timeout_cycles: budget for the whole script; a poll gives up after about that many cycles (the
-    script then carries on, so a hung run can still be read back) and the watchdog fires at 3x."""
+    script then carries on, so a hung run can still be read back) and the watchdog fires at 3x.
+    nb: the NB parameter of the simulated top (max batch; 1 = a top that behaves as version 2)."""
     image = np.frombuffer(bytes(image), dtype=np.uint8) if not isinstance(image, np.ndarray) else image
     assert image.size % 16 == 0 and image_base % 4096 == 0 and image.size // 16 <= 1 << MEM_LG
     d = Path(workdir) if workdir else SIM / "adhoc"
@@ -356,7 +416,7 @@ def simulate_ops(ops, image, image_base: int, nports: int = 3, *, stim: Stim = S
                     f"+auxbeats={aux_image.size // 16}"]
     if not timeout_cycles:
         timeout_cycles = 40 * len(ops) + 2_000_000
-    cmd = [VVP, "-n", str(build(nports, res_lg, fifo_lg, rtl_dir)), f"+script={d / 'script.mem'}",
+    cmd = [VVP, "-n", str(build(nports, res_lg, fifo_lg, rtl_dir, nb)), f"+script={d / 'script.mem'}",
            f"+nops={len(ops)}", f"+out={d / 'out.txt'}", f"+image={d / 'image.mem'}",
            f"+membase={image_base:x}", f"+membeats={image.size // 16}", f"+argap={stim.argap}",
            f"+rgap={stim.rgap}", f"+latmin={stim.latmin}", f"+latmax={stim.latmax}", f"+seed={stim.seed}",
@@ -413,6 +473,18 @@ class Job:
                                 #   from the aux memory and the ACT_* registers are not written
     scribble: bool = False      # write junk into ACT_EXP / ACT_MANT WITHOUT committing before the run (a run
                                 #   that re-uses the activation RAM must not see the registers)
+    # ---- version 3
+    batch: int = 1              # batch elements of the run (what BATCH means after clamping)
+    batch_raw: object = None    # what is written to BATCH (default: batch) -- 0 or > NB to test the clamp
+    sel: object = None          # activations loaded into elements 0..batch-1 (indices into the run's
+                                #   models["els"]: 0 = its own, k = alt k-1). Default gs.elements(job, batch)
+    load_banks: object = None   # register load only: the elements to load (default all); the others, and
+                                #   every element of a job with load_act = False and no ACT_DMA, re-use
+                                #   what the bank holds from earlier jobs
+    pre: object = None          # extra ops before this job's own (e.g. activation commits that must be ignored)
+    batch_late: bool = False    # write BATCH as the very last register before GO (default: first)
+    poke: object = None         # write this to BATCH right after GO, while the run is busy: the run must not
+                                #   see it (BATCH is sampled at GO); it is what the next job starts from
 
 
 def port_beats(mem: np.ndarray, membase: int, cfg: dict, k: int) -> np.ndarray:
@@ -427,7 +499,7 @@ def port_beats(mem: np.ndarray, membase: int, cfg: dict, k: int) -> np.ndarray:
 
 def run_plan(name, runs, jobs, models, nports, chunk, *, slots=0, port_slots=(), stim=Stim(),
              res_lg=RES_LG_SIM, fifo_lg=11, ref_domain=True, membase=0x8_4000_0000, lead_stripes=3,
-             rtl_dir=None, seed=0, want=None, aux_base=AUX_BASE, act_fill="junk"):
+             rtl_dir=None, seed=0, want=None, aux_base=AUX_BASE, act_fill="junk", nb=1, v3=None, tag=""):
     """One simulation: pack `runs` (gs.Run) into one image, execute `jobs` back to back.
     -> (ok, line, info). `want(job_index, got: dict, cfg, fails: list)` adds case-specific checks.
 
@@ -436,7 +508,12 @@ def run_plan(name, runs, jobs, models, nports, chunk, *, slots=0, port_slots=(),
     writes them, and the aux memory is laid out page by page with junk guard pages in between: the
     activation records of each ACT_DMA matrix (ignored bytes = junk unless act_fill == "zero"), one
     junk-filled result region per RES_DMA job. The memory after the script must equal the initial
-    image with exactly the result rows (+ zero padding of the last beat) written into those regions."""
+    image with exactly the result rows (+ zero padding of the last beat) written into those regions.
+
+    nb: the build's NB. v3 (default: some job uses a batch feature): the script writes BATCH whenever
+    its value changes (reset value 1, so a plan of BATCH = 1 jobs never writes it) and reads the
+    per-element registers back after every run. The plan keeps a model of the NB activation banks:
+    a job loads elements (ACT_DMA: all `batch`; registers: `load_banks`) and re-uses the others."""
     slots, port_slots = (slots, port_slots) if slots and len(port_slots) == nports else (0, ())
     lay = pw.Layout(nports, chunk, slots, port_slots, "stripe")
     mats = [(f"{i}:{r.name}", (r.signs, r.scales)) for i, r in enumerate(runs)]
@@ -447,10 +524,47 @@ def run_plan(name, runs, jobs, models, nports, chunk, *, slots=0, port_slots=(),
     mem = np.concatenate([lead, img, tail])
     image_base = membase + lead.size
     res_words = 1 << res_lg
+    if v3 is None:
+        v3 = any(job.batch != 1 or job.batch_raw is not None or job.load_banks is not None or job.sel is not None
+                 for job in jobs)
+    assert all(1 <= job.batch <= nb for job in jobs), f"{name}: batch > NB"
 
-    def rows_of(job):
-        m = models[runs[job.mat].name]
-        return np.asarray(m["ref"] if ref_domain else m["ind"]).astype(np.uint32)
+    def els_of(mat):
+        m = models[runs[mat].name]
+        return m.get("els") or [m]
+
+    # ---- which activation sits in which bank, job by job (the script below loads exactly this)
+    bank = [None] * R.NB_MAX                         # (q, e) per bank as the script leaves it
+    sels, loads = [], []                             # per job: activation index per element; elements it loads
+    for j, job in enumerate(jobs):
+        els = els_of(job.mat)
+        if job.mode & ACT_DMA:
+            ld = list(range(job.batch))
+        elif job.load_act:
+            ld = list(range(job.batch)) if job.load_banks is None else list(job.load_banks)
+        else:
+            ld = []
+        want_sel = list(job.sel) if job.sel is not None else gs.elements(j, job.batch)
+        assert len(want_sel) == job.batch
+        sel = []
+        for b in range(job.batch):
+            if b in ld:
+                assert want_sel[b] < len(els), f"{name} job {j}: run {runs[job.mat].name} has no activation {want_sel[b]}"
+                sel.append(want_sel[b])
+                bank[b] = (els[want_sel[b]]["q"], els[want_sel[b]]["e"])
+            else:                                    # re-use: the bank must hold an activation of this matrix
+                assert bank[b] is not None, f"{name} job {j}: element {b} was never loaded"
+                k = next((k for k, m in enumerate(els) if np.array_equal(m["q"], bank[b][0])
+                          and np.array_equal(m["e"], bank[b][1])), None)
+                assert k is not None, f"{name} job {j}: bank {b} holds another matrix's activation"
+                sel.append(k)
+        sels.append(sel)
+        loads.append(ld)
+
+    def rows_el(j):
+        """the expected fp32 words of job j, per batch element -> [batch][R] uint32"""
+        els = els_of(jobs[j].mat)
+        return [np.asarray(els[k]["ref" if ref_domain else "ind"]).astype(np.uint32) for k in sels[j]]
 
     # ---- aux memory (version 2)
     v2 = any(job.mode for job in jobs)
@@ -466,23 +580,26 @@ def run_plan(name, runs, jobs, models, nports, chunk, *, slots=0, port_slots=(),
             npages = first + -(-nbytes // 4096)
             return first
 
+        akey = lambda j: (jobs[j].mat, tuple(sels[j]))
         for j, job in enumerate(jobs):
-            if job.mode & ACT_DMA and job.mat not in act_page:
-                act_page[job.mat] = alloc(index[job.mat].groups * R.ACT_REC_BYTES)
+            if job.mode & ACT_DMA and akey(j) not in act_page:
+                act_page[akey(j)] = alloc(job.batch * index[job.mat].groups * R.ACT_REC_BYTES)
             if job.mode & RES_DMA:
-                res_page[j] = alloc(index[job.mat].rows * 4)
+                res_page[j] = alloc(index[job.mat].rows * job.batch * 4)
         npages += 1
         assert npages * 256 <= 1 << AUX_LG, f"{name}: aux memory too small ({npages} pages)"
         aux0 = arng.integers(0, 256, npages * 4096, dtype=np.uint8)
-        for mat, pg in act_page.items():
-            m = models[runs[mat].name]
-            G = index[mat].groups
-            fill = None if act_fill == "zero" else aux0[pg * 4096:pg * 4096 + G * 256].reshape(G, 256)
-            aux0[pg * 4096:pg * 4096 + G * 256] = act_records(m["q"], m["e"], fill)
-            act_addr[mat] = aux_base + pg * 4096
+        for (mat, sel), pg in act_page.items():
+            els = els_of(mat)
+            n = len(sel) * index[mat].groups
+            fill = None if act_fill == "zero" else aux0[pg * 4096:pg * 4096 + n * 256].reshape(n, 256)
+            aux0[pg * 4096:pg * 4096 + n * 256] = act_image([(els[k]["q"], els[k]["e"]) for k in sel], fill)
+        for j, job in enumerate(jobs):
+            if job.mode & ACT_DMA:
+                act_addr[j] = aux_base + act_page[akey(j)] * 4096
         aux_exp = aux0.copy()
         for j, pg in res_page.items():
-            ri = res_image(rows_of(jobs[j]))
+            ri = res_image(rows_el(j))
             aux_exp[pg * 4096:pg * 4096 + ri.size] = ri
             res_addr[j] = aux_base + pg * 4096
         nowhere = aux_base + npages * 4096           # outside the memory: touching it is a protocol error
@@ -496,7 +613,7 @@ def run_plan(name, runs, jobs, models, nports, chunk, *, slots=0, port_slots=(),
     def cfg_ops(j, job, cfg, res_start):
         o = ops_cfg(cfg, job.maxout, res_start)
         if v2:
-            o += ops_mode(job.mode, act_addr[job.mat] if job.mode & ACT_DMA else nowhere,
+            o += ops_mode(job.mode, act_addr[j] if job.mode & ACT_DMA else nowhere,
                           res_addr[j] if job.mode & RES_DMA else nowhere)
         return o
 
@@ -506,20 +623,30 @@ def run_plan(name, runs, jobs, models, nports, chunk, *, slots=0, port_slots=(),
     rd(R.STATUS, "status0")
     for a in (0x0FC, 0x240, 0x400, R.port_reg(nports, R.P_BEATS) if nports < 8 else 0x0F8, R.CTRL):
         rd(a, "zero")
-    cfgs, loaded, nres_of = [], None, []
+    if v3:
+        rd(R.BATCH, "batch0")
+    cfgs, nres_of, rb_breg, cur_breg = [], [], [], 1
     for j, job in enumerate(jobs):
         r, e = runs[job.mat], index[job.mat]
         cfg = run_config(e, lay, image_base)
         cfgs.append(cfg)
-        m = models[r.name]
-        reg_load = job.load_act and not (job.mode & ACT_DMA)
+        els = els_of(job.mat)
+        reg_load = bool(loads[j]) and not (job.mode & ACT_DMA)
         if job.soft_rst:
             ops += [("w", R.CTRL, 2), ("w", R.CTRL, 0)]
+        breg = job.batch if job.batch_raw is None else job.batch_raw
+        assert (1 if breg == 0 else min(breg, nb)) == job.batch, f"{name} job {j}: BATCH {breg} does not clamp to {job.batch}"
+        late = job.batch_late and breg != cur_breg
+        assert v3 or (breg == cur_breg and job.poke is None and not job.pre)
+        assert not (late and job.abort_after >= 0)   # the killed run would use the previous BATCH's regions
+        if breg != cur_breg and not late:            # RW registers survive SOFT_RST: written only when it changes
+            ops.append(("w", R.BATCH, breg))
+            cur_breg = breg
+        if job.pre:
+            ops += list(job.pre)
         if reg_load:
-            ops += ops_act(m["q"], m["e"])
-        if reg_load or job.mode & ACT_DMA:
-            loaded = r.name
-        assert loaded is not None
+            for b in loads[j]:
+                ops += ops_act(els[sels[j][b]]["q"], els[sels[j][b]]["e"], b)
         if job.scribble:                             # registers changed, nothing committed
             ops += [("w", R.ACT_GROUP, 0), ("w", R.ACT_EXP, 0x55)]
             ops += [("w", R.ACT_MANT + 4 * i, (0x9E3779B9 * (i + 1 + j)) & M32) for i in range(R.ACT_MANT_WORDS)]
@@ -545,7 +672,16 @@ def run_plan(name, runs, jobs, models, nports, chunk, *, slots=0, port_slots=(),
                 rd(a, "rb_" + k, j)
             for k in range(8):
                 rd(R.PORT_OFF + 4 * k, f"rb_off{k}", j)
+        if v3:
+            rd(R.BATCH, "rb_batch", j)
+            rb_breg.append(cur_breg)
+        if late:
+            ops.append(("w", R.BATCH, breg))
+            cur_breg = breg
         ops.append(("w", R.CTRL, 1))
+        if job.poke is not None:
+            ops.append(("w", R.BATCH, job.poke))
+            cur_breg = job.poke
         if job.go_twice:
             ops += [("wq", R.CTRL, 1), ("delay", 3), ("wq", R.CTRL, 1)]
         rd(R.STATUS, "status_run", j)
@@ -555,11 +691,12 @@ def run_plan(name, runs, jobs, models, nports, chunk, *, slots=0, port_slots=(),
         # RES_NOCAP: the window must still hold what earlier runs left -> read its start back
         nres = min(res_words, 24) if job.mode & RES_NOCAP else max(0, min(e.rows - job.res_start, res_words))
         nres_of.append(nres)
-        for op, key in ops_readback(nports, nres):
+        for op, key in ops_readback(nports, nres, v3):
             ops.append(op)
             keys.append((j, key))
 
-    d = SIM / f"{name}_n{nports}_c{chunk}_s{lay.slots}{'_v2' if v2 else ''}"
+    d = SIM / (f"{name}_n{nports}_c{chunk}_s{lay.slots}{'_v2' if v2 else ''}_b{nb}_sd{stim.seed}{tag}"
+               + (f"_{hashlib.md5(str(rtl_dir).encode()).hexdigest()[:6]}" if rtl_dir else ""))
     beats_total = sum(c["bursts"] * c["chunk"] for c in cfgs)
     slow = 100 // max(1, 100 - max(stim.rgap, stim.slowgap if stim.slowport >= 0 else 0))
     budget = 16 * len(ops) + (4 + 3 * slow) * beats_total + (stim.latmax + 600) * 4 * len(jobs) + 30000
@@ -569,12 +706,14 @@ def run_plan(name, runs, jobs, models, nports, chunk, *, slots=0, port_slots=(),
             e = index[job.mat]
             n = 2 if job.abort_after >= 0 else 1
             if job.mode & ACT_DMA:
-                budget += n * (2 * 16 * e.groups * pct(stim.xrgap) + (e.groups // 16 + 1) * (stim.xlatmax + 4 * pct(stim.xargap) + 20))
+                ng = e.groups * job.batch
+                budget += n * (2 * 16 * ng * pct(stim.xrgap) + (ng // 16 + 1) * (stim.xlatmax + 4 * pct(stim.xargap) + 20))
             if job.mode & RES_DMA:
-                wb = -(-e.rows // 4)
-                budget += n * (2 * wb * (2 + 2 * pct(stim.wgap)) + (wb // 16 + 1) * (stim.blatmax + 4 * pct(stim.awgap) + 20))
+                wb = -(-e.rows * job.batch // 4)
+                budget += n * (2 * wb * (2 + 2 * pct(stim.wgap)) + (wb // 16 + 1) * (stim.blatmax + 4 * pct(stim.awgap) + 20)
+                               + 4 * e.rows * job.batch)
     so = simulate_ops(ops, mem, membase, nports, stim=stim, res_lg=res_lg, fifo_lg=fifo_lg, rtl_dir=rtl_dir,
-                      workdir=d, timeout_cycles=budget, aux_image=aux0, aux_base=aux_base)
+                      workdir=d, timeout_cycles=budget, aux_image=aux0, aux_base=aux_base, nb=nb)
     fails = []
     if not so.ok:
         errs = sorted(set(re.findall(r"(?:SLAVE|AUX)_ERR ([^\n]*?) cyc=", so.stdout)))
@@ -591,42 +730,48 @@ def run_plan(name, runs, jobs, models, nports, chunk, *, slots=0, port_slots=(),
         v = dct.get(key, [None])
         return v[0]
 
-    exp_params = (R.VERSION << 24) | (res_lg << 16) | (GMAX << 8) | nports
+    exp_params = (R.VERSION << 24) | (res_lg << 16) | (GMAX << 8) | (nb << 4) | nports
     if one(glob, "idcode") != R.IDCODE_VALUE or one(glob, "params") != exp_params or one(glob, "status0") != 0:
         fails.append(f"idcode/params/status0 {glob.get('idcode')} {glob.get('params')} {glob.get('status0')}")
     if any(v != 0 for v in glob.get("zero", [1])):
         fails.append(f"unmapped/WO registers do not read 0: {glob.get('zero')}")
+    if v3 and one(glob, "batch0") != 1:
+        fails.append(f"BATCH reads {one(glob, 'batch0')} after reset, not 1")
 
-    n_rows = n_ref = n_ind = n_ddr = n_ddr_ok = n_keep = 0
+    n_rows = n_ref = n_ind = n_ddr = n_ddr_ok = n_keep = n_el = n_el_ok = 0
     info = dict(jobs=[])
     window = [None] * res_words                      # what the AXI-Lite window must hold (None: unknown)
     for j, job in enumerate(jobs):
         g, cfg, r, e = got[j], cfgs[j], runs[job.mat], index[job.mat]
-        m = models[r.name]
-        tag = f"job{j}({r.name}{',mode' + str(job.mode) if v2 else ''})"
+        m = els_of(job.mat)[sels[j][0]]              # batch element 0: the version-2 view
+        rel = rows_el(j)
+        tag_j = (f"job{j}({r.name}{',mode' + str(job.mode) if v2 else ''}"
+                 f"{',batch' + str(job.batch) + ',acts' + ''.join(map(str, sels[j])) if v3 else ''})")
         nres = nres_of[j]
-        ref = rows_of(job).astype(np.uint64)
+        ref = rel[0].astype(np.uint64)
         if not job.mode & RES_NOCAP:                 # the model of the window, whatever the checks below say
             if job.abort_after >= 0:
                 window = [None] * res_words          # the killed run (RES_START 0) may have written anything
             for i in range(nres):
                 window[i] = int(ref[job.res_start + i])
         if not g or "status" not in g:
-            fails.append(f"{tag}: no readback")
+            fails.append(f"{tag_j}: no readback")
             continue
         v = {k: one(g, k) for k in g}
         if any(x is None for k, x in v.items() if not k.startswith("res")):
-            fails.append(f"{tag}: X in a register read")
+            fails.append(f"{tag_j}: X in a register read")
             continue
         if j == 0:
             want_rb = dict(rows=cfg["rows"], groups=cfg["groups"], pad=cfg["pad"], bursts=cfg["bursts"],
                            chunk=cfg["chunk"], step=cfg["step"], res_start=job.res_start,
                            base_lo=cfg["base"] & M32, base_hi=cfg["base"] >> 32)
-            if "rb_act_group" in v:
-                want_rb.update(act_group=e.groups - 1, act_exp=int(m["e"][e.groups - 1]) & M32,
-                               mant0=pack10(m["q"])[-1][0], mant39=pack10(m["q"])[-1][39])
+            if "rb_act_group" in v:                  # the registers hold the last group of the last bank loaded
+                lb = loads[j][-1]
+                ml = els_of(job.mat)[sels[j][lb]]
+                want_rb.update(act_group=R.act_group_word(e.groups - 1, lb), act_exp=int(ml["e"][e.groups - 1]) & M32,
+                               mant0=pack10(ml["q"])[-1][0], mant39=pack10(ml["q"])[-1][39])
             if v2:
-                aa = act_addr[job.mat] if job.mode & ACT_DMA else nowhere
+                aa = act_addr[j] if job.mode & ACT_DMA else nowhere
                 ra = res_addr[j] if job.mode & RES_DMA else nowhere
                 want_rb.update(mode=job.mode, act_addr_lo=aa & M32, act_addr_hi=aa >> 32,
                                res_addr_lo=ra & M32, res_addr_hi=ra >> 32)
@@ -634,102 +779,125 @@ def run_plan(name, runs, jobs, models, nports, chunk, *, slots=0, port_slots=(),
                 want_rb[f"off{k}"] = cfg["port_off"][k] if k < nports else 0
             bad = [k for k, x in want_rb.items() if v.get("rb_" + k) != x]
             if bad:
-                fails.append(f"{tag}: RW read-back {bad}")
+                fails.append(f"{tag_j}: RW read-back {bad}")
+        if v3 and v.get("rb_batch") != rb_breg[j]:
+            fails.append(f"{tag_j}: BATCH reads back {v.get('rb_batch')}, written {rb_breg[j]}")
         if job.abort_after >= 0 and (v.get("status_abort", 0) & 2):
-            fails.append(f"{tag}: DONE set after SOFT_RST")
+            fails.append(f"{tag_j}: DONE set after SOFT_RST")
         if not v["status_run"] & 3:
-            fails.append(f"{tag}: STATUS {v['status_run']:#x} right after GO (neither busy nor done)")
+            fails.append(f"{tag_j}: STATUS {v['status_run']:#x} right after GO (neither busy nor done)")
         if g["poll"][0] is None or (g["poll"][0] & 2) == 0:
-            fails.append(f"{tag}: DONE never came (poll timed out)")
+            fails.append(f"{tag_j}: DONE never came (poll timed out)")
         if v["status"] != job.exp_status:
-            fails.append(f"{tag}: STATUS {v['status']:#x} != {job.exp_status:#x}")
+            fails.append(f"{tag_j}: STATUS {v['status']:#x} != {job.exp_status:#x}")
         if v["err"] != job.exp_err:
-            fails.append(f"{tag}: ERRCNT {v['err']} != {job.exp_err}")
+            fails.append(f"{tag_j}: ERRCNT {v['err']} != {job.exp_err}")
         if v["rows"] != e.rows:
-            fails.append(f"{tag}: ROWS_DONE {v['rows']} != {e.rows}")
+            fails.append(f"{tag_j}: ROWS_DONE {v['rows']} != {e.rows}")
         s = v["sum_lo"] | (v["sum_hi"] << 32)
         if s != int(ref.sum()) or v["xor"] != int(np.bitwise_xor.reduce(ref)):
-            fails.append(f"{tag}: SUM/XOR")
+            fails.append(f"{tag_j}: SUM/XOR")
         if v["tuples"] != e.tuples:
-            fails.append(f"{tag}: TUPLES {v['tuples']} != {e.tuples}")
+            fails.append(f"{tag_j}: TUPLES {v['tuples']} != {e.tuples}")
         ai, av = argmax_ref(ref)                     # always on, any MODE
         if (v["amax_idx"], v["amax_val"]) != (ai, av):
-            fails.append(f"{tag}: ARGMAX {v['amax_idx']} / {v['amax_val']:#010x} != {ai} / {av:#010x}")
-        nb = cfg["bursts"] * cfg["chunk"]
+            fails.append(f"{tag_j}: ARGMAX {v['amax_idx']} / {v['amax_val']:#010x} != {ai} / {av:#010x}")
+        if v3:                                       # per batch element: argmax + checksums; 0 beyond BATCH
+            for b in range(R.NB_MAX):
+                if b < job.batch:
+                    rb_ = rel[b].astype(np.uint64)
+                    wi, wv = argmax_ref(rb_)
+                    wsum, wxor = int(rb_.sum()), int(np.bitwise_xor.reduce(rb_))
+                    n_el += 1
+                else:
+                    wi = wv = wsum = wxor = 0
+                gb_ = (v[f"bidx{b}"], v[f"bval{b}"], v[f"bsl{b}"] | (v[f"bsh{b}"] << 32), v[f"bxor{b}"], v[f"bz{b}"])
+                if gb_ != (wi, wv, wsum, wxor, 0):
+                    fails.append(f"{tag_j}: element {b}{'' if b < job.batch else ' (not in the batch)'}: ARGMAX_B "
+                                 f"{gb_[0]} / {gb_[1]:#010x} (want {wi} / {wv:#010x}), CHK_B SUM {'ok' if gb_[2] == wsum else 'BAD'} "
+                                 f"XOR {'ok' if gb_[3] == wxor else 'BAD'}")
+                elif b < job.batch:
+                    n_el_ok += 1
+        nbt = cfg["bursts"] * cfg["chunk"]
         for k in range(nports):
             pb = port_beats(mem, membase, cfg, k)
             xs = int.from_bytes(np.bitwise_xor.reduce(pb, axis=0).tobytes(), "little")
             gx = sum(v[f"xsum{k}_{i}"] << (32 * i) for i in range(4))
-            if v[f"beats{k}"] != nb or gx != xs:
-                fails.append(f"{tag}: port {k} BEATS {v[f'beats{k}']}/{nb} XSUM {'ok' if gx == xs else 'BAD'}")
+            if v[f"beats{k}"] != nbt or gx != xs:
+                fails.append(f"{tag_j}: port {k} BEATS {v[f'beats{k}']}/{nbt} XSUM {'ok' if gx == xs else 'BAD'}")
             if v[f"fmax{k}"] > (1 << fifo_lg) or v[f"empty{k}"] > v["stall_in"]:
-                fails.append(f"{tag}: port {k} FIFO_MAX {v[f'fmax{k}']} / P_EMPTY {v[f'empty{k}']} out of range")
+                fails.append(f"{tag_j}: port {k} FIFO_MAX {v[f'fmax{k}']} / P_EMPTY {v[f'empty{k}']} out of range")
         if v["stall_in"] > sum(v[f"empty{k}"] for k in range(nports)) or v["stall_in"] == 0:
-            fails.append(f"{tag}: STALL_IN {v['stall_in']} inconsistent with P_EMPTY")
-        # result window
+            fails.append(f"{tag_j}: STALL_IN {v['stall_in']} inconsistent with P_EMPTY")
+        # result window (batch element 0)
         win = np.array([0xFFFF_FFFF_FFFF if x is None else x for x in (g.get(f"res{i}", [None])[0] for i in range(nres))],
                        dtype=np.uint64)
         if job.mode & RES_NOCAP:                     # nothing captured: the window still holds the older rows
             known = [i for i in range(nres) if window[i] is not None]
             n_keep += len(known)
             if not known:
-                fails.append(f"{tag}: RES_NOCAP check is vacuous (no earlier capture in this plan)")
+                fails.append(f"{tag_j}: RES_NOCAP check is vacuous (no earlier capture in this plan)")
             if any(int(win[i]) != window[i] for i in known):
-                fails.append(f"{tag}: RES_NOCAP but the result window changed")
+                fails.append(f"{tag_j}: RES_NOCAP but the result window changed")
             nres = 0
         else:
             n_rows += nres
             n_ref += int((win == m["ref"][job.res_start:job.res_start + nres].astype(np.uint64)).sum())
             n_ind += int((win == m["ind"][job.res_start:job.res_start + nres].astype(np.uint64)).sum())
             if not np.array_equal(win, ref[job.res_start:job.res_start + nres]):
-                fails.append(f"{tag}: result window (RES_START {job.res_start}) differs from the "
+                fails.append(f"{tag_j}: result window (RES_START {job.res_start}) differs from the "
                              f"{'spec' if ref_domain else 'independent model'}")
-        # result rows in DDR (all rows, whatever RES_START says)
+        # result words in DDR (all rows of every batch element, whatever RES_START says)
         if job.mode & RES_DMA:
-            n_ddr += e.rows
+            n_ddr += e.rows * job.batch
             if so.aux is not None and so.aux.size == aux_exp.size:
                 a0 = res_addr[j] - aux_base
-                ddr = so.aux[a0:a0 + 4 * e.rows].view("<u4")
-                n_ddr_ok += int((ddr == ref.astype(np.uint32)).sum())
+                ddr = so.aux[a0:a0 + 4 * e.rows * job.batch].view("<u4").reshape(e.rows, job.batch)
+                for b in range(job.batch):           # row r / element b at 4 (r BATCH + b)
+                    k = int((ddr[:, b] == rel[b]).sum())
+                    n_ddr_ok += k
+                    if k != e.rows:
+                        fails.append(f"{tag_j}: element {b}: {e.rows - k} of {e.rows} words in DDR differ")
         # bus-side events
         cyc, cstr = v["cyc_lo"] | (v["cyc_hi"] << 32), v["str_lo"] | (v["str_hi"] << 32)
         mk = so.marks[j] if j < len(so.marks) else None
         if mk is None:
-            fails.append(f"{tag}: no mark")
+            fails.append(f"{tag_j}: no mark")
         else:
             exact = job.abort_after < 0 or job.abort_wait     # else: GO during the drain, bus log is mixed
-            if exact and (mk["n_ar"] != nports * cfg["bursts"] or mk["n_beats"] != nports * nb):
-                fails.append(f"{tag}: bus saw {mk['n_ar']} ARs / {mk['n_beats']} beats, want "
-                             f"{nports * cfg['bursts']} / {nports * nb}")
+            if exact and (mk["n_ar"] != nports * cfg["bursts"] or mk["n_beats"] != nports * nbt):
+                fails.append(f"{tag_j}: bus saw {mk['n_ar']} ARs / {mk['n_beats']} beats, want "
+                             f"{nports * cfg['bursts']} / {nports * nbt}")
             if exact and cstr != mk["B"] - mk["A"]:
-                fails.append(f"{tag}: CYC_STREAM {cstr} != B-A {mk['B'] - mk['A']}")
+                fails.append(f"{tag_j}: CYC_STREAM {cstr} != B-A {mk['B'] - mk['A']}")
             if exact and cyc != mk["L"] - mk["T"]:
-                fails.append(f"{tag}: CYC {cyc} != L-T {mk['L'] - mk['T']}")
+                fails.append(f"{tag_j}: CYC {cyc} != L-T {mk['L'] - mk['T']}")
             if not exact and not (0 < cyc <= mk["L"] - mk["T"] and cstr > 0):
-                fails.append(f"{tag}: CYC {cyc} / CYC_STREAM {cstr} vs L-T {mk['L'] - mk['T']} (deferred GO)")
-            # aux master: exactly the fetch and the write-back of this MODE, nothing else
-            wb = -(-e.rows // 4)
-            x_want = ((-(-e.groups // 16), 16 * e.groups) if job.mode & ACT_DMA else (0, 0)) + \
+                fails.append(f"{tag_j}: CYC {cyc} / CYC_STREAM {cstr} vs L-T {mk['L'] - mk['T']} (deferred GO)")
+            # aux master: exactly the fetch and the write-back of this MODE and BATCH, nothing else
+            wb = -(-e.rows * job.batch // 4)
+            ng = e.groups * job.batch
+            x_want = ((-(-ng // 16), 16 * ng) if job.mode & ACT_DMA else (0, 0)) + \
                      ((-(-wb // 16), wb) if job.mode & RES_DMA else (0, 0))
             x_got = (mk["x_ar"], mk["x_rbeats"], mk["x_aw"], mk["x_wbeats"])
             if exact and (x_got != x_want or mk["x_wzero"] != 0):
-                fails.append(f"{tag}: aux bus (ARs, R beats, AWs, W beats) {x_got} != {x_want}, "
+                fails.append(f"{tag_j}: aux bus (ARs, R beats, AWs, W beats) {x_got} != {x_want}, "
                              f"{mk['x_wzero']} beats without strobes")
             if exact and v["cyc_act"] != (mk["Ba"] - mk["T"] - 4 if job.mode & ACT_DMA else 0):
-                fails.append(f"{tag}: CYC_ACT {v['cyc_act']} != Ba-T-4 {mk['Ba'] - mk['T'] - 4}")
+                fails.append(f"{tag_j}: CYC_ACT {v['cyc_act']} != Ba-T-4 {mk['Ba'] - mk['T'] - 4}")
             if exact and v["cyc_res"] != (mk["Bw"] - mk["L"] if job.mode & RES_DMA else 0):
-                fails.append(f"{tag}: CYC_RES {v['cyc_res']} != Bw-L {mk['Bw'] - mk['L']}")
+                fails.append(f"{tag_j}: CYC_RES {v['cyc_res']} != Bw-L {mk['Bw'] - mk['L']}")
             # DONE: after the last row, after the last write response (RES_DMA), and not later than
             # PAD + 30 cycles after the last bus event of the run (the masters must be idle and the
             # engine must have discarded the pad tuples first)
             last_ev = max(mk["L"], mk["B"], mk["Bw"] if job.mode & RES_DMA else -1)
             if job.mode & RES_DMA and not 0 <= mk["Bw"] < mk["D"]:
-                fails.append(f"{tag}: DONE at {mk['D']} but the last write response came at {mk['Bw']}")
+                fails.append(f"{tag_j}: DONE at {mk['D']} but the last write response came at {mk['Bw']}")
             if exact and not mk["L"] < mk["D"] <= last_ev + cfg["pad"] + 30:
-                fails.append(f"{tag}: DONE at {mk['D']}; last row {mk['L']}, last R beat {mk['B']}, last B {mk['Bw']}")
+                fails.append(f"{tag_j}: DONE at {mk['D']}; last row {mk['L']}, last R beat {mk['B']}, last B {mk['Bw']}")
         if want:
             want(j, v, cfg, fails)
-        info["jobs"].append(dict(v, cyc=cyc, cyc_stream=cstr, cfg=cfg, nres=nres, mode=job.mode,
+        info["jobs"].append(dict(v, cyc=cyc, cyc_stream=cstr, cfg=cfg, nres=nres, mode=job.mode, batch=job.batch,
                                  done_after_last_row=(mk["D"] - mk["L"]) if mk else None))
     if v2:
         if so.aux is None or so.aux.size != aux_exp.size:
@@ -744,12 +912,14 @@ def run_plan(name, runs, jobs, models, nports, chunk, *, slots=0, port_slots=(),
             f"{'dense' if not slots else 'slots' + str(lay.slots) + str(list(lay.port_slots)):16s} {stim.tag():24s} "
             f"jobs={len(jobs):2d} rows={n_rows:4d} rtl==ref {n_ref}/{n_rows}{'' if ref_domain else ' (info)'} "
             f"rtl==indep {n_ind}/{n_rows}"
-            + (f" | v2 modes {''.join(str(job.mode) for job in jobs)} {stim.xtag()}: DDR rows {n_ddr_ok}/{n_ddr}, "
-               f"window words kept {n_keep}" if v2 else "")
+            + (f" | v2 modes {''.join(str(job.mode) for job in jobs)} {stim.xtag()}: DDR {'words' if v3 else 'rows'} "
+               f"{n_ddr_ok}/{n_ddr}, window words kept {n_keep}" if v2 else "")
+            + (f" | v3 nb={nb} batch {''.join(str(job.batch) for job in jobs)}: argmax+checksum of {n_el_ok}/{n_el} "
+               f"(run, element) pairs" if v3 else "")
             + (f"  !! {'; '.join(fails[:4])}" + (f" (+{len(fails) - 4})" if len(fails) > 4 else "") if fails else ""))
     info.update(ok=ok, fails=fails, ops=ops, keys=keys, sim=so, mem=mem, membase=membase, image_base=image_base,
-                index=index, lay=lay, cfgs=cfgs, n_ddr=n_ddr, aux0=aux0, aux_exp=aux_exp, aux_base=aux_base,
-                act_addr=act_addr, res_addr=res_addr)
+                index=index, lay=lay, cfgs=cfgs, n_ddr=n_ddr, n_el=n_el, aux0=aux0, aux_exp=aux_exp, aux_base=aux_base,
+                act_addr=act_addr, res_addr=res_addr, sels=sels, v3=v3, nb=nb)
     return ok, line, info
 
 
@@ -837,20 +1007,14 @@ def case_tie(rng):
     return gs.Case("dma_tie", runs, note="argmax ties: the maximum row duplicated at higher indices")
 
 
-_am_built = None
-
-
 def argmax_unit(rtl_dir=None):
     """gemv_argmax alone on directed vectors (the engine never emits -0). -> (ok, line)"""
-    global _am_built
     SIM.mkdir(parents=True, exist_ok=True)
     d = Path(rtl_dir) if rtl_dir else HERE / "rtl"
-    out = SIM / (f"tb_argmax_{hashlib.md5(str(rtl_dir).encode()).hexdigest()[:6]}.vvp" if rtl_dir else "tb_argmax.vvp")
-    if rtl_dir or _am_built is None:
-        subprocess.run([IVERILOG, "-g2012", "-s", "tb_gemv_argmax", "-o", str(out)] + [str(d / f) for f in RTL_FILES]
-                       + [str(HERE / "tb" / "tb_gemv_argmax.sv")], check=True)
-        if not rtl_dir:
-            _am_built = out
+    tg = hashlib.md5(str(rtl_dir).encode()).hexdigest()[:6] if rtl_dir else "rtl"
+    out, f_in, f_out = SIM / f"tb_argmax_{tg}.vvp", SIM / f"argmax_in_{tg}.mem", SIM / f"argmax_out_{tg}.txt"
+    subprocess.run([IVERILOG, "-g2012", "-s", "tb_gemv_argmax", "-o", str(out)] + [str(d / f) for f in RTL_FILES]
+                   + [str(HERE / "tb" / "tb_gemv_argmax.sv")], check=True)
     rng = np.random.default_rng(424)
     f32 = lambda *xs: np.array(xs, dtype=np.float32).view(np.uint32)
     NZ, PZ = 0x8000_0000, 0x0000_0000
@@ -872,13 +1036,13 @@ def argmax_unit(rtl_dir=None):
         for gaps in (0, 1):
             words += [t.size, gaps] + [int(x) for x in t]
             want.append(argmax_ref(t))
-    (SIM / "argmax_in.mem").write_text("\n".join(f"{w:08x}" for w in words) + "\n")
-    (SIM / "argmax_out.txt").unlink(missing_ok=True)
-    so = subprocess.run([VVP, "-n", str(out), f"+in={SIM / 'argmax_in.mem'}", f"+out={SIM / 'argmax_out.txt'}",
-                         f"+nw={len(words)}"], capture_output=True, text=True).stdout
+    f_in.write_text("\n".join(f"{w:08x}" for w in words) + "\n")
+    f_out.unlink(missing_ok=True)
+    so = subprocess.run([VVP, "-n", str(out), f"+in={f_in}", f"+out={f_out}", f"+nw={len(words)}"],
+                        capture_output=True, text=True).stdout
     got = []
-    if (SIM / "argmax_out.txt").exists():
-        for ln in (SIM / "argmax_out.txt").read_text().split():
+    if f_out.exists():
+        for ln in f_out.read_text().split():
             got.append(ln)
     got = [(int(a), int(b, 16)) if "x" not in (a + b).lower() else None for a, b in zip(got[0::2], got[1::2])]
     nzero = sum(1 for t in tests if ((t & 0x7FFF_FFFF) == 0).any() and (t == NZ).any())
@@ -917,7 +1081,7 @@ MUTATIONS = [
      "the last beat is not zero padded"),
     ("res_addr", "axi_aux_dma.v", "w_addr <= w_addr + {blen, 4'b0000};", "w_addr <= w_addr + {blen, 4'b0000} + 16;",
      "write bursts after the first land one beat too far"),
-    ("res_start", "gemv_axi.v", ".res_v(c_v), .res_d(c_d),", ".res_v(c_v & skip_z), .res_d(c_d),",
+    ("res_start", "gemv_axi.v", "wire        res_v_w    = c_v | ser_v;", "wire        res_v_w    = (c_v | ser_v) & skip_z;",
      "RES_DMA skips the rows before RES_START"),
     ("nocap", "gemv_axi.v", " & ~clr_q & ~q_mode[2];", " & ~clr_q;", "RES_NOCAP still captures"),
     ("done_early", "gemv_axi.v", "& (~q_mode[1] | aux_res_done)};", "};",
@@ -935,8 +1099,114 @@ MUTATIONS = [
 ]
 
 
+# ----------------------------------------------------------------------------- version 3 (batch)
+def pick(els, j: int, batch: int, need_i8: bool = False):
+    """`batch` DIFFERENT activations of a run (indices into models[name]["els"]) for elements
+    0..batch-1 of job j, rotating with j; need_i8: only those a record can hold. None: too few."""
+    cand = [k for k, m in enumerate(els) if not need_i8 or fits_i8(m["e"])]
+    if len(cand) < batch:
+        return None
+    return [cand[(j + b) % len(cand)] for b in range(batch)]
+
+
+def ops_act_one(group_word: int, q, e, g: int = 0) -> list:
+    """one activation commit with ACT_GROUP written as given (group g's mantissas / exponent)."""
+    return ([("w", R.ACT_GROUP, group_word), ("w", R.ACT_EXP, int(e[g]) & M32)]
+            + [("w", R.ACT_MANT + 4 * i, w) for i, w in enumerate(pack10(q)[g])] + [("w", R.ACT_COMMIT, 1)])
+
+
+def bat_mode_jobs(case, models, nb):
+    """every BATCH 1..nb x every MODE. ACT_DMA: the fetch; the same MODE without ACT_DMA right after
+    it re-uses the banks (ACT_* scribbled, uncommitted); then every MODE without ACT_DMA again with
+    all the banks loaded through the registers (ACT_GROUP[9:8])."""
+    jobs, nm = [], len(case.runs)
+    for B in range(1, nb + 1):
+        for k, mode in enumerate((1, 3, 5, 7)):
+            i = (B - 1 + k) % nm
+            sel = pick(models[case.runs[i].name]["els"], len(jobs), B, True)
+            assert sel is not None
+            jobs.append(Job(i, mode=mode, batch=B, sel=sel))
+            jobs.append(Job(i, mode=mode & ~ACT_DMA, batch=B, load_act=False, scribble=True))
+        for k, mode in enumerate((0, 2, 4, 6)):
+            i = (B + 3 + k) % nm
+            jobs.append(Job(i, mode=mode, batch=B, sel=pick(models[case.runs[i].name]["els"], len(jobs), B)))
+    return jobs
+
+
+BAT_MODES = (3, 1, 7, 2, 0, 5, 6, 4)
+
+
+def bat_jobs(case, models, nb, maxout=8, off=0):
+    """a case's matrices as batches: BATCH (gs.BAT_MIX) and MODE cycle from run to run, the
+    activations of the elements rotate. A batch that needs an exponent beyond the record's int8
+    keeps the register load. Ends with the banks re-used (same BATCH, then BATCH 1)."""
+    mix, jobs, cap, last = gs.BAT_MIX[nb], [], False, None
+    for i, r in enumerate(case.runs):
+        els = models[r.name]["els"]
+        B = min(mix[(i + off) % len(mix)], len(els))
+        mode = BAT_MODES[(i + off) % 8]
+        if not cap:
+            mode &= ~RES_NOCAP                       # nothing in the window yet
+        sel = pick(els, i + off, B, bool(mode & ACT_DMA))
+        if sel is None:
+            mode &= ~ACT_DMA
+            sel = pick(els, i + off, B)
+        cap |= not mode & RES_NOCAP
+        jobs.append(Job(i, mode=mode, batch=B, sel=sel, maxout=maxout))
+        last = jobs[-1]
+    jobs += [Job(last.mat, mode=RES_DMA, batch=last.batch, load_act=False, scribble=True, maxout=maxout),
+             Job(last.mat, mode=0, batch=1, load_act=False, maxout=maxout)]
+    return jobs
+
+
+def case_tie_all(rng):
+    """every row twice (row r + R/2 = row r): whatever the activation, the maximum of every batch
+    element is tied and the lower index must be reported."""
+    runs = []
+    for name, G, Rr in (("tieall_a", 5, 30), ("tieall_b", 12, 16), ("tieall_c", 1, 44)):
+        r = gs.rand_run(rng, name, G, Rr)
+        r.signs[Rr // 2:] = r.signs[:Rr // 2]
+        r.scales[Rr // 2:] = r.scales[:Rr // 2]
+        runs.append(r)
+    return gs.Case("bat_tie", runs, note="every row duplicated at r + R/2: an argmax tie in every batch element")
+
+
+BAT_MUTATIONS = [
+    # (name, file, old, new, what) -- planted into the NB = 4 build
+    ("b_rec_stride", "axi_aux_dma.v", "if (gcnt == g_last) begin gcnt <= 8'd0; bk <= bk + 2'd1; end",
+     "if (gcnt == g_last + 8'd1) begin gcnt <= 8'd0; bk <= bk + 2'd1; end",
+     "element b's records are taken from 256 b (G + 1), not 256 b G"),
+    ("b_fetch_n", "axi_aux_dma.v", "case (act_batch)", "case (3'd1)", "the fetch reads G records whatever BATCH says"),
+    ("b_bank0", "axi_aux_dma.v", "bank_p <= bk;", "bank_p <= 2'd0;", "every fetched record goes to bank 0"),
+    ("b_res_stride", "gemv_axi.v", "if (c_v && ser_on)      begin ser_v <= 1'b1; ser_left <= q_bm1; end",
+     "if (c_v && ser_on)      begin ser_v <= 1'b1; ser_left <= NB - 1; end",
+     "a row takes NB words in DDR, not BATCH (result stride 4 NB)"),
+    ("b_res_rep", "gemv_axi.v", "ser_sh <= c_d >> 32; ser_l <= c_l;", "ser_sh <= c_d; ser_l <= c_l;",
+     "element 0 is written again in element 1's place (elements >= 1 one word late)"),
+    ("b_res_el0", "gemv_axi.v", "wire        res_v_w    = c_v | ser_v;", "wire        res_v_w    = c_v;",
+     "only element 0 of a row is written to DDR"),
+    ("b_no_hold", "gemv_axi.v", "wire                  core_m_rdy = aux_res_room & ~m_hold_w;",
+     "wire                  core_m_rdy = aux_res_room;",
+     "the engine is not held while a row's elements are serialised"),
+    ("b_amax_el", "gemv_axi.v", "4'd12: g_cnt <= amax_idx;", "4'd12: g_cnt <= amax_idx_all[32 +: 32];",
+     "ARGMAX_IDX reports element 1's index"),
+    ("b_amax_b", "gemv_axi.v", ": amax_idx_all[rd_idx[3:1]*32 +: 32];", ": amax_idx_all[0 +: 32];",
+     "ARGMAX_B of every element reports element 0's index"),
+    ("b_amax_d", "gemv_axi.v", ".v(c_v & en), .d(c_d[ge*32 +: 32]),", ".v(c_v & en), .d(c_d[(ge ^ 1)*32 +: 32]),",
+     "the argmax units of elements 2k and 2k+1 see each other's rows"),
+    ("b_chk_el", "gemv_axi.v", "wire [31:0] d   = c_d[ge*32 +: 32];", "wire [31:0] d   = c_d[0 +: 32];",
+     "CHK_B of elements >= 1 sums element 0's words"),
+    ("b_bank_fld", "gemv_axi.v", "act_sel ? aux_act_bank  : r_act_group[9:8];", "act_sel ? aux_act_bank  : 2'd0;",
+     "the register load ignores ACT_GROUP[9:8] (every commit goes to bank 0)"),
+    ("b_act_hi", "gemv_axi.v", "& (r_act_group[31:10] == 22'd0)", "& 1'b1",
+     "a commit with ACT_GROUP[31:10] != 0 is not ignored"),
+    ("b_clamp0", "gemv_axi.v", "(r_batch == 32'd0) ? 3'd1 :", "(r_batch == 32'd0) ? NB[2:0] :", "BATCH = 0 runs NB elements"),
+    ("b_clamp_hi", "gemv_axi.v", "((r_batch > NB) ? NB[2:0] : r_batch[2:0]);", "r_batch[2:0];", "BATCH > NB is not clamped"),
+]
+
+
 def mutate(name) -> Path:
-    mname, fname, old, new, _ = next(m for m in MUTATIONS if m[0] == name)
+    mname, fname, old, new, _ = next(m for m in MUTATIONS + BAT_MUTATIONS if m[0] == name)
     d = SIM / f"mut_{re.sub('[^a-z0-9]', '_', mname)}"
     d.mkdir(parents=True, exist_ok=True)
     for f in RTL_FILES:
@@ -959,6 +1229,13 @@ def starve_want(nports, slowport, fifo_lg, chunk):
             fails.append(f"job{j}: starvation not attributed: STALL_IN {v['stall_in']} P_EMPTY slow {e_slow} others {others}")
         if min(fm) < (1 << fifo_lg) - 2 * chunk:
             fails.append(f"job{j}: fast-port FIFOs never filled (FIFO_MAX {fm}): credits not exercised")
+    return want
+
+
+def stall_want(js):
+    def want(j, v, cfg, fails):
+        if j in js and v["stall_out"] == 0:
+            fails.append(f"job{j}: the write slave never back-pressured the engine (STALL_OUT 0): not exercised")
     return want
 
 
@@ -1022,7 +1299,7 @@ def replay(path: Path):
     assert doc["schema"] == "gemv_axi_golden/2"
     aux = bytes.fromhex(doc["aux_image_hex"]) if doc.get("mode") else None
     so = simulate_ops(doc["ops"], bytes.fromhex(doc["image_hex"]), doc["image_base"], doc["nports"],
-                      res_lg=doc["res_lg"], fifo_lg=doc["fifo_lg"], workdir=SIM / "replay",
+                      res_lg=doc["res_lg"], fifo_lg=doc["fifo_lg"], workdir=SIM / f"replay_{Path(path).stem}",
                       aux_image=aux, aux_base=doc.get("aux_base", AUX_BASE))
     want = [op for op in doc["ops"] if op[0] in ("r", "poll")]
     bad = [f"{op[1]:#x}: {got[1]} != {op[2]}" for op, got in zip(want, so.reads)
@@ -1051,9 +1328,12 @@ def replay(path: Path):
 # ----------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--quick", action="store_true", help="adversarial subset, NPORTS 3, no mutations / real / golden")
+    ap.add_argument("--quick", action="store_true",
+                    help="adversarial subset, NPORTS 3, NB 1 and 2, no mutations / real / golden")
     ap.add_argument("--nports", type=int, nargs="*", default=None)
+    ap.add_argument("--nb", type=int, nargs="*", default=None, help="builds to run (default 1 2 4; 1 = the version-2 flow)")
     ap.add_argument("--only", default="", help="substring filter on case names")
+    ap.add_argument("--jobs", type=int, default=max(1, min(16, (os.cpu_count() or 2) - 2)), help="simulations in parallel")
     ap.add_argument("--replay", default="", help="replay a golden JSON through the simulated top and exit")
     ap.add_argument("--golden", default=str(GOLDEN), help="where the full gate writes the golden file")
     ap.add_argument("--golden-dma", default=str(GOLDEN_DMA), help="where it writes the MODE = ACT_DMA|RES_DMA one")
@@ -1066,7 +1346,8 @@ def main():
         print(f"GEMV_AXI_REPLAY_VERDICT {'PASS' if ok else 'FAIL'}")
         sys.exit(0 if ok else 1)
 
-    rng = np.random.default_rng(20261111)
+    rng = np.random.default_rng(20261111)           # the version-1 / 2 cases: the draws of the version-2 gate
+    brng = np.random.default_rng(20261203)          # everything batch draws from its own stream
     adv = [gs.case_maxinner(), gs.case_scales(rng), gs.case_negshift(rng), gs.case_bigshift(rng),
            gs.case_zero_rows(rng), gs.case_rne_ties(rng),
            gs.case_random(rng, "adv_random_small", [(1, 1), (1, 5), (2, 3), (7, 4), (8, 2), (9, 3), (15, 1), (17, 6), (1, 2)]),
@@ -1077,292 +1358,559 @@ def main():
         adv = [adv[0], adv[1], adv[6], adv[8], adv[9]]
     real = [] if a.quick else gs.cases_real()
     sweep = a.nports or ([3] if a.quick else [3, 4])
-    ok_all, n_sims, n_rows, n_ddr, n_v2 = True, 0, 0, 0, 0
+    nbs = a.nb or ([1, 2] if a.quick else [1, 2, 4])
+    assert all(n in (1, 2, 4) for n in nbs)
+    tot = dict(ok=True, sims=0, rows=0, ddr=0, v2=0, bat=0, el=0, mut=0, mut_all=0)
     all_models = {}
     sel = lambda nm: not a.only or a.only in nm
 
+    # ---- simulations run in a pool; their lines are printed in the order they were scheduled
+    pool = ThreadPoolExecutor(max_workers=a.jobs)
+    pending = []                                    # (future | None, post | text)
+
+    def sched(fn, *args, post=None, **kw):
+        """post(ok, line, info) -> (ok, line, [extra lines]) runs when the result is printed."""
+        pending.append((pool.submit(fn, *args, **kw), post))
+
+    def say(text):
+        pending.append((None, text))
+
     def emit(ok, line, info=None):
-        nonlocal ok_all, n_sims, n_rows, n_ddr, n_v2
-        ok_all &= ok
-        n_sims += 1
+        tot["ok"] &= ok
+        tot["sims"] += 1
         if info:
-            n_rows += sum(j["nres"] for j in info["jobs"])
-            n_ddr += info.get("n_ddr", 0)
-            n_v2 += int(info.get("aux0") is not None)
+            tot["rows"] += sum(j["nres"] for j in info["jobs"])
+            tot["ddr"] += info.get("n_ddr", 0)
+            tot["v2"] += int(info.get("aux0") is not None)
+            tot["bat"] += int(info.get("nb", 1) > 1)
+            tot["el"] += info.get("n_el", 0)
         print(line, flush=True)
 
-    # ---- the cases x layouts x bus behaviours
+    def modelled(case, quiet=False):
+        models, info_line, ind_ref = gs.model_case(case)
+        if not quiet:
+            say(info_line)
+        if case.ref_domain and not ind_ref:
+            tot["ok"] = False
+            say(f"FAIL {case.name}: independent model disagrees with ExactBfpGemv")
+        return models
+
+    def multi(fn, *args):
+        """a task that returns a list of (ok, line) results and plain lines"""
+        pending.append((pool.submit(fn, *args), "multi"))
+
+    # every case gets alternative activations (batch elements); the NB = 1 flow uses the run's own only
+    for case in adv:
+        gs.add_alts(case, brng)
+    cases = []
     for ci, case in enumerate(adv + real):
         if a.only and a.only not in case.name:
             continue
         models, info_line, ind_ref = gs.model_case(case)
         all_models[case.name] = models
-        print(info_line)
+        cases.append((ci, case, models, info_line))
         if case.ref_domain and not ind_ref:
-            ok_all = False
-            print(f"FAIL {case.name}: independent model disagrees with ExactBfpGemv")
-        is_real = case.name.startswith("real")
-        for n in sweep:
-            for vi, (chunk, slots, ps, stim, maxout) in enumerate(variants(n, is_real, a.quick)):
-                order = list(range(len(case.runs)))
-                if vi % 2:                      # every other sim runs the matrices out of image order
-                    order = order[::-1]
-                jobs = [Job(i, maxout=maxout) for i in order]
-                ok, line, info = run_plan(case.name, case.runs, jobs, models, n, chunk, slots=slots, port_slots=ps,
-                                          stim=stim, ref_domain=case.ref_domain, seed=ci * 10 + vi,
-                                          membase=(0x8_4000_0000, 0x0_7FF0_0000, 0x10_0000_0000)[vi % 3])
-                emit(ok, line, info)
-        # version 2: the same matrices with the activation fetched from / the results written to "DDR"
-        for n in sweep:
-            for vi, (chunk, slots, ps, stim, maxout) in enumerate(dma_variants(n, a.quick)):
-                jobs = dma_jobs(case, models, maxout)
-                ok, line, info = run_plan(case.name, case.runs, jobs, models, n, chunk, slots=slots, port_slots=ps,
-                                          stim=stim, ref_domain=case.ref_domain, seed=ci * 10 + vi + 500,
-                                          membase=(0x8_4000_0000, 0x0_7FF0_0000)[vi % 2],
-                                          aux_base=(AUX_BASE, 0x0_3F00_0000, 0x1F_FFF0_0000)[(ci + vi) % 3],
-                                          act_fill=("junk", "zero")[ci % 2])
-                emit(ok, line, info)
-                if is_real and vi == 0 and info["jobs"]:
-                    v = info["jobs"][0]
-                    print(f"     {case.name} n={n}: G={v['cfg']['groups']} rows={v['cfg']['rows']}: CYC_ACT {v['cyc_act']} "
-                          f"CYC_RES {v['cyc_res']} CYC {v['cyc']} ({stim.xtag()})")
+            tot["ok"] = False
+            say(f"FAIL {case.name}: independent model disagrees with ExactBfpGemv")
 
-    # ---- directed version-2 cases
-    if sel("dma_tie"):
-        tcase = case_tie(rng)
-        tmodels, info_line, _ = gs.model_case(tcase)
-        print(info_line)
-        for n in sweep:
-            jobs = [Job(i) for i in range(len(tcase.runs))]                       # version 1 script: argmax is always on
-            ok, line, info = run_plan("dma_tie", tcase.runs, jobs, tmodels, n, 16, stim=Stim(seed=81))
-            emit(ok, line, info)
-            jobs = [Job(i, mode=(3, 5, 4, 6)[i % 4]) for i in range(len(tcase.runs))]    # incl. NOCAP without RES_DMA
-            ok, line, info = run_plan("dma_tie", tcase.runs, jobs, tmodels, n, 16,
-                                      stim=Stim(20, 20, 4, 40, seed=83, xrgap=30, wgap=40, blatmin=0, blatmax=30))
-            emit(ok, line, info)
-    if sel("argmax_unit"):
-        ok, line = argmax_unit()
-        emit(ok, line)
+    # ======================================================================= NB = 1: versions 1 / 2
+    if 1 in nbs:
+        say("---- NB = 1 build: version-1 / version-2 scripts (BATCH never written)")
+        # ---- the cases x layouts x bus behaviours
+        for ci, case, models, info_line in cases:
+            say(info_line)
+            is_real = case.name.startswith("real")
+            for n in sweep:
+                for vi, (chunk, slots, ps, stim, maxout) in enumerate(variants(n, is_real, a.quick)):
+                    order = list(range(len(case.runs)))
+                    if vi % 2:                      # every other sim runs the matrices out of image order
+                        order = order[::-1]
+                    jobs = [Job(i, maxout=maxout) for i in order]
+                    sched(run_plan, case.name, case.runs, jobs, models, n, chunk, slots=slots, port_slots=ps,
+                          stim=stim, ref_domain=case.ref_domain, seed=ci * 10 + vi,
+                          membase=(0x8_4000_0000, 0x0_7FF0_0000, 0x10_0000_0000)[vi % 3])
+            # version 2: the same matrices with the activation fetched from / the results written to "DDR"
+            for n in sweep:
+                for vi, (chunk, slots, ps, stim, maxout) in enumerate(dma_variants(n, a.quick)):
+                    def post(ok, line, info, name=case.name, n=n, stim=stim, show=is_real and vi == 0):
+                        extra = []
+                        if show and info["jobs"]:
+                            v = info["jobs"][0]
+                            extra.append(f"     {name} n={n}: G={v['cfg']['groups']} rows={v['cfg']['rows']}: CYC_ACT "
+                                         f"{v['cyc_act']} CYC_RES {v['cyc_res']} CYC {v['cyc']} ({stim.xtag()})")
+                        return ok, line, extra
+                    sched(run_plan, case.name, case.runs, dma_jobs(case, models, maxout), models, n, chunk, slots=slots,
+                          port_slots=ps, stim=stim, ref_domain=case.ref_domain, seed=ci * 10 + vi + 500,
+                          membase=(0x8_4000_0000, 0x0_7FF0_0000)[vi % 2],
+                          aux_base=(AUX_BASE, 0x0_3F00_0000, 0x1F_FFF0_0000)[(ci + vi) % 3],
+                          act_fill=("junk", "zero")[ci % 2], post=post)
 
-    if sel("dma_stall"):
-        # a write slave slower than the engine: the result FIFO fills, the core is back-pressured through
-        # m_ready (STALL_OUT counts it), and every row still lands, in the window and in DDR
-        zcase = gs.case_random(rng, "dma_stall", [(1, 600), (2, 400), (32, 300), (96, 40)])
-        zmodels, info_line, _ = gs.model_case(zcase)
-        print(info_line)
+        # ---- directed version-2 cases
+        if sel("dma_tie"):
+            tcase = case_tie(rng)
+            tmodels = modelled(tcase)
+            for n in sweep:
+                jobs = [Job(i) for i in range(len(tcase.runs))]                       # version 1 script: argmax is always on
+                sched(run_plan, "dma_tie", tcase.runs, jobs, tmodels, n, 16, stim=Stim(seed=81))
+                jobs = [Job(i, mode=(3, 5, 4, 6)[i % 4]) for i in range(len(tcase.runs))]    # incl. NOCAP without RES_DMA
+                sched(run_plan, "dma_tie", tcase.runs, jobs, tmodels, n, 16,
+                      stim=Stim(20, 20, 4, 40, seed=83, xrgap=30, wgap=40, blatmin=0, blatmax=30))
+        if sel("argmax_unit"):
+            sched(argmax_unit)
 
-        def stall_want(js):
-            def want(j, v, cfg, fails):
-                if j in js and v["stall_out"] == 0:
-                    fails.append(f"job{j}: the write slave never back-pressured the engine (STALL_OUT 0): not exercised")
-            return want
+        if sel("dma_stall"):
+            # a write slave slower than the engine: the result FIFO fills, the core is back-pressured through
+            # m_ready (STALL_OUT counts it), and every row still lands, in the window and in DDR
+            zcase = gs.case_random(rng, "dma_stall", [(1, 600), (2, 400), (32, 300), (96, 40)])
+            zmodels = modelled(zcase)
 
-        for n, stim, js in ((3, Stim(seed=91, wgap=97, awgap=90, blatmin=0, blatmax=300), (0, 1)),
-                            (3, Stim(seed=93, blatmin=1500, blatmax=3000, xrgap=20), (0, 1)),
-                            (4, Stim(10, 10, 5, 30, seed=95, wgap=90, awgap=50, blatmin=200, blatmax=900, bfmrand=1), (0, 1))):
-            if n not in sweep:
-                continue
-            jobs = [Job(0, mode=3), Job(1, mode=7), Job(2, mode=3), Job(3, mode=2), Job(0, mode=2, res_start=500)]
-            ok, line, info = run_plan("dma_stall", zcase.runs, jobs, zmodels, n, 16, res_lg=7, stim=stim, want=stall_want(js))
-            emit(ok, line, info)
-            if info["jobs"]:
-                print("     dma_stall: " + ", ".join(f"G={j['cfg']['groups']} rows={j['cfg']['rows']} STALL_OUT {j['stall_out']} "
-                                                       f"CYC {j['cyc']} CYC_RES {j['cyc_res']}" for j in info["jobs"]))
+            def post_stall(ok, line, info, nm="dma_stall"):
+                return ok, line, (["     " + nm + ": " + ", ".join(
+                    f"G={j['cfg']['groups']} rows={j['cfg']['rows']} batch={j['batch']} STALL_OUT {j['stall_out']} "
+                    f"CYC {j['cyc']} CYC_RES {j['cyc_res']}" for j in info["jobs"])] if info["jobs"] else [])
 
-    if sel("dma_err") and 3 in sweep:
-        xcase = gs.case_random(rng, "dma_err", [(8, 20), (5, 300)])
-        xmodels, info_line, _ = gs.model_case(xcase)
-        print(info_line)
-        # RRESP != OKAY on the 38th beat of the first fetch: aux_err, sticky until SOFT_RST; ERRCNT (weight ports) stays 0
-        jobs = [Job(0, mode=3, exp_status=0x12), Job(1, mode=0, exp_status=0x12), Job(1, mode=3, exp_status=0x12),
-                Job(0, mode=1, soft_rst=True), Job(1, mode=7)]
-        ok, line, info = run_plan("dma_err_r", xcase.runs, jobs, xmodels, 3, 16,
-                                  stim=Stim(10, 10, 5, 30, seed=101, bfmrand=1, xrgap=20, rerr=37))
-        emit(ok, line, info)
-        # BRESP != OKAY on the third write burst of the first run
-        jobs = [Job(1, mode=3, exp_status=0x12), Job(0, mode=3, exp_status=0x12), Job(1, mode=2, soft_rst=True), Job(0)]
-        ok, line, info = run_plan("dma_err_b", xcase.runs, jobs, xmodels, 3, 16,
-                                  stim=Stim(10, 10, 5, 30, seed=103, bfmrand=1, wgap=20, blatmin=0, blatmax=40, berr=2))
-        emit(ok, line, info)
-        # both kinds of error in one run, together with an RRESP error on a weight port
-        jobs = [Job(1, mode=3, exp_status=0x16, exp_err=1), Job(0, mode=3, soft_rst=True)]
-        ok, line, info = run_plan("dma_err_all", xcase.runs, jobs, xmodels, 3, 16,
-                                  stim=Stim(10, 10, 5, 30, seed=105, errport=1, errbeat=20, rerr=3, berr=1))
-        emit(ok, line, info)
+            for n, stim, js in ((3, Stim(seed=91, wgap=97, awgap=90, blatmin=0, blatmax=300), (0, 1)),
+                                (3, Stim(seed=93, blatmin=1500, blatmax=3000, xrgap=20), (0, 1)),
+                                (4, Stim(10, 10, 5, 30, seed=95, wgap=90, awgap=50, blatmin=200, blatmax=900, bfmrand=1), (0, 1))):
+                if n not in sweep:
+                    continue
+                jobs = [Job(0, mode=3), Job(1, mode=7), Job(2, mode=3), Job(3, mode=2), Job(0, mode=2, res_start=500)]
+                sched(run_plan, "dma_stall", zcase.runs, jobs, zmodels, n, 16, res_lg=7, stim=stim, want=stall_want(js),
+                      post=post_stall)
 
-    if sel("dma_abort") and 3 in sweep:
-        # SOFT_RST in the middle of the fetch / the run / the write-back, with aux bursts in flight
-        bcase = gs.case_random(rng, "dma_abort", [(32, 60), (16, 130), (7, 25)])
-        bmodels, info_line, _ = gs.model_case(bcase)
-        print(info_line)
-        for chunk, after, stim in ((16, 150, Stim(20, 30, 40, 120, seed=111, bfmrand=1, xargap=30, xrgap=50, xlatmin=20,
-                                                  xlatmax=90, awgap=30, wgap=60, blatmin=10, blatmax=120)),
-                                   (64, 420, Stim(seed=113, xlatmin=1, xlatmax=1, blatmin=0, blatmax=0)),
-                                   (256, 700, Stim(10, 20, 10, 40, seed=115, bfmrand=1, xrgap=10, wgap=85, blatmin=50,
-                                                   blatmax=400))):
-            jobs = [Job(0, mode=3, go_twice=True), Job(1, mode=3, abort_after=after), Job(2, mode=3),
-                    Job(0, mode=3, abort_after=5), Job(1, mode=7), Job(2, mode=3, abort_after=after + 77, abort_wait=True),
-                    Job(0, mode=1), Job(1, mode=3, abort_after=after + 900, abort_wait=True),
-                    Job(1, mode=2, abort_after=after + 1500), Job(2, mode=0, load_act=True),
-                    Job(0, mode=3, abort_after=40), Job(0, mode=6, load_act=False, scribble=True)]
-            ok, line, info = run_plan("dma_abort", bcase.runs, jobs, bmodels, 3, chunk, stim=stim)
-            emit(ok, line, info)
+        if sel("dma_err") and 3 in sweep:
+            xcase = gs.case_random(rng, "dma_err", [(8, 20), (5, 300)])
+            xmodels = modelled(xcase)
+            # RRESP != OKAY on the 38th beat of the first fetch: aux_err, sticky until SOFT_RST; ERRCNT (weight ports) stays 0
+            jobs = [Job(0, mode=3, exp_status=0x12), Job(1, mode=0, exp_status=0x12), Job(1, mode=3, exp_status=0x12),
+                    Job(0, mode=1, soft_rst=True), Job(1, mode=7)]
+            sched(run_plan, "dma_err_r", xcase.runs, jobs, xmodels, 3, 16,
+                  stim=Stim(10, 10, 5, 30, seed=101, bfmrand=1, xrgap=20, rerr=37))
+            # BRESP != OKAY on the third write burst of the first run
+            jobs = [Job(1, mode=3, exp_status=0x12), Job(0, mode=3, exp_status=0x12), Job(1, mode=2, soft_rst=True), Job(0)]
+            sched(run_plan, "dma_err_b", xcase.runs, jobs, xmodels, 3, 16,
+                  stim=Stim(10, 10, 5, 30, seed=103, bfmrand=1, wgap=20, blatmin=0, blatmax=40, berr=2))
+            # both kinds of error in one run, together with an RRESP error on a weight port
+            jobs = [Job(1, mode=3, exp_status=0x16, exp_err=1), Job(0, mode=3, soft_rst=True)]
+            sched(run_plan, "dma_err_all", xcase.runs, jobs, xmodels, 3, 16,
+                  stim=Stim(10, 10, 5, 30, seed=105, errport=1, errbeat=20, rerr=3, berr=1))
 
-    if sel("dma_cost"):
-        # what the DMA costs with ideal slaves: the same run with MODE 0 / ACT_DMA / ACT+RES / ACT+RES+NOCAP
-        ccase = gs.case_random(rng, "dma_cost", [(32, 64), (96, 64), (1, 256)])
-        cmodels, info_line, _ = gs.model_case(ccase)
-        for n in sweep:
-            jobs = [Job(i, mode=md) for i in range(3) for md in (0, 1, 3, 7)]
-            ok, line, info = run_plan("dma_cost", ccase.runs, jobs, cmodels, n, 256, stim=Stim(seed=121))
-            js = info["jobs"]
-            if len(js) == len(jobs):
-                for i in range(3):
-                    j0, j1, j3, j7 = js[4 * i:4 * i + 4]
-                    if j1["cyc"] - j0["cyc"] != j1["cyc_act"] or j3["cyc"] - j0["cyc"] != j3["cyc_act"]:
-                        ok = False
-                        line += f"  !! G={j0['cfg']['groups']}: CYC(ACT_DMA) - CYC(MODE 0) != CYC_ACT"
-                    if not (j3["stall_out"] == j7["stall_out"] == j0["stall_out"]):
-                        ok = False
-                        line += f"  !! G={j0['cfg']['groups']}: RES_DMA back-pressured the engine with an ideal slave"
-            emit(ok, line.replace("FAIL", "PASS", 1) if ok else line.replace("PASS", "FAIL", 1), info)
-            if len(js) == len(jobs):
-                for i in range(3):
-                    j0, j1, j3, j7 = js[4 * i:4 * i + 4]
-                    print(f"GEMV_AXI_DMA_COST n={n} G={j0['cfg']['groups']} rows={j0['cfg']['rows']}: CYC {j0['cyc']} (MODE 0) -> "
-                          f"{j1['cyc']} (ACT_DMA) = +CYC_ACT {j1['cyc_act']} for {16 * j0['cfg']['groups']} beats; "
-                          f"RES_DMA: CYC {j3['cyc']}, CYC_RES {j3['cyc_res']}, DONE {j3['done_after_last_row']} cycles after the "
-                          f"last row (MODE 0: {j0['done_after_last_row']}), STALL_OUT {j3['stall_out']} (MODE 0: {j0['stall_out']}) "
-                          f"(MEASURED in sim, ideal slaves: xREADY=1, no gaps, read latency 20, B 2 cycles after the last W)")
+        if sel("dma_abort") and 3 in sweep:
+            # SOFT_RST in the middle of the fetch / the run / the write-back, with aux bursts in flight
+            bcase = gs.case_random(rng, "dma_abort", [(32, 60), (16, 130), (7, 25)])
+            bmodels = modelled(bcase)
+            for chunk, after, stim in ((16, 150, Stim(20, 30, 40, 120, seed=111, bfmrand=1, xargap=30, xrgap=50, xlatmin=20,
+                                                      xlatmax=90, awgap=30, wgap=60, blatmin=10, blatmax=120)),
+                                       (64, 420, Stim(seed=113, xlatmin=1, xlatmax=1, blatmin=0, blatmax=0)),
+                                       (256, 700, Stim(10, 20, 10, 40, seed=115, bfmrand=1, xrgap=10, wgap=85, blatmin=50,
+                                                       blatmax=400))):
+                jobs = [Job(0, mode=3, go_twice=True), Job(1, mode=3, abort_after=after), Job(2, mode=3),
+                        Job(0, mode=3, abort_after=5), Job(1, mode=7), Job(2, mode=3, abort_after=after + 77, abort_wait=True),
+                        Job(0, mode=1), Job(1, mode=3, abort_after=after + 900, abort_wait=True),
+                        Job(1, mode=2, abort_after=after + 1500), Job(2, mode=0, load_act=True),
+                        Job(0, mode=3, abort_after=40), Job(0, mode=6, load_act=False, scribble=True)]
+                sched(run_plan, "dma_abort", bcase.runs, jobs, bmodels, 3, chunk, stim=stim)
 
-    # ---- directed wrapper cases
-    if not a.only or a.only in "window starve errbeat abort rate":
-        wcase = case_window(rng)
-        wmodels, info_line, _ = gs.model_case(wcase)
-        print(info_line)
-        for n in sweep:
-            ok, line, info = run_plan("window", wcase.runs, WINDOW_JOBS, wmodels, n, 16, res_lg=4,
-                                      stim=Stim(20, 20, 4, 40, seed=21, bfmrand=1))
-            emit(ok, line, info)
+        if sel("dma_cost"):
+            # what the DMA costs with ideal slaves: the same run with MODE 0 / ACT_DMA / ACT+RES / ACT+RES+NOCAP
+            ccase = gs.case_random(rng, "dma_cost", [(32, 64), (96, 64), (1, 256)])
+            cmodels = modelled(ccase, quiet=True)
+            for n in sweep:
+                jobs = [Job(i, mode=md) for i in range(3) for md in (0, 1, 3, 7)]
 
-        scase = gs.case_random(rng, "starve", [(32, 40), (9, 60), (96, 12)])
-        smodels, info_line, _ = gs.model_case(scase)
-        print(info_line)
-        for n in sweep:
-            sp = 1 if n == 3 else 3
-            ok, line, info = run_plan("starve", scase.runs, [Job(i, maxout=16) for i in range(3)], smodels, n, 16,
-                                      fifo_lg=8, stim=Stim(0, 0, 10, 10, seed=31, slowport=sp, slowgap=93),
-                                      want=starve_want(n, sp, 8, 16))
-            emit(ok, line, info)
-            st = info["jobs"][0] if info["jobs"] else None
-            if st:
-                print(f"     starve n={n}: slow port {sp}: STALL_IN {st['stall_in']} P_EMPTY "
-                      f"{[st[f'empty{k}'] for k in range(n)]} P_FIFO_MAX {[st[f'fmax{k}'] for k in range(n)]} "
-                      f"(FIFO {1 << 8} beats) TUPLES {st['tuples']} CYC {st['cyc']}")
+                def post_cost(ok, line, info, n=n, njobs=len(jobs)):
+                    js, extra = info["jobs"], []
+                    if len(js) == njobs:
+                        for i in range(3):
+                            j0, j1, j3, j7 = js[4 * i:4 * i + 4]
+                            if j1["cyc"] - j0["cyc"] != j1["cyc_act"] or j3["cyc"] - j0["cyc"] != j3["cyc_act"]:
+                                ok = False
+                                line += f"  !! G={j0['cfg']['groups']}: CYC(ACT_DMA) - CYC(MODE 0) != CYC_ACT"
+                            if not (j3["stall_out"] == j7["stall_out"] == j0["stall_out"]):
+                                ok = False
+                                line += f"  !! G={j0['cfg']['groups']}: RES_DMA back-pressured the engine with an ideal slave"
+                            extra.append(
+                                f"GEMV_AXI_DMA_COST n={n} G={j0['cfg']['groups']} rows={j0['cfg']['rows']}: CYC {j0['cyc']} (MODE 0) -> "
+                                f"{j1['cyc']} (ACT_DMA) = +CYC_ACT {j1['cyc_act']} for {16 * j0['cfg']['groups']} beats; "
+                                f"RES_DMA: CYC {j3['cyc']}, CYC_RES {j3['cyc_res']}, DONE {j3['done_after_last_row']} cycles after the "
+                                f"last row (MODE 0: {j0['done_after_last_row']}), STALL_OUT {j3['stall_out']} (MODE 0: {j0['stall_out']}) "
+                                f"(MEASURED in sim, ideal slaves: xREADY=1, no gaps, read latency 20, B 2 cycles after the last W)")
+                    return ok, (line.replace("FAIL", "PASS", 1) if ok else line.replace("PASS", "FAIL", 1)), extra
 
-        ecase = gs.case_random(rng, "errbeat", [(8, 20), (5, 10)])
-        emodels, info_line, _ = gs.model_case(ecase)
-        print(info_line)
-        jobs = [Job(0, exp_status=6, exp_err=1), Job(1, exp_status=6), Job(0, soft_rst=True), Job(1, load_act=True)]
-        ok, line, info = run_plan("errbeat", ecase.runs, jobs, emodels, 3, 16,
-                                  stim=Stim(10, 10, 5, 30, seed=41, errport=2, errbeat=37, bfmrand=1))
-        emit(ok, line, info)
+                sched(run_plan, "dma_cost", ccase.runs, jobs, cmodels, n, 256, stim=Stim(seed=121), post=post_cost)
 
-        acase = gs.case_random(rng, "abort", [(32, 60), (16, 30), (7, 25)])
-        amodels, info_line, _ = gs.model_case(acase)
-        print(info_line)
-        for chunk, mo, after in ((16, 8, 150), (256, 8, 60), (64, 4, 400)):
-            jobs = [Job(0, maxout=mo, go_twice=True), Job(1, maxout=mo, abort_after=after),
-                    Job(2, maxout=mo), Job(0, maxout=mo, abort_after=5), Job(1, maxout=mo),
-                    Job(2, maxout=mo, abort_after=after + 77, abort_wait=True), Job(0, maxout=mo)]
-            ok, line, info = run_plan("abort", acase.runs, jobs, amodels, 3, chunk,
-                                      stim=Stim(20, 30, 40, 120, seed=50 + chunk, bfmrand=1))
-            emit(ok, line, info)
+        # ---- directed wrapper cases
+        if not a.only or a.only in "window starve errbeat abort rate":
+            wcase = case_window(rng)
+            wmodels = modelled(wcase)
+            for n in sweep:
+                sched(run_plan, "window", wcase.runs, WINDOW_JOBS, wmodels, n, 16, res_lg=4,
+                      stim=Stim(20, 20, 4, 40, seed=21, bfmrand=1))
 
-    # ---- rate with an ideal slave
-    if not a.only or a.only in "rate":
-        rcase = gs.case_random(rng, "rate", [(32, 512)] if not a.quick else [(32, 128)])
-        rmodels, info_line, _ = gs.model_case(rcase)
-        for n in sweep:
-            for chunk in (256, 16):
-                ok, line, info = run_plan("rate", rcase.runs, [Job(0)], rmodels, n, chunk, res_lg=10 if not a.quick else 8,
-                                          stim=Stim(seed=61))
-                emit(ok, line, info)
-                if info["jobs"]:
-                    v = info["jobs"][0]
-                    act = v["tuples"] + v["cfg"]["pad"] + v["stall_in"] + v["stall_out"]
-                    beats = v["cfg"]["bursts"] * chunk
-                    print(f"GEMV_AXI_RATE n={n} chunk={chunk} maxout=8: {v['tuples'] + v['cfg']['pad']} tuples popped in "
-                          f"{act} engine-active cycles = {(v['tuples'] + v['cfg']['pad']) / act:.4f} tuples/cycle "
-                          f"(STALL_IN {v['stall_in']}, of which the wait for the first beat; STALL_OUT {v['stall_out']}); "
-                          f"bus {beats} beats/port in CYC_STREAM {v['cyc_stream']} = {beats / v['cyc_stream']:.4f} beats/cycle/port; "
-                          f"GO->last row CYC {v['cyc']} (MEASURED in sim, ideal slave: ARREADY=1, no R gaps, latency 20)")
+            scase = gs.case_random(rng, "starve", [(32, 40), (9, 60), (96, 12)])
+            smodels = modelled(scase)
+            for n in sweep:
+                sp = 1 if n == 3 else 3
+
+                def post_starve(ok, line, info, n=n, sp=sp):
+                    st = info["jobs"][0] if info["jobs"] else None
+                    return ok, line, ([f"     starve n={n}: slow port {sp}: STALL_IN {st['stall_in']} P_EMPTY "
+                                       f"{[st[f'empty{k}'] for k in range(n)]} P_FIFO_MAX {[st[f'fmax{k}'] for k in range(n)]} "
+                                       f"(FIFO {1 << 8} beats) TUPLES {st['tuples']} CYC {st['cyc']}"] if st else [])
+
+                sched(run_plan, "starve", scase.runs, [Job(i, maxout=16) for i in range(3)], smodels, n, 16,
+                      fifo_lg=8, stim=Stim(0, 0, 10, 10, seed=31, slowport=sp, slowgap=93),
+                      want=starve_want(n, sp, 8, 16), post=post_starve)
+
+            ecase = gs.case_random(rng, "errbeat", [(8, 20), (5, 10)])
+            emodels = modelled(ecase)
+            jobs = [Job(0, exp_status=6, exp_err=1), Job(1, exp_status=6), Job(0, soft_rst=True), Job(1, load_act=True)]
+            sched(run_plan, "errbeat", ecase.runs, jobs, emodels, 3, 16,
+                  stim=Stim(10, 10, 5, 30, seed=41, errport=2, errbeat=37, bfmrand=1))
+
+            acase = gs.case_random(rng, "abort", [(32, 60), (16, 30), (7, 25)])
+            amodels = modelled(acase)
+            for chunk, mo, after in ((16, 8, 150), (256, 8, 60), (64, 4, 400)):
+                jobs = [Job(0, maxout=mo, go_twice=True), Job(1, maxout=mo, abort_after=after),
+                        Job(2, maxout=mo), Job(0, maxout=mo, abort_after=5), Job(1, maxout=mo),
+                        Job(2, maxout=mo, abort_after=after + 77, abort_wait=True), Job(0, maxout=mo)]
+                sched(run_plan, "abort", acase.runs, jobs, amodels, 3, chunk,
+                      stim=Stim(20, 30, 40, 120, seed=50 + chunk, bfmrand=1))
+
+        # ---- rate with an ideal slave
+        if not a.only or a.only in "rate":
+            rcase = gs.case_random(rng, "rate", [(32, 512)] if not a.quick else [(32, 128)])
+            rmodels = modelled(rcase, quiet=True)
+            for n in sweep:
+                for chunk in (256, 16):
+                    def post_rate(ok, line, info, n=n, chunk=chunk):
+                        extra = []
+                        if info["jobs"]:
+                            v = info["jobs"][0]
+                            act = v["tuples"] + v["cfg"]["pad"] + v["stall_in"] + v["stall_out"]
+                            beats = v["cfg"]["bursts"] * chunk
+                            extra.append(
+                                f"GEMV_AXI_RATE n={n} chunk={chunk} maxout=8: {v['tuples'] + v['cfg']['pad']} tuples popped in "
+                                f"{act} engine-active cycles = {(v['tuples'] + v['cfg']['pad']) / act:.4f} tuples/cycle "
+                                f"(STALL_IN {v['stall_in']}, of which the wait for the first beat; STALL_OUT {v['stall_out']}); "
+                                f"bus {beats} beats/port in CYC_STREAM {v['cyc_stream']} = {beats / v['cyc_stream']:.4f} beats/cycle/port; "
+                                f"GO->last row CYC {v['cyc']} (MEASURED in sim, ideal slave: ARREADY=1, no R gaps, latency 20)")
+                        return ok, line, extra
+
+                    sched(run_plan, "rate", rcase.runs, [Job(0)], rmodels, n, chunk, res_lg=10 if not a.quick else 8,
+                          stim=Stim(seed=61), post=post_rate)
+
+        # ---- version 3 on the NB = 1 build: BATCH clamps to 1, bank fields >= 1 are ignored
+        if sel("bat_nb1"):
+            ncase = gs.add_alts(gs.case_random(brng, "bat_nb1", [(6, 20), (11, 14)]), brng)
+            nmodels = modelled(ncase)
+            e0, e1 = nmodels[ncase.runs[0].name]["els"], nmodels[ncase.runs[1].name]["els"]
+            junk = [op for b in (1, 2, 3) for op in ops_act(e0[1]["q"], e0[1]["e"], b)]     # commits to banks that do not exist
+            junk1 = ops_act_one(1 << 10, e1[2]["q"], e1[2]["e"]) + ops_act_one(GMAX, e1[2]["q"], e1[2]["e"])
+            jobs = [Job(0, mode=3), Job(0, mode=2, load_act=False, batch_raw=0, pre=junk),
+                    Job(1, mode=1, batch_raw=2, sel=[2]), Job(1, mode=6, load_act=False, batch_raw=4),
+                    Job(0, mode=0, batch_raw=7, sel=[3], batch_late=True), Job(1, mode=3, batch_raw=1, poke=3),
+                    Job(1, mode=2, load_act=False, batch_raw=3, pre=junk1)]     # ACT_GROUP[31:10] != 0, group >= GMAX
+            for n in sweep:
+                sched(run_plan, "bat_nb1", ncase.runs, jobs, nmodels, n, 16, v3=True,
+                      stim=Stim(10, 20, 5, 40, seed=141, bfmrand=1, xrgap=20, wgap=20, blatmin=0, blatmax=20))
+
+    # ======================================================================= NB = 2, 4: batches
+    for nb in [x for x in nbs if x > 1]:
+        say(f"---- NB = {nb} build: version 3, BATCH 1..{nb}")
+        tight = Stim(seed=151, xlatmin=1, xlatmax=1, blatmin=0, blatmax=0)
+        loose = Stim(30, 35, 5, 60, seed=153, bfmrand=1, xargap=30, xrgap=40, xlatmin=1, xlatmax=60,
+                     awgap=40, wgap=50, blatmin=0, blatmax=80)
+
+        if sel("bat_modes"):
+            mcase_b = gs.add_alts(gs.case_random(np.random.default_rng(300 + nb), "bat_modes",
+                                                 [(5, 24), (32, 20), (1, 40), (96, 6), (17, 30), (8, 33), (2, 21), (48, 9)]),
+                                  np.random.default_rng(310 + nb))
+            bm = modelled(mcase_b)
+            jobs = bat_mode_jobs(mcase_b, bm, nb)
+            for n in sweep:
+                for vi, (chunk, slots, ps, stim) in enumerate(((16, 0, (), tight), (64, 4, (0, 1, 3), loose))
+                                                              if n == 3 else ((256, 0, (), loose),)):
+                    sched(run_plan, "bat_modes", mcase_b.runs, jobs, bm, n, chunk, slots=slots, port_slots=ps, stim=stim,
+                          nb=nb, v3=True, seed=nb * 100 + vi, aux_base=(AUX_BASE, 0x1F_FFF0_0000)[vi % 2],
+                          act_fill=("junk", "zero")[vi % 2])
+
+        # ---- the adversarial cases and the real rows, as batches
+        for ci, case, models, info_line in cases:
+            if 1 not in nbs:
+                say(info_line)
+            is_real = case.name.startswith("real")
+            plans = [(3, 16, 0, (), tight, 0), (3, 64, 4, (0, 1, 3), loose, 1), (4, 256, 0, (), loose, 2)]
+            if is_real:
+                plans = [plans[ci % 2], plans[2]]
+            for vi, (n, chunk, slots, ps, stim, off) in enumerate(plans):
+                if n not in sweep or (a.quick and vi == 0):
+                    continue
+                sched(run_plan, case.name, case.runs, bat_jobs(case, models, nb, 8 if vi else 3, off + ci), models, n, chunk,
+                      slots=slots, port_slots=ps, stim=stim, ref_domain=case.ref_domain, nb=nb, v3=True,
+                      seed=ci * 10 + vi + 2000 * nb, membase=(0x8_4000_0000, 0x0_7FF0_0000, 0x10_0000_0000)[vi % 3],
+                      aux_base=(AUX_BASE, 0x0_3F00_0000, 0x1F_FFF0_0000)[(ci + vi) % 3], act_fill=("junk", "zero")[ci % 2])
+
+        if sel("bat_banks") and 3 in sweep:
+            # what a bank holds is what was last loaded into it, whatever BATCH was in between
+            kcase = gs.add_alts(gs.case_random(np.random.default_rng(320 + nb), "bat_banks", [(6, 20), (11, 14)]),
+                                np.random.default_rng(330 + nb))
+            km = modelled(kcase)
+            e0 = km[kcase.runs[0].name]["els"]
+            full = list(range(nb))
+            # a commit that must be ignored: ACT_GROUP[31:10] != 0 (and, NB = 2, a bank that does not exist)
+            junk = (ops_act_one((1 << 10) | (nb - 1) << 8, e0[1]["q"], e0[1]["e"]) + ops_act_one(1 << 31, e0[1]["q"], e0[1]["e"])
+                    + ops_act_one(GMAX | (nb - 1) << 8, e0[1]["q"], e0[1]["e"])
+                    + ([op for b in (2, 3) for op in ops_act(e0[1]["q"], e0[1]["e"], b)] if nb == 2 else []))
+            jobs = [Job(0, mode=3, batch=nb, sel=full),                                 # banks = 0, 1, (2, 3)
+                    Job(0, mode=3, batch=1, sel=[3]),                                   # fetch of 1: only bank 0 changes
+                    Job(0, mode=2, batch=nb, load_act=False, scribble=True),            # -> 3, 1, (2, 3)
+                    Job(0, mode=2, batch=nb, load_banks=[nb - 1], sel=[0] * nb),        # the last bank through the registers
+                    Job(0, mode=7, batch=nb, load_act=False, pre=junk),                 # ignored commits change nothing
+                    Job(1, mode=1, batch=1, sel=[2]),                                   # another matrix in bank 0 ...
+                    Job(0, mode=2, batch=nb, load_banks=[0], sel=[2] * nb),             # ... the other banks still hold run 0's
+                    Job(0, mode=3, batch=1, batch_raw=0, load_act=False),               # BATCH 0 -> 1
+                    Job(0, mode=3, batch=nb, batch_raw=7, load_act=False),              # BATCH > NB -> NB
+                    Job(0, mode=3, batch=nb, batch_raw=nb + 1, load_act=False),
+                    Job(0, mode=1, batch=nb, batch_raw=0xFFFF_FFFF, sel=full[::-1]),
+                    Job(0, mode=2, batch=1, load_act=False, batch_late=True),           # BATCH written right before GO
+                    Job(0, mode=3, batch=nb, load_act=False, batch_late=True, poke=1),  # BATCH rewritten while busy: not seen
+                    Job(0, mode=2, batch=1, load_act=False, poke=nb),                   # ... the poke is the next run's BATCH
+                    Job(0, mode=6, batch=nb, load_act=False)]
+            if nb == 4:                                                                # a fetch of 2 / 3 into 4 loaded banks
+                jobs += [Job(0, mode=1, batch=2, sel=[1, 0]), Job(0, mode=2, batch=4, load_act=False),
+                         Job(0, mode=3, batch=3, sel=[2, 2, 1]), Job(0, mode=2, batch=4, load_act=False)]
+            for vi, stim in enumerate((tight, loose)):
+                sched(run_plan, "bat_banks", kcase.runs, jobs, km, 3, (16, 64)[vi], stim=stim, nb=nb, v3=True, seed=nb + vi)
+
+        if sel("bat_stall"):
+            # a write slave slower than the engine while BATCH words per row arrive: the FIFO margin must hold
+            zc = gs.add_alts(gs.case_random(np.random.default_rng(340 + nb), "bat_stall", [(1, 300), (2, 200), (32, 100)]),
+                             np.random.default_rng(350 + nb))
+            zm = modelled(zc)
+
+            def post_bstall(ok, line, info):
+                return ok, line, (["     bat_stall: " + ", ".join(
+                    f"G={j['cfg']['groups']} rows={j['cfg']['rows']} batch={j['batch']} STALL_OUT {j['stall_out']} "
+                    f"CYC {j['cyc']} CYC_RES {j['cyc_res']}" for j in info["jobs"])] if info["jobs"] else [])
+
+            for n, stim in ((3, Stim(seed=161, wgap=97, awgap=90, blatmin=0, blatmax=300)),
+                            (3, Stim(seed=163, blatmin=1500, blatmax=3000, xrgap=20)),
+                            (4, Stim(10, 10, 5, 30, seed=165, wgap=90, awgap=50, blatmin=200, blatmax=900, bfmrand=1))):
+                if n not in sweep:
+                    continue
+                jobs = [Job(0, mode=3, batch=nb), Job(1, mode=7, batch=2), Job(2, mode=3, batch=nb),
+                        Job(0, mode=2, batch=nb - 1, res_start=250, sel=pick(zm[zc.runs[0].name]["els"], 1, nb - 1)),
+                        Job(1, mode=3, batch=1)]
+                sched(run_plan, "bat_stall", zc.runs, jobs, zm, n, 16, res_lg=7, stim=stim, nb=nb, v3=True,
+                      want=stall_want((0, 1)), post=post_bstall)
+
+        if sel("bat_abort") and 3 in sweep:
+            # SOFT_RST in the middle of a batch's fetch / run / write-back (rows half serialised)
+            bc = gs.add_alts(gs.case_random(np.random.default_rng(360 + nb), "bat_abort", [(32, 60), (16, 130), (7, 25)]),
+                             np.random.default_rng(370 + nb))
+            bmo = modelled(bc)
+            for chunk, after, stim in ((16, 150, Stim(20, 30, 40, 120, seed=171, bfmrand=1, xargap=30, xrgap=50, xlatmin=20,
+                                                      xlatmax=90, awgap=30, wgap=60, blatmin=10, blatmax=120)),
+                                       (64, 420, Stim(seed=173, xlatmin=1, xlatmax=1, blatmin=0, blatmax=0)),
+                                       (256, 700, Stim(10, 20, 10, 40, seed=175, bfmrand=1, xrgap=10, wgap=85, blatmin=50,
+                                                       blatmax=400))):
+                jobs = [Job(0, mode=3, batch=nb, go_twice=True), Job(1, mode=3, batch=nb, abort_after=after),
+                        Job(2, mode=3, batch=2), Job(0, mode=3, batch=nb, abort_after=5), Job(1, mode=7, batch=nb),
+                        Job(2, mode=3, batch=nb, abort_after=after + 77, abort_wait=True), Job(0, mode=1, batch=2),
+                        Job(1, mode=3, batch=nb, abort_after=after + 900, abort_wait=True),
+                        Job(1, mode=2, batch=nb, abort_after=after + 1500), Job(2, mode=0, batch=nb, load_act=True),
+                        Job(0, mode=3, batch=nb, abort_after=40), Job(0, mode=6, batch=nb, load_act=False, scribble=True),
+                        Job(1, mode=3, batch=1, abort_after=after // 2), Job(1, mode=2, batch=1, load_act=False)]
+                sched(run_plan, "bat_abort", bc.runs, jobs, bmo, 3, chunk, stim=stim, nb=nb, v3=True)
+
+        if sel("bat_window") and 3 in sweep:
+            # RES_START moves the AXI-Lite window (element 0); DDR gets every row of every element regardless
+            wc = gs.add_alts(case_window(np.random.default_rng(380 + nb)), np.random.default_rng(390 + nb))
+            wc.name = "bat_window"
+            wm = modelled(wc)
+            jobs, nload = [], 0
+            for i, j in enumerate(WINDOW_JOBS):               # the loads become fetches of a batch; a re-use keeps its BATCH
+                mode = (3, 2, 0, 3, 1, 2, 6, 2, 3, 7)[i]
+                assert bool(mode & ACT_DMA) == j.load_act
+                if j.load_act:
+                    B = (nb, 2, max(1, nb - 1), 1, nb)[nload % 5]
+                    nload += 1
+                jobs.append(Job(j.mat, j.res_start, load_act=j.load_act, batch=B, mode=mode))
+            sched(run_plan, "bat_window", wc.runs, jobs, wm, 3, 16, res_lg=4, nb=nb, v3=True,
+                  stim=Stim(20, 20, 4, 40, seed=181, bfmrand=1, xrgap=30, wgap=30, blatmin=0, blatmax=30))
+
+        if sel("bat_tie"):
+            tc = gs.add_alts(case_tie_all(np.random.default_rng(400 + nb)), np.random.default_rng(410 + nb))
+            tm = modelled(tc)
+            for r in tc.runs:                                 # the planted ties are real, in every element
+                for m in tm[r.name]["els"]:
+                    f = np.asarray(m["ref"]).astype(np.uint32).view(np.float32)
+                    assert argmax_ref(m["ref"])[0] < len(f) // 2 and int((f == f.max()).sum()) >= 2
+            jobs = [Job(i % 3, mode=(0, 3, 5, 2, 1, 6)[i % 6], batch=1 + (i % nb),
+                        sel=pick(tm[tc.runs[i % 3].name]["els"], i, 1 + (i % nb), True)) for i in range(3 * nb)]
+            assert all(j.sel is not None for j in jobs)
+            for n in sweep:
+                sched(run_plan, "bat_tie", tc.runs, jobs, tm, n, 16, nb=nb, v3=True,
+                      stim=Stim(20, 20, 4, 40, seed=191, xrgap=30, wgap=40, blatmin=0, blatmax=30))
+
+        if sel("bat_cost"):
+            # what a batch costs with ideal slaves: the same matrix with BATCH 1..NB, ACT_DMA | RES_DMA and then
+            # MODE 0 on the banks the fetch left
+            cc = gs.add_alts(gs.case_random(np.random.default_rng(420 + nb), "bat_cost", [(32, 64), (96, 64), (1, 256)]),
+                             np.random.default_rng(430 + nb))
+            cm = modelled(cc, quiet=True)
+            for n in sweep:
+                jobs = [Job(i, mode=md, batch=B, sel=pick(cm[cc.runs[i].name]["els"], 0, B, True), load_act=bool(md))
+                        for i in range(3) for B in range(1, nb + 1) for md in (3, 0)]
+
+                def post_bcost(ok, line, info, n=n, nb=nb, njobs=len(jobs)):
+                    js, extra = info["jobs"], []
+                    if len(js) == njobs:
+                        for i in range(3):
+                            jj = js[2 * nb * i:2 * nb * (i + 1)]
+                            m3, m0 = jj[0::2], jj[1::2]
+                            G, rows = m0[0]["cfg"]["groups"], m0[0]["cfg"]["rows"]
+                            if any(x["cyc"] != m0[0]["cyc"] or x["stall_out"] != m0[0]["stall_out"] for x in m0):
+                                ok = False
+                                line += f"  !! G={G}: MODE 0: CYC / STALL_OUT depend on BATCH"
+                            if any(x["cyc"] - x["cyc_act"] != m0[0]["cyc"] for x in m3 if x["stall_out"] == m0[0]["stall_out"]):
+                                ok = False
+                                line += f"  !! G={G}: CYC(ACT_DMA|RES_DMA) - CYC_ACT != CYC(MODE 0) without back-pressure"
+                            if G >= 32 and any(x["stall_out"] != m0[0]["stall_out"] for x in m3):
+                                ok = False
+                                line += f"  !! G={G}: the row serialiser back-pressured the engine (rows are >= NB cycles apart)"
+                            extra.append(
+                                f"GEMV_AXI_BATCH_COST nb={nb} n={n} G={G} rows={rows}: MODE 0: CYC {m0[0]['cyc']} for every BATCH; "
+                                f"ACT_DMA|RES_DMA, BATCH 1..{nb}: CYC {[x['cyc'] for x in m3]}, CYC_ACT {[x['cyc_act'] for x in m3]} "
+                                f"({16 * G} beats per element), CYC_RES {[x['cyc_res'] for x in m3]}, STALL_OUT "
+                                f"{[x['stall_out'] for x in m3]} (MODE 0: {m0[0]['stall_out']}), DONE "
+                                f"{[x['done_after_last_row'] for x in m3]} cycles after the last row "
+                                f"(MEASURED in sim, ideal slaves: xREADY=1, no gaps, read latency 20, B 2 cycles after the last W)")
+                    return ok, (line.replace("FAIL", "PASS", 1) if ok else line.replace("PASS", "FAIL", 1)), extra
+
+                sched(run_plan, "bat_cost", cc.runs, jobs, cm, n, 256, stim=Stim(seed=201), nb=nb, v3=True, post=post_bcost)
 
     # ---- mutations: the gate must fail on each injected wrapper bug
-    n_mut = 0
     if not a.quick and not a.only:
-        mcase = gs.case_random(rng, "mut", [(9, 30), (32, 40)])
-        mmodels, _, _ = gs.model_case(mcase)
-        checks = {
-            "port_off": lambda d: run_plan("mut", mcase.runs, [Job(0), Job(1)], mmodels, 3, 16, rtl_dir=d),
-            "bursts+1": lambda d: run_plan("mut", mcase.runs, [Job(0), Job(1)], mmodels, 3, 16, rtl_dir=d),
-            "window-1": lambda d: run_plan("mut", mcase.runs, [Job(0, 5), Job(1, 11)], mmodels, 3, 16, res_lg=4, rtl_dir=d),
-            "credit-1": lambda d: run_plan("mut", mcase.runs, [Job(1, maxout=16)], mmodels, 3, 16, fifo_lg=8, rtl_dir=d,
-                                           stim=Stim(0, 0, 10, 10, seed=31, slowport=1, slowgap=97)),
-        }
-        # version 2: one MODE plan catches every data-path mutation; the others get their directed plan
-        tcase2 = case_tie(np.random.default_rng(77))
-        tmodels2, _, _ = gs.model_case(tcase2)
-        v2jobs = [Job(1, mode=3, res_start=7), Job(0, mode=7), Job(0, mode=0, load_act=False, scribble=True),
-                  Job(1, mode=1), Job(1, mode=2, load_act=False)]
-        v2plan = lambda d: run_plan("mut", mcase.runs, v2jobs, mmodels, 3, 16, rtl_dir=d, res_lg=4,
-                                    stim=Stim(seed=131, xrgap=20, wgap=20, blatmin=0, blatmax=10))
-        for nm in ("rec_stride", "exp_byte", "exp_beat", "mant_order", "res_bytes", "res_order", "res_pad", "res_start",
-                   "nocap", "act_always"):
-            checks[nm] = v2plan
-        zc = gs.case_random(np.random.default_rng(78), "mutz", [(1, 600), (5, 300)])
-        zm, _, _ = gs.model_case(zc)
-        slowplan = lambda d: run_plan("mutz", zc.runs, [Job(0, mode=3), Job(1, mode=3)], zm, 3, 16, rtl_dir=d,
-                                      stim=Stim(seed=133, wgap=95, blatmin=100, blatmax=600))
-        checks["res_addr"] = slowplan
-        checks["fifo_room"] = slowplan
-        checks["done_early"] = slowplan
-        checks["argmax_tie"] = lambda d: run_plan("mutt", tcase2.runs, [Job(i) for i in range(len(tcase2.runs))],
-                                                  tmodels2, 3, 16, rtl_dir=d)
-        checks["argmax_zero"] = lambda d: argmax_unit(d) + (dict(jobs=[], fails=["gemv_argmax unit vectors"]),)
-        checks["aux_err"] = lambda d: run_plan("mute", zc.runs, [Job(1, mode=3, exp_status=0x12)], zm, 3, 16, rtl_dir=d,
-                                               stim=Stim(seed=135, berr=1))
-        base = {}
-        for name, _, _, _, what in MUTATIONS:
-            if id(checks[name]) not in base:
-                base[id(checks[name])] = checks[name](None)
-            b_ok = base[id(checks[name])][0]
-            m_ok, m_line, m_info = checks[name](mutate(name))
-            caught = b_ok and not m_ok
-            ok_all &= caught
-            n_mut += 1
-            st = [f"{j['status']:#x}" for j in m_info["jobs"]]
-            print(f"{'PASS' if caught else 'FAIL'} mutation {name:11s} ({what}): unmutated {'PASS' if b_ok else 'FAIL'}, "
-                  f"mutated {'FAIL (caught)' if not m_ok else 'PASS (NOT caught)'} STATUS {st}: "
-                  f"{'; '.join(m_info['fails'][:2])[:230]}", flush=True)
+        plans, checks = {}, {}
+        if 1 in nbs:
+            say("---- mutations, NB = 1 build")
+            mcase = gs.case_random(rng, "mut", [(9, 30), (32, 40)])
+            mmodels, _, _ = gs.model_case(mcase)
+            plans["v1"] = lambda d: run_plan("mut", mcase.runs, [Job(0), Job(1)], mmodels, 3, 16, rtl_dir=d, tag="_v1")
+            plans["win"] = lambda d: run_plan("mut", mcase.runs, [Job(0, 5), Job(1, 11)], mmodels, 3, 16, res_lg=4, rtl_dir=d,
+                                              tag="_win")
+            plans["credit"] = lambda d: run_plan("mut", mcase.runs, [Job(1, maxout=16)], mmodels, 3, 16, fifo_lg=8, rtl_dir=d,
+                                                 stim=Stim(0, 0, 10, 10, seed=31, slowport=1, slowgap=97), tag="_cr")
+            checks.update({"port_off": "v1", "bursts+1": "v1", "window-1": "win", "credit-1": "credit"})
+            # version 2: one MODE plan catches every data-path mutation; the others get their directed plan
+            tcase2 = case_tie(np.random.default_rng(77))
+            tmodels2, _, _ = gs.model_case(tcase2)
+            v2jobs = [Job(1, mode=3, res_start=7), Job(0, mode=7), Job(0, mode=0, load_act=False, scribble=True),
+                      Job(1, mode=1), Job(1, mode=2, load_act=False)]
+            plans["v2"] = lambda d: run_plan("mut", mcase.runs, v2jobs, mmodels, 3, 16, rtl_dir=d, res_lg=4,
+                                             stim=Stim(seed=131, xrgap=20, wgap=20, blatmin=0, blatmax=10), tag="_v2p")
+            for nm in ("rec_stride", "exp_byte", "exp_beat", "mant_order", "res_bytes", "res_order", "res_pad", "res_start",
+                       "nocap", "act_always"):
+                checks[nm] = "v2"
+            zc = gs.case_random(np.random.default_rng(78), "mutz", [(1, 600), (5, 300)])
+            zm, _, _ = gs.model_case(zc)
+            plans["slow"] = lambda d: run_plan("mutz", zc.runs, [Job(0, mode=3), Job(1, mode=3)], zm, 3, 16, rtl_dir=d,
+                                               stim=Stim(seed=133, wgap=95, blatmin=100, blatmax=600))
+            checks.update({"res_addr": "slow", "fifo_room": "slow", "done_early": "slow"})
+            plans["tie"] = lambda d: run_plan("mutt", tcase2.runs, [Job(i) for i in range(len(tcase2.runs))],
+                                              tmodels2, 3, 16, rtl_dir=d)
+            plans["unit"] = lambda d: argmax_unit(d) + (dict(jobs=[], fails=["gemv_argmax unit vectors"]),)
+            plans["err"] = lambda d: run_plan("mute", zc.runs, [Job(1, mode=3, exp_status=0x12)], zm, 3, 16, rtl_dir=d,
+                                              stim=Stim(seed=135, berr=1))
+            checks.update({"argmax_tie": "tie", "argmax_zero": "unit", "aux_err": "err"})
+        mb = max(nbs)
+        if mb > 1:
+            # batch mutations, on the largest build: one plan with every BATCH, fetch / register load / re-use,
+            # RES_DMA with rows back to back (G = 1), the clamp and the ignored commits
+            qc = gs.add_alts(gs.case_random(np.random.default_rng(79), "mutb", [(9, 30), (1, 120), (32, 24)]),
+                             np.random.default_rng(80))
+            qm, _, _ = gs.model_case(qc)
+            q0 = qm[qc.runs[0].name]["els"]
+            junk = ops_act_one(1 << 10, q0[3]["q"], q0[3]["e"])
+            bjobs = [Job(0, mode=3, batch=mb, sel=list(range(mb))), Job(1, mode=3, batch=mb, sel=list(range(mb))[::-1]),
+                     Job(2, mode=1, batch=2, sel=[1, 2]), Job(2, mode=2, batch=2, load_act=False, scribble=True),
+                     Job(0, mode=2, batch=mb, sel=pick(q0, 1, mb)), Job(0, mode=3, batch=1, sel=[2]),
+                     Job(0, mode=2, batch=mb, load_act=False, pre=junk),
+                     Job(1, mode=3, batch=1, batch_raw=0, sel=[1]), Job(1, mode=3, batch=mb, batch_raw=7, sel=list(range(mb))),
+                     Job(2, mode=7, batch=mb - 1, sel=pick(qm[qc.runs[2].name]["els"], 2, mb - 1, True))]
+            plans["bat"] = lambda d: run_plan("mutb", qc.runs, bjobs, qm, 3, 16, rtl_dir=d, nb=mb, v3=True,
+                                              stim=Stim(seed=137, xrgap=20, wgap=20, blatmin=0, blatmax=10))
+            for nm, *_ in BAT_MUTATIONS:
+                checks[nm] = "bat"
+        base = {k: pool.submit(plans[k], None) for k in sorted(set(checks.values()))}
+        for name, _, _, _, what in MUTATIONS + BAT_MUTATIONS:
+            if name not in checks:
+                continue
+            if name == BAT_MUTATIONS[0][0]:
+                say(f"---- batch mutations, NB = {mb} build")
 
-    # ---- golden file for the board driver
-    if not a.quick and not a.only:
+            def post_mut(m_ok, m_line, m_info, name=name, what=what, key=checks[name]):
+                b_ok = base[key].result()[0]
+                caught = b_ok and not m_ok
+                tot["ok"] &= caught
+                tot["mut"] += int(caught)
+                tot["mut_all"] += 1
+                st = [f"{j['status']:#x}" for j in m_info["jobs"]]
+                return caught, None, [f"{'PASS' if caught else 'FAIL'} mutation {name:12s} ({what}): unmutated "
+                                      f"{'PASS' if b_ok else 'FAIL'}, mutated {'FAIL (caught)' if not m_ok else 'PASS (NOT caught)'} "
+                                      f"STATUS {st}: {'; '.join(m_info['fails'][:2])[:230]}"]
+
+            sched(lambda name=name: plans[checks[name]](mutate(name)), post=post_mut)
+
+    # ---- golden files for the board driver (version-2 scripts on the NB = 1 build)
+    if not a.quick and not a.only and 1 in nbs:
         gcase = next((c for c in real if c.name == "real_1p7B_l0.q_G16"), None)
         if gcase is None:
-            print("NOTE no 1.7B GGUF: golden file not written")
+            say("NOTE no 1.7B GGUF: golden file not written")
         else:
-            for path, mode in ((Path(a.golden), 0), (Path(a.golden_dma), ACT_DMA | RES_DMA)):
+            def golden(path, mode):
                 ok, line = write_golden(gcase, all_models[gcase.name], path, mode)
-                emit(ok, line)
-                if ok:
-                    ok, line = replay(path)
-                    emit(ok, line)
-                    print(f"     wrote {path} ({path.stat().st_size} bytes)")
+                return [(ok, line)] + ([replay(path), f"     wrote {path} ({path.stat().st_size} bytes)"] if ok else [])
 
-    print(f"GEMV_AXI_VERDICT {'PASS' if ok_all else 'FAIL'} ({n_sims} sims, {n_rows} result rows read back through AXI-Lite, "
-          f"{n_v2} MODE != 0 sims with {n_ddr} result rows written to DDR by aux_axi and compared, {n_mut} mutations caught, "
-          f"register map VERSION {R.VERSION}, NPORTS {sweep}, {time.time() - t_start:.0f} s)")
+            for path, mode in ((Path(a.golden), 0), (Path(a.golden_dma), ACT_DMA | RES_DMA)):
+                multi(golden, path, mode)
+
+    # ---- print everything in order
+    for fut, post in pending:
+        if fut is None:
+            print(post, flush=True)
+            continue
+        try:
+            res = fut.result()
+        except Exception as ex:                     # a plan that could not even be built / simulated
+            tot["ok"] = False
+            print(f"FAIL (exception) {type(ex).__name__}: {ex}", flush=True)
+            continue
+        if post == "multi":
+            for x in res:
+                if isinstance(x, tuple):
+                    emit(*x)
+                else:
+                    print(x, flush=True)
+            continue
+        ok, line, info = res[0], res[1], (res[2] if len(res) > 2 else None)
+        extra = []
+        if post:
+            ok, line, extra = post(ok, line, info)
+        if line is not None:
+            emit(ok, line, info)
+        for x in extra:
+            print(x, flush=True)
+    pool.shutdown()
+
+    ok_all = tot["ok"]
+    print(f"GEMV_AXI_VERDICT {'PASS' if ok_all else 'FAIL'} ({tot['sims']} sims, {tot['rows']} result rows read back through "
+          f"AXI-Lite, {tot['v2']} MODE != 0 sims with {tot['ddr']} result words written to DDR by aux_axi and compared, "
+          f"{tot['bat']} sims on NB > 1 builds, {tot['el']} (run, batch element) results checked through ARGMAX_B / CHK_B, "
+          f"{tot['mut']}/{tot['mut_all']} mutations caught, register map VERSION {R.VERSION}, NPORTS {sweep}, NB {nbs}, "
+          f"{time.time() - t_start:.0f} s)")
     sys.exit(0 if ok_all else 1)
 
 

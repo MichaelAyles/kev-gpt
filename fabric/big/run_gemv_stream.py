@@ -26,17 +26,43 @@ Cases
                state, 1.7B l0.down (G=48) on silu(gate)*up of that state, and (if the 8B file
                is present) 8B blk.0 attn_q (G=32) / ffn_down (G=96).
 
+BATCH (rtl parameter NB = 1 / 2 / 4, run-time cfg_batch = 1..NB): one pass over the weight stream
+serves up to NB activation vectors. The cases above run on the NB = 1 build exactly as before.
+Then, for NB in {2, 4} and EVERY cfg_batch from 1 to NB, the same adversarial generators and the
+real-model rows run again with a DIFFERENT activation in every batch element, and every element's
+rows are compared bit-for-bit with the reference / the independent model run ON THAT ACTIVATION
+ALONE. Each run carries three alternative activations next to its own (`add_alts`):
+  shift   the same mantissas with other exponents (so an element that used another element's
+          e_x is caught, and nothing else differs)
+  neg     the same exponents, every mantissa negated
+  zero    the all-zero activation
+  lo/hi   exponents at the edges of the reference's domain (e = -79.. / ..17), or of fp32 for the
+          ext_shift case (-149 / +118, independent model only)
+  rand    fresh random mantissas and exponents
+  real    (real-model cases) the same layer input computed from OTHER tokens
+and the run's own activation rotates through the element positions from run to run, so the
+crafted properties (RNE ties, max |inner|, accumulator wrap) hit every element's datapath.
+`bat_mix` chains matrices with different cfg_batch back to back on one stream (banks of elements
+not in use keep stale data from earlier runs); every case runs free and with input stalls +
+output back-pressure, `adv_credits` into a sink that is ready 3-10% of the time.
+MUTATIONS: bugs planted into copies of the RTL (elements swapped, a bank reading element 0's
+exponent, an accumulator not cleared between rows for b > 0, ...); the gate must fail on each.
+
     python -m fabric.big.run_gemv_stream            # full gate
-    python -m fabric.big.run_gemv_stream --quick    # adversarial only, NPORTS 1 and 3
+    python -m fabric.big.run_gemv_stream --quick    # adversarial only, NPORTS 1 and 3, NB 1 and 2
+    python -m fabric.big.run_gemv_stream --nb 4 --only bat_mix     # one build / a name filter
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -133,6 +159,7 @@ class Run:
     signs: np.ndarray            # uint8 [R, G*16]
     scales: np.ndarray           # uint16 [R, G]
     x: np.ndarray                # fp32 [G*128]
+    alts: list = field(default_factory=list)     # alternative activations (batch tests): [(kind, fp32 [G*128])]
 
 
 @dataclass
@@ -322,6 +349,62 @@ def case_random(rng, name, shapes):
     return Case(name, [rand_run(rng, f"g{G}r{R}", G, R) for G, R in shapes], note="random, chained")
 
 
+ALT_KINDS = ("shift", "zero", "lo", "hi", "neg", "rand")
+E_DOM = (-79, 17)               # BFP exponents for which every fp16 scale gives a shift in [-63, 63]
+E_EXT = (-149, 118)             # ... that fp32 can still hold exactly
+
+
+def alt_x(rng, x, kind, ref_domain=True):
+    """one alternative activation for a run whose own activation is x (fp32 [G*128])."""
+    G = x.size // 128
+    lo, hi = E_DOM if ref_domain else E_EXT
+    if kind == "zero":
+        return np.zeros(G * 128, np.float32)
+    if kind == "neg":
+        return (-x).astype(np.float32)
+    if kind == "shift":                              # same mantissas, other exponents
+        q, e = quantise(x)
+        d = rng.integers(1, 9, G) * rng.choice([-1, 1], G)
+        e2 = np.clip(e + d, lo, hi)
+        e2 = np.where(e2 == e, np.clip(e - d, lo, hi), e2)
+        return mk_x(q.reshape(G, 128), e2)
+    if kind == "lo":
+        return mk_x(rand_q(rng, G), rng.integers(lo, lo + 20, G))
+    if kind == "hi":
+        return mk_x(rand_q(rng, G), rng.integers(hi - 9, hi + 1, G))
+    a = rng.standard_normal((G, 128)) * np.exp2(rng.integers(-36, 16, G))[:, None]
+    a[rng.random(G) < 0.1] = 0.0
+    if not a.any():
+        a[0, 0] = 1.0
+    return a.astype(np.float32).reshape(-1)
+
+
+def add_alts(case, rng, n=3):
+    """give every run of a case n alternative activations, all different from each other and from
+    the run's own (kinds cycle through ALT_KINDS, starting at a different one per run)."""
+    for i, r in enumerate(case.runs):
+        if len(r.alts) >= n:
+            continue
+        have, k = [r.x] + [a for _, a in r.alts], i
+        while len(r.alts) < n:
+            kind = ALT_KINDS[k % len(ALT_KINDS)]
+            k += 1
+            a = alt_x(rng, r.x, kind, case.ref_domain)
+            if any(np.array_equal(a, h) for h in have):          # e.g. neg / shift of an all-zero x
+                kind, a = "rand", alt_x(rng, r.x, "rand", case.ref_domain)
+            r.alts.append((kind, a))
+            have.append(a)
+    return case
+
+
+def elements(i: int, batch: int):
+    """which activations (0 = the run's own, 1.. = its alts) sit in batch elements 0..batch-1 of
+    run i: the own one rotates through the element positions from run to run."""
+    order = list(range(batch))
+    k = i % batch
+    return order[-k:] + order[:-k] if k else order
+
+
 def case_ext_shift(rng):
     runs = []
     for i, (elo, ehi) in enumerate(((24, 118), (-149, -80), (-149, 118))):
@@ -332,8 +415,14 @@ def case_ext_shift(rng):
     return Case("ext_shift", runs, ref_domain=False, note="shifts beyond +-63 (outside torch's defined range)")
 
 
-def cases_real(nrows=64, r0=100):
+ALT_TOKENS = (1234, 42, 60000)  # the batch elements' activations in the real cases: other token positions
+
+
+def cases_real(nrows=64, r0=100, alts=True):
+    """real rows of Bonsai matrices on real layer inputs. alts: every run also carries the same layer
+    input computed from the tokens ALT_TOKENS (what a batch of token positions looks like)."""
     out = []
+    toks = (9707,) + (ALT_TOKENS if alts else ())
     if GGUF_17.exists():
         from fabric.big.ref.qwen3_ref import from_gguf
         cfg, W, _ = from_gguf(str(GGUF_17), "cpu")
@@ -341,20 +430,23 @@ def cases_real(nrows=64, r0=100):
         def rms(v, w):
             return (v * torch.rsqrt(v.pow(2).mean() + cfg.eps) * w).to(torch.float32)
 
-        emb = W["embed"].dequant(9707, 9708)[0].to(torch.float32)           # one real embedding row
-        h = rms(emb, W["l0.attn_norm"])                                      # the real input of l0.q/k/v
-        h2 = rms(emb, W["l0.ffn_norm"])
         g = ExactBfpGemv()
-        act = torch.nn.functional.silu(g(W["l0.gate"], h2)) * g(W["l0.up"], h2)   # down's input shape
+        hs, acts = [], []
+        for t in toks:
+            emb = W["embed"].dequant(t, t + 1)[0].to(torch.float32)             # one real embedding row
+            hs.append(rms(emb, W["l0.attn_norm"]).numpy())                       # the real input of l0.q/k/v
+            h2 = rms(emb, W["l0.ffn_norm"])
+            acts.append((torch.nn.functional.silu(g(W["l0.gate"], h2)) * g(W["l0.up"], h2)).numpy())   # down's input shape
+        al = lambda xs: [("real", a) for a in xs[1:]]
 
         def rows(key):
             return W[key].signs[r0:r0 + nrows].numpy().copy(), W[key].scales[r0:r0 + nrows].numpy().view(np.uint16).copy()
 
-        out.append(Case("real_1p7B_l0.q_G16", [Run("l0.q", *rows("l0.q"), h.numpy())],
+        out.append(Case("real_1p7B_l0.q_G16", [Run("l0.q", *rows("l0.q"), hs[0], al(hs))],
                         note=f"rows {r0}..{r0 + nrows}, x = attn_norm(embed row) (real layer-0 input)"))
-        out.append(Case("real_1p7B_l0.down_G48", [Run("l0.down", *rows("l0.down"), act.numpy())],
+        out.append(Case("real_1p7B_l0.down_G48", [Run("l0.down", *rows("l0.down"), acts[0], al(acts))],
                         note=f"rows {r0}..{r0 + nrows}, x = silu(gate h)*(up h), attention residual skipped"))
-        out.append(Case("real_1p7B_chain_q_k_v", [Run(k, *rows(k), h.numpy()) for k in ("l0.q", "l0.k", "l0.v")],
+        out.append(Case("real_1p7B_chain_q_k_v", [Run(k, *rows(k), hs[0], al(hs)) for k in ("l0.q", "l0.k", "l0.v")],
                         note="q,k,v back to back on one stream, same activation"))
     else:
         print(f"NOTE {GGUF_17} missing: no 1.7B real-weight cases")
@@ -370,17 +462,25 @@ def cases_real(nrows=64, r0=100):
             return (np.ascontiguousarray(b[:, 2:]).reshape(nrows, G * 16),
                     np.ascontiguousarray(b[:, :2]).view(np.uint16).reshape(nrows, G))
 
-        e_s, e_sc = (lambda b: (np.ascontiguousarray(b[:, 2:]).reshape(1, -1), np.ascontiguousarray(b[:, :2]).view(np.uint16).reshape(1, -1)))(
-            np.asarray(g8.raw("token_embd.weight")[9707 * 32 * 18:9708 * 32 * 18]).reshape(32, 18))
-        emb = (np.unpackbits(e_s, axis=1, bitorder="little").astype(np.float32) * 2 - 1) * \
-            np.repeat(e_sc.view(np.float16).astype(np.float32), 128, axis=1)
         a = g8.meta["general.architecture"]
         eps = float(g8.meta.get(f"{a}.attention.layer_norm_rms_epsilon", 1e-6))
-        h = (emb[0] / np.sqrt(np.mean(emb[0] ** 2) + eps) * g8.dequant("blk.0.attn_norm.weight").reshape(-1)).astype(np.float32)
-        out.append(Case("real_8B_l0.q_G32", [Run("l0.q", *rows8("blk.0.attn_q.weight"), h)],
+        nw = g8.dequant("blk.0.attn_norm.weight").reshape(-1)
+
+        def h_of(t):
+            e_s, e_sc = (lambda b: (np.ascontiguousarray(b[:, 2:]).reshape(1, -1), np.ascontiguousarray(b[:, :2]).view(np.uint16).reshape(1, -1)))(
+                np.asarray(g8.raw("token_embd.weight")[t * 32 * 18:(t + 1) * 32 * 18]).reshape(32, 18))
+            emb = (np.unpackbits(e_s, axis=1, bitorder="little").astype(np.float32) * 2 - 1) * \
+                np.repeat(e_sc.view(np.float16).astype(np.float32), 128, axis=1)
+            return (emb[0] / np.sqrt(np.mean(emb[0] ** 2) + eps) * nw).astype(np.float32)
+
+        hs = [h_of(t) for t in toks]
+        xd = (rng.standard_normal(12288) * 0.05).astype(np.float32)
+        arng = np.random.default_rng(89)                                # the alts must not disturb `rng`'s stream
+        xds = [(arng.standard_normal(12288) * sc).astype(np.float32) for sc in (0.02, 0.3, 3e-4)] if alts else []
+        out.append(Case("real_8B_l0.q_G32", [Run("l0.q", *rows8("blk.0.attn_q.weight"), hs[0], [("real", x) for x in hs[1:]])],
                         note=f"rows {r0}..{r0 + nrows}, x = attn_norm(embed row)"))
-        out.append(Case("real_8B_l0.down_G96", [Run("l0.down", *rows8("blk.0.ffn_down.weight"),
-                                                    (rng.standard_normal(12288) * 0.05).astype(np.float32))],
+        out.append(Case("real_8B_l0.down_G96", [Run("l0.down", *rows8("blk.0.ffn_down.weight"), xd,
+                                                    [("rand", x) for x in xds])],
                         note=f"rows {r0}..{r0 + nrows}, x = synthetic normal(0, 0.05)"))
     else:
         print(f"NOTE {GGUF_8} missing: no 8B real-weight cases")
@@ -389,19 +489,24 @@ def cases_real(nrows=64, r0=100):
 
 # ----------------------------------------------------------------------------- sim
 _built = {}
+_build_lock = threading.Lock()
 
 
-def build(nports: int) -> Path:
-    if nports in _built:
-        return _built[nports]
-    SIM.mkdir(parents=True, exist_ok=True)
-    out = SIM / f"tb_n{nports}.vvp"
-    cmd = [IVERILOG, "-g2012", f"-Ptb_gemv_stream.NPORTS={nports}", f"-Ptb_gemv_stream.GMAX={GMAX}",
-           f"-Ptb_gemv_stream.EXW={EXW}", f"-Ptb_gemv_stream.TREE_REGMASK={REGMASK}", "-o", str(out),
-           str(RTL), str(HERE / "tb" / "tb_gemv_stream.sv")]
-    subprocess.run(cmd, check=True)
-    _built[nports] = out
-    return out
+def build(nports: int, nb: int = 1, rtl=None) -> Path:
+    rtl = Path(rtl) if rtl else RTL
+    key = (nports, nb, str(rtl))
+    with _build_lock:
+        if key in _built:
+            return _built[key]
+        SIM.mkdir(parents=True, exist_ok=True)
+        tag = "" if rtl == RTL else "_" + hashlib.md5(str(rtl).encode()).hexdigest()[:6]
+        out = SIM / f"tb_n{nports}_b{nb}{tag}.vvp"
+        cmd = [IVERILOG, "-g2012", f"-Ptb_gemv_stream.NPORTS={nports}", f"-Ptb_gemv_stream.GMAX={GMAX}",
+               f"-Ptb_gemv_stream.EXW={EXW}", f"-Ptb_gemv_stream.TREE_REGMASK={REGMASK}",
+               f"-Ptb_gemv_stream.NB={nb}", "-o", str(out), str(rtl), str(HERE / "tb" / "tb_gemv_stream.sv")]
+        subprocess.run(cmd, check=True)
+        _built[key] = out
+        return out
 
 
 @dataclass
@@ -419,54 +524,58 @@ class Stim:
         return s + (f" slots{self.slots}{list(self.port_slots)}" if self.slots else "")
 
 
-def run_case(case: Case, nports: int, st: Stim, models: dict):
-    """-> (ok, line)."""
+def run_case(case: Case, nports: int, st: Stim, models: dict, nb: int = 1, sel=None, rtl=None, tag: str = ""):
+    """-> (ok, line, perf). nb: the build's NB. sel[i] = the activations (0 = run i's own, k = its
+    alt k-1) loaded into batch elements 0.. of run i; cfg_batch = len(sel[i]). Default: [0] each
+    (the single-vector gate). Every element's rows are compared with the models of ITS activation."""
+    sel = sel or [[0]] * len(case.runs)
+    assert len(sel) == len(case.runs) and all(1 <= len(x) <= nb for x in sel)
     slots, ps = (st.slots, st.port_slots) if st.slots and len(st.port_slots) == nports else (0, ())
     lay = pw.Layout(nports, st.chunk, slots, ps, st.align)
     mats = [(r.name, (r.signs, r.scales)) for r in case.runs]
     img, index = pw.pack(mats, lay)
     rt = pw.roundtrip_ok(mats, lay)
     ports = pw.port_streams(img, lay)                           # [nports, beats, 16]
-    d = SIM / f"{case.name}_n{nports}"
+    d = SIM / f"{case.name}_n{nports}_b{nb}{tag}_g{st.gap}p{st.bp}s{st.seed}"
     d.mkdir(parents=True, exist_ok=True)
-    nb = ports.shape[1]
+    nbeats = ports.shape[1]
     for k in range(nports):
         with open(d / f"port{k}.mem", "w") as f:
             f.write("\n".join(bytes(b[::-1]).hex() for b in ports[k]) + "\n")
     am, ae, rl = [], [], []
-    for r, e in zip(case.runs, index):
-        m = models[r.name]
-        for g in range(e.groups):
-            w = 0
-            for j, v in enumerate(m["q"][g * 128:(g + 1) * 128]):
-                w |= (int(v) & 0x3FF) << (10 * j)
-            am.append(f"{w:0320x}")
-            assert -(1 << (EXW - 1)) <= int(m["e"][g]) < (1 << (EXW - 1))
-            ae.append(f"{int(m['e'][g]) & ((1 << EXW) - 1):03x}")
-        rl += [f"{e.groups:08x}", f"{e.rows:08x}", f"{e.pad:08x}"]
+    for r, e, els in zip(case.runs, index, sel):
+        for a in els:
+            m = models[r.name]["els"][a]
+            for g in range(e.groups):
+                w = 0
+                for j, v in enumerate(m["q"][g * 128:(g + 1) * 128]):
+                    w |= (int(v) & 0x3FF) << (10 * j)
+                am.append(f"{w:0320x}")
+                assert -(1 << (EXW - 1)) <= int(m["e"][g]) < (1 << (EXW - 1))
+                ae.append(f"{int(m['e'][g]) & ((1 << EXW) - 1):03x}")
+        rl += [f"{e.groups:08x}", f"{e.rows:08x}", f"{e.pad:08x}", f"{len(els):08x}"]
     (d / "act_m.mem").write_text("\n".join(am) + "\n")
     (d / "act_e.mem").write_text("\n".join(ae) + "\n")
     (d / "runs.mem").write_text("\n".join(rl) + "\n")
     (d / "out.hex").unlink(missing_ok=True)
-    cmd = [VVP, "-n", str(build(nports)), f"+dir={d}", f"+nbeats={nb}", f"+nruns={len(case.runs)}",
+    cmd = [VVP, "-n", str(build(nports, nb, rtl)), f"+dir={d}", f"+nbeats={nbeats}", f"+nruns={len(case.runs)}",
            f"+gap={st.gap}", f"+bp={st.bp}", f"+seed={st.seed}",
            f"+timeout={60 * sum(e.tuples + e.pad for e in index) + 400 * sum(e.rows for e in index) + 5000 * len(index) + 20000}"]
     so = subprocess.run(cmd, capture_output=True, text=True).stdout
     md = re.search(r"GEMV_TB_DONE outputs=(\d+) xout=(\d+) pops=(\d+)", so)
     if not md or "GEMV_TB_TIMEOUT" in so:
-        return False, f"sim did not finish: {so[-300:]!r}", None
+        return False, f"FAIL {case.name:24s} n={nports} nb={nb}{tag} sim did not finish: {so[-300:]!r}", None
     nout, xout, pops = (int(v) for v in md.groups())
     words = [ln.split() for ln in (d / "out.hex").read_text().split("\n") if ln.strip()]
-    got = np.array([int(w[0], 16) if "x" not in w[0].lower() else 0xFFFFFFFF for w in words], dtype=np.uint64)
     last = [int(w[1]) for w in words]
-    ref = np.concatenate([models[r.name]["ref"] for r in case.runs]).astype(np.uint64)
-    ind = np.concatenate([models[r.name]["ind"] for r in case.runs]).astype(np.uint64)
-    n = len(ref)
+    nrows = sum(e.rows for e in index)
     bad = []
     if not rt:
         bad.append("pack round-trip")
-    if xout or len(got) != n:
-        bad.append(f"outputs {len(got)}/{n} x={xout}")
+    if xout or len(words) != nrows:
+        bad.append(f"outputs {len(words)}/{nrows} x={xout}")
+    if any(len(w[0]) != 8 * nb for w in words):
+        bad.append(f"result word is not {32 * nb} bits")
     exp_pops = sum(e.tuples + e.pad for e in index)
     if pops != exp_pops:
         bad.append(f"tuples popped {pops} != {exp_pops}")
@@ -475,47 +584,126 @@ def run_case(case: Case, nports: int, st: Stim, models: dict):
         want_last += [0] * (e.rows - 1) + [1]
     if last != want_last:
         bad.append("m_last wrong")
-    m_ref = int((got[:n] == ref[:len(got)]).sum()) if len(got) else 0
-    m_ind = int((got[:n] == ind[:len(got)]).sum()) if len(got) else 0
+    # every batch element against the models of its own activation (element b = hex digits [-8(b+1) : -8b])
+    n = m_ref = m_ind = 0
+    r0, bad_el = 0, set()
+    for i, (r, e, els) in enumerate(zip(case.runs, index, sel)):
+        rows = words[r0:r0 + e.rows]
+        r0 += e.rows
+        for b, a in enumerate(els):
+            m = models[r.name]["els"][a]
+            n += e.rows
+            hx = [w[0][len(w[0]) - 8 * (b + 1):len(w[0]) - 8 * b] for w in rows]
+            got = np.array([int(h, 16) if h and "x" not in h.lower() else 0x1_0000_0000 for h in hx], dtype=np.uint64)
+            if len(got) != e.rows:
+                bad_el.add((i, b))
+                continue
+            k_ref = int((got == m["ref"].astype(np.uint64)).sum())
+            k_ind = int((got == m["ind"].astype(np.uint64)).sum())
+            m_ref += k_ref
+            m_ind += k_ind
+            if k_ind != e.rows or (case.ref_domain and k_ref != e.rows):
+                bad_el.add((i, b))
     if m_ind != n:
         bad.append("RTL != independent model")
     if case.ref_domain and m_ref != n:
         bad.append("RTL != ExactBfpGemv")
-    if not bad and len(got) == n and m_ref != n and case.ref_domain:
-        bad.append("ref mismatch")
+    if bad_el:
+        bad.append("first bad (run, element): " + ", ".join(f"({i},{b})" for i, b in sorted(bad_el)[:4]))
     cyc = [(int(a), int(b), int(c)) for a, b, c in re.findall(r"GEMV_TB_RUN run=\d+ cycles=(\d+) rows=(\d+) groups=(\d+)", so)]
     gpc = max((r * g / c for c, r, g in cyc), default=0.0)
+    lat = [c - (e.tuples + e.pad) for (c, _, _), e in zip(cyc, index)]       # start -> !busy minus the tuples
     ok = not bad
-    line = (f"{'PASS' if ok else 'FAIL'} {case.name:24s} n={nports} {st.tag():28s} rows={n:4d} "
-            f"rtl==ref {m_ref}/{n}{'' if case.ref_domain else ' (info)'} rtl==indep {m_ind}/{n} "
+    bt = sorted({len(x) for x in sel})
+    line = (f"{'PASS' if ok else 'FAIL'} {case.name:24s} n={nports} "
+            + (f"nb={nb} batch={','.join(map(str, bt)):5s} " if nb > 1 else "")
+            + f"{st.tag():28s} rows={nrows:4d} "
+            + (f"words={n:5d} " if nb > 1 else "")
+            + f"rtl==ref {m_ref}/{n}{'' if case.ref_domain else ' (info)'} rtl==indep {m_ind}/{n} "
             f"tuples={pops}" + (f"  !! {'; '.join(bad)}" if bad else ""))
-    return ok, line, (gpc, cyc)
+    return ok, line, dict(gpc=gpc, cyc=cyc, lat=lat, rows=nrows, words=n)
 
 
 def model_case(case: Case):
-    """reference + independent results per run, and the case's stats line."""
+    """reference + independent results per run (and per alternative activation: models[name]["els"][k],
+    k = 0 the run's own activation), and the case's stats line."""
     models, ties, zeros, smin, smax, abits, ind_ref = {}, 0, 0, 999, -999, 0, True
+    a_min, a_max, n_alt, kinds = 999, -999, 0, set()
     for r in case.runs:
-        q, e = quantise(r.x)
-        ref, _ = ref_gemv(r.signs, r.scales, r.x)
-        ind, t, lo, hi, ab = indep_gemv(r.signs, r.scales, q, e)
-        models[r.name] = dict(q=q, e=e, ref=ref, ind=ind)
-        ties += t
-        zeros += int((ind == 0).sum())
-        smin, smax, abits = min(smin, lo), max(smax, hi), max(abits, ab)
-        ind_ref &= bool(np.array_equal(ref, ind))
+        els = []
+        for k, x in enumerate([r.x] + [a for _, a in r.alts]):
+            q, e = quantise(x)
+            ref, _ = ref_gemv(r.signs, r.scales, x)
+            ind, t, lo, hi, ab = indep_gemv(r.signs, r.scales, q, e)
+            els.append(dict(q=q, e=e, ref=ref, ind=ind))
+            ind_ref &= bool(np.array_equal(ref, ind))
+            if k == 0:
+                ties += t
+                zeros += int((ind == 0).sum())
+                smin, smax, abits = min(smin, lo), max(smax, hi), max(abits, ab)
+            else:
+                n_alt += 1
+                a_min, a_max = min(a_min, lo), max(a_max, hi)
+        kinds |= {k for k, _ in r.alts}
+        models[r.name] = dict(els[0], els=els)
     info = (f"     {case.name}: {len(case.runs)} run(s), {sum(r.scales.shape[0] for r in case.runs)} rows, "
             f"G={sorted({r.scales.shape[1] for r in case.runs})}, shifts {smin}..{smax}, |acc| <= {abits} bits, "
             f"exact RNE ties {ties}, zero rows {zeros}, ref==indep {'yes' if ind_ref else 'NO'}"
+            + (f", {n_alt} alt activations ({'/'.join(sorted(kinds))}; shifts {a_min}..{a_max})" if n_alt else "")
             + (f"  [{case.note}]" if case.note else ""))
     return models, info, ind_ref
+
+
+# ----------------------------------------------------------------------------- mutations
+MUTATIONS = [
+    # (name, old, new, what) -- planted into a copy of rtl/gemv_stream.v; the batch gate must FAIL on each
+    ("swap", "assign f_d[gb*32 +: 32] = cd;", "assign f_d[(gb ^ 1)*32 +: 32] = cd;",
+     "batch elements 2k and 2k+1 swapped in the result word"),
+    ("exp0", "wire signed [KW-1:0] ksum = $signed({1'b0, ebase}) + s1_ex;",
+     "wire signed [KW-1:0] ksum = $signed({1'b0, ebase}) + lane[gm_i].bat[0].s1_ex;",
+     "every element's shift count uses element 0's exponent"),
+    ("mant0", "s1_q  <= mem[radr];", "s1_q  <= lane[gm_i].bat[0].mem[radr];",
+     "every element reads element 0's mantissas (with its own exponent)"),
+    ("acc_clr", "else if (a_v) acc <= a_rl ? 64'd0 : acc_nx;", "else if (a_v) acc <= (a_rl && gb == 0) ? 64'd0 : acc_nx;",
+     "the accumulator of b > 0 is not cleared between rows"),
+    ("bank_wr", "if (rst) we <= 1'b0; else we <= w_we & (w_bk == gb);", "if (rst) we <= 1'b0; else we <= w_we;",
+     "the activation write ignores the bank select (every bank takes every write)"),
+    ("bank_sel", "if (rst) we <= 1'b0; else we <= w_we & (w_bk == gb);",
+     "if (rst) we <= 1'b0; else we <= w_we & (w_bk == (gb ^ 1));", "activation banks 2k and 2k+1 swapped at the load"),
+    ("badr", "badr_c <= s0_badr;", "badr_c <= (gb == 0) ? s0_badr : {NPORTS*AW{1'b0}};",
+     "the bank read address of copies b > 0 is stuck at word 0"),
+    ("bsrc", "bsrc   <= s0_bsrc;", "bsrc   <= (gb == 0) ? s0_bsrc : {NPORTS*BW{1'b0}};",
+     "the sign-beat steering of copies b > 0 is stuck at port 0"),
+    ("ben", "ben[b_i] <= (b_i == 0) || (cfg_batch > b_i);", "ben[b_i] <= (b_i == 0) || (cfg_batch > b_i + 1);",
+     "the last element of the batch is switched off"),
+    ("latch", "if (st == ST_IDLE && start)\n            for (b_i = 0;", "if (1'b1)\n            for (b_i = 0;",
+     "cfg_batch is not latched at start (the testbench drives X after the pulse)"),
+    ("conv", ".in_data(res_all[gb*64 +: 64]),", ".in_data(res_all[0 +: 64]),",
+     "every element converts element 0's accumulator"),
+]
+
+
+def mutate(name) -> Path:
+    mname, old, new, _ = next(m for m in MUTATIONS if m[0] == name)
+    d = SIM / f"mut_{mname}"
+    d.mkdir(parents=True, exist_ok=True)
+    s = RTL.read_text()
+    assert s.count(old) == 1, f"mutation {mname}: pattern not found exactly once"
+    (d / "gemv_stream.v").write_text(s.replace(old, new))
+    return d / "gemv_stream.v"
+
+
+BAT_MIX = {2: (2, 1, 2, 2, 1, 1, 2, 1), 4: (4, 1, 3, 2, 1, 4, 2, 3, 3, 1, 4, 2)}      # cfg_batch of run i, cyclic
 
 
 def main():
     global REGMASK
     ap = argparse.ArgumentParser()
-    ap.add_argument("--quick", action="store_true", help="adversarial cases only, NPORTS 1 and 3")
+    ap.add_argument("--quick", action="store_true", help="adversarial cases only, NPORTS 1 and 3, NB 1 and 2, no mutations")
     ap.add_argument("--nports", type=int, nargs="*", default=None)
+    ap.add_argument("--nb", type=int, nargs="*", default=None, help="builds to gate (default 1 2 4)")
+    ap.add_argument("--only", default="", help="substring filter on case names")
+    ap.add_argument("--jobs", type=int, default=max(1, min(8, (os.cpu_count() or 2) // 2)), help="simulations in parallel")
     ap.add_argument("--regmask", type=lambda v: int(v, 0), default=REGMASK,
                     help="sign-tree register mask (bit 6 must be set), e.g. 0x55 for a 4-stage tree")
     a = ap.parse_args()
@@ -533,43 +721,143 @@ def main():
            case_random(rng, "adv_credits", [(1, 150), (2, 80), (8, 40), (1, 60)])]
     real = [] if a.quick else cases_real()
     sweep = a.nports or ([1, 3] if a.quick else [1, 2, 3, 4])
+    nbs = a.nb or ([1, 2] if a.quick else [1, 2, 4])
+    assert all(b in (1, 2, 4) for b in nbs)
+    sel_name = lambda nm: not a.only or a.only in nm
+
+    # alternative activations for the batch builds (their own generator: the NB = 1 cases stay as they were)
+    brng = np.random.default_rng(20261112)
+    bat_shapes = [(5, 6), (1, 9), (17, 4), (8, 5), (96, 3), (3, 7), (33, 4), (2, 12), (16, 6), (9, 5), (1, 3), (48, 3)]
+    mix = {nb: case_random(brng, f"bat_mix_nb{nb}", bat_shapes[:len(BAT_MIX[nb])]) for nb in (2, 4)}
+    if any(nb > 1 for nb in nbs):
+        for c in adv + list(mix.values()):
+            add_alts(c, brng)
 
     ok_all = pw.selftest()
-    n_lines = n_rows = 0
-    best = {}
-    for case in adv + real:
-        models, info, ind_ref = model_case(case)
-        print(info)
-        if case.ref_domain and not ind_ref:
-            ok_all = False
-            print(f"FAIL {case.name}: independent model disagrees with ExactBfpGemv")
-        is_real = case.name.startswith("real")
-        for n in sweep:
-            if is_real and n not in (1, 3) and not a.nports:
+    st_tot = dict(lines=0, rows=0, words=0)
+    best, lats = {}, {}
+    pool = ThreadPoolExecutor(a.jobs)
+
+    def run_all(tasks):
+        """tasks: ("info", text) | ("sim", kwargs, meta). Simulations run in the pool; lines print in order."""
+        nonlocal ok_all
+        futs = [(t, pool.submit(run_case, **t[1]) if t[0] == "sim" else None) for t in tasks]
+        for t, f in futs:
+            if t[0] == "info":
+                print(t[1], flush=True)
                 continue
-            stims = [Stim(0, 0, 1, 16, "tuple"),
-                     Stim(35, 30, 2 + n, 4, "stripe"),
-                     Stim(70, 5, 5 + n, 256, "tuple", 4 if n == 3 else 0, (0, 1, 3) if n == 3 else ())]
-            if is_real:
-                stims = stims[:2]
-            if case.name == "adv_credits":      # short rows + a nearly-stuck sink: the output FIFO
-                stims = [Stim(0, 97, 11 + n, 16, "tuple"), Stim(20, 90, 12 + n, 4, "stripe")]   # must not overflow
-            for st in stims:
-                ok, line, perf = run_case(case, n, st, models)
-                ok_all &= ok
-                n_lines += 1
-                n_rows += sum(r.scales.shape[0] for r in case.runs)
-                print(line)
-                if perf and st.gap == 0 and st.bp == 0 and is_real:
-                    for c, r, g in perf[1]:
-                        if r * g / c > best.get(n, (0,))[0]:
-                            best[n] = (r * g / c, c, r, g, case.name)
-    for n, (gpc, c, r, g, name) in sorted(best.items()):
-        print(f"GEMV_STREAM_RATE n={n} {gpc:.3f} groups/cycle = {gpc * 128:.1f} weights/cycle "
-              f"(MEASURED in sim, no stalls: {r} rows x {g} groups in {c} cycles incl. pipeline drain, {name}; "
+            ok, line, perf = f.result()
+            kw, meta = t[1], t[2]
+            ok_all &= ok
+            st_tot["lines"] += 1
+            print(line, flush=True)
+            if not perf:
+                continue
+            st_tot["rows"] += perf["rows"]
+            st_tot["words"] += perf["words"]
+            st, nb = kw["st"], kw.get("nb", 1)
+            if st.gap == 0 and st.bp == 0:
+                lats.setdefault((nb, kw["nports"]), set()).update(perf["lat"])
+                if meta.get("real"):
+                    key = (kw["nports"], nb, meta.get("batch", 1))
+                    for c, r, g in perf["cyc"]:
+                        if r * g / c > best.get(key, (0,))[0]:
+                            best[key] = (r * g / c, c, r, g, kw["case"].name)
+
+    # ---- the single-vector gate (NB = 1), as before
+    all_models = {}
+    if 1 in nbs:
+        tasks = []
+        for case in adv + real:
+            if not sel_name(case.name):
+                continue
+            models, info, ind_ref = model_case(case)
+            all_models[case.name] = models
+            tasks.append(("info", info))
+            if case.ref_domain and not ind_ref:
+                ok_all = False
+                tasks.append(("info", f"FAIL {case.name}: independent model disagrees with ExactBfpGemv"))
+            is_real = case.name.startswith("real")
+            for n in sweep:
+                if is_real and n not in (1, 3) and not a.nports:
+                    continue
+                stims = [Stim(0, 0, 1, 16, "tuple"),
+                         Stim(35, 30, 2 + n, 4, "stripe"),
+                         Stim(70, 5, 5 + n, 256, "tuple", 4 if n == 3 else 0, (0, 1, 3) if n == 3 else ())]
+                if is_real:
+                    stims = stims[:2]
+                if case.name == "adv_credits":      # short rows + a nearly-stuck sink: the output FIFO
+                    stims = [Stim(0, 97, 11 + n, 16, "tuple"), Stim(20, 90, 12 + n, 4, "stripe")]   # must not overflow
+                for st in stims:
+                    tasks.append(("sim", dict(case=case, nports=n, st=st, models=models), dict(real=is_real)))
+        run_all(tasks)
+
+    # ---- the batch builds: every cfg_batch, a different activation per element
+    for nb in [b for b in nbs if b > 1]:
+        tasks = [("info", f"---- NB = {nb}: cfg_batch 1..{nb}, a different activation in every batch element")]
+        bsweep = a.nports or ([3] if a.quick else [1, 3])
+        for case in adv + real + [mix[nb]]:
+            if not sel_name(case.name):
+                continue
+            if case.name not in all_models:
+                all_models[case.name], info, ind_ref = model_case(case)
+                tasks.append(("info", info))
+                if case.ref_domain and not ind_ref:
+                    ok_all = False
+                    tasks.append(("info", f"FAIL {case.name}: independent model disagrees with ExactBfpGemv"))
+            models = all_models[case.name]
+            is_real, is_mix = case.name.startswith("real"), case.name.startswith("bat_mix")
+            if is_mix:              # matrices back to back with different cfg_batch, all NPORTS, three bus behaviours
+                sel = [elements(i, BAT_MIX[nb][i % len(BAT_MIX[nb])]) for i in range(len(case.runs))]
+                for n in (a.nports or ([3] if a.quick else [1, 2, 3, 4])):
+                    for st in (Stim(0, 0, 1, 16, "tuple"), Stim(35, 30, 2 + n, 4, "stripe"),
+                               Stim(70, 60, 5 + n, 256, "tuple", 4 if n == 3 else 0, (0, 1, 3) if n == 3 else ())):
+                        tasks.append(("sim", dict(case=case, nports=n, st=st, models=models, nb=nb, sel=sel, tag="_mix"), {}))
+                continue
+            for batch in range(1, nb + 1):
+                sel = [elements(i, batch) for i in range(len(case.runs))]
+                for n in ([3] if is_real and not a.nports else bsweep):
+                    stims = [Stim(0, 0, 1, 16, "tuple"), Stim(40, 35, 20 + n + batch, 4, "stripe")]
+                    if is_real and batch != nb:
+                        stims = stims[:1]
+                    if case.name == "adv_credits":
+                        stims = [Stim(0, 97, 31 + n + batch, 16, "tuple"), Stim(20, 90, 32 + n + batch, 4, "stripe")]
+                    for st in stims:
+                        tasks.append(("sim", dict(case=case, nports=n, st=st, models=models, nb=nb, sel=sel, tag=f"_x{batch}"),
+                                      dict(real=is_real, batch=batch)))
+        run_all(tasks)
+
+    # ---- mutations: the batch gate must fail on every planted bug
+    n_mut = 0
+    mnb = max(nbs)
+    if mnb > 1 and not a.quick and not a.only:
+        mcase = add_alts(case_random(brng, "mut", [(5, 6), (17, 4), (9, 5), (2, 7)]), brng)
+        mmodels, _, _ = model_case(mcase)
+        msel = [elements(i, mnb) for i in range(len(mcase.runs))]
+        mrun = lambda rtl, tag: run_case(mcase, 3, Stim(0, 0, 1, 16, "tuple"), mmodels, nb=mnb, sel=msel, rtl=rtl, tag=tag)
+        b_ok, b_line, _ = mrun(None, "_base")
+        print(f"---- mutations on the NB = {mnb} build (n = 3, cfg_batch {mnb}); unmutated: {b_line}")
+        ok_all &= b_ok
+        for (name, _, _, what), res in zip(MUTATIONS, pool.map(lambda m: mrun(mutate(m[0]), "_" + m[0]), MUTATIONS)):
+            m_ok, m_line, _ = res
+            caught = b_ok and not m_ok
+            ok_all &= caught
+            n_mut += int(caught)
+            print(f"{'PASS' if caught else 'FAIL'} mutation {name:9s} ({what}): unmutated {'PASS' if b_ok else 'FAIL'}, "
+                  f"mutated {'FAIL (caught)' if not m_ok else 'PASS (NOT caught)'}: {m_line[m_line.find('rows='):][:150]}", flush=True)
+
+    for (n, nb, batch), (gpc, c, r, g, name) in sorted(best.items()):
+        print(f"GEMV_STREAM_RATE n={n} " + (f"NB={nb} batch={batch} " if nb > 1 else "")
+              + f"{gpc:.3f} groups/cycle = {gpc * 128:.1f} weights/cycle "
+              + (f"x {batch} activations = {gpc * batch:.3f} group-GEMVs/cycle " if nb > 1 else "")
+              + f"(MEASURED in sim, no stalls: {r} rows x {g} groups in {c} cycles incl. pipeline drain, {name}; "
               f"ideal {n * 8 / 9:.3f})")
-    print(f"GEMV_STREAM_VERDICT {'PASS' if ok_all else 'FAIL'} ({n_lines} sims, {n_rows} output rows, "
-          f"NPORTS {sweep}, tree regmask {REGMASK:#04x}, {time.time() - t_start:.0f} s)")
+    for (nb, n), v in sorted(lats.items()):
+        print(f"GEMV_STREAM_LATENCY NB={nb} n={n}: start -> !busy = tuples + {min(v)}" + (f"..{max(v)}" if max(v) != min(v) else "")
+              + " cycles (MEASURED in sim, no stalls, every run of every free-running sim)")
+    print(f"GEMV_STREAM_VERDICT {'PASS' if ok_all else 'FAIL'} ({st_tot['lines']} sims, {st_tot['rows']} output rows, "
+          f"{st_tot['words']} fp32 words compared per batch element, NPORTS {sweep}, NB {nbs}, {n_mut}/{len(MUTATIONS) if mnb > 1 and not a.quick and not a.only else 0} mutations caught, "
+          f"tree regmask {REGMASK:#04x}, {time.time() - t_start:.0f} s)")
     sys.exit(0 if ok_all else 1)
 
 

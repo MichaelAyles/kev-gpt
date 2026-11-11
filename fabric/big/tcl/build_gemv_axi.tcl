@@ -1,6 +1,6 @@
 # R2a on silicon — PS + gemv_axi (AXI-Lite slave + NPORTS 128-bit read masters straight into
 # the PS HP ports), then synth + impl + bitstream in one go.
-#   vivado -mode batch -source fabric/big/tcl/build_gemv_axi.tcl -tclargs <NPORTS> <FREQMHZ> <BDIR> [GMAX] [PERIOD_NS]
+#   vivado -mode batch -source fabric/big/tcl/build_gemv_axi.tcl -tclargs <NPORTS> <FREQMHZ> <BDIR> [GMAX] [PERIOD_NS|""] [NB]
 # NOTE the PS clock generator rounds the request: FREQMHZ 333 comes out as 300.03 MHz and THAT
 # (3.333 ns) is what the design is constrained to, although the board driver then forces
 # 333.33 MHz. Pass PERIOD_NS (e.g. 3.000) to constrain implementation at the clock really used.
@@ -15,6 +15,8 @@ if {$freq eq ""}   { set freq 333 }
 if {$bdir eq ""}   { set bdir "/tmp/kevbuild/big_r2a_bit" }
 if {$gmax eq ""}   { set gmax 96 }
 set per    [lindex $argv 4]
+set nb     [lindex $argv 5]
+if {$nb eq ""}     { set nb 1 }
 
 set part  "xck26-sfvc784-2LV-c"
 set board "xilinx.com:kv260_som:part0:1.4"
@@ -55,7 +57,7 @@ foreach s [concat $slaves $auxs] {
 set_property -dict $cfg [get_bd_cells ps]
 
 set g [create_bd_cell -type module -reference gemv_axi eng]
-set_property -dict [list CONFIG.NPORTS $nports CONFIG.GMAX $gmax] [get_bd_cells eng]
+set_property -dict [list CONFIG.NPORTS $nports CONFIG.GMAX $gmax CONFIG.NB $nb] [get_bd_cells eng]
 
 apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config [list \
     Clk_master {Auto} Clk_slave {Auto} Clk_xbar {Auto} \
@@ -88,7 +90,7 @@ validate_bd_design
 make_wrapper -files [get_files design_1.bd] -top -import
 set_property top design_1_wrapper [current_fileset]
 generate_target all [get_files design_1.bd]
-puts "BD_BUILD_GEMV_AXI_OK nports=$nports freq=$freq gmax=$gmax"
+puts "BD_BUILD_GEMV_AXI_OK nports=$nports freq=$freq gmax=$gmax nb=$nb"
 
 if {$per ne ""} {
     # same name on the same pin, read last: replaces the PS IP's own create_clock
@@ -122,4 +124,4 @@ if {[file exists $bit]} {
         -loadbit "up 0x0 $bit" "$bdir/gemv_axi.bit" -quiet
     puts "BITSTREAM -> $bdir/gemv_axi.bit.bin (wns=$wns whs=$whs)"
 } else { puts "NO_BITSTREAM" }
-puts "GEMV_AXI_BUILD_DONE nports=$nports freq=$freq wns=$wns whs=$whs"
+puts "GEMV_AXI_BUILD_DONE nports=$nports freq=$freq nb=$nb wns=$wns whs=$whs"

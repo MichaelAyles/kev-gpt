@@ -2,20 +2,25 @@
 //
 // One simulation = a list of RUNS (matrices) that follow each other on the same
 // NPORTS weight streams, exactly as they follow each other in the packed image.
-// Per run: load the activation (G words), pulse start, wait for !busy.
+// Per run: load the activation of every batch element in use (batch x G words; the
+// banks of elements >= batch keep whatever earlier runs left there), pulse start with
+// cfg_batch, wait for !busy.
 //
 // Files in +dir=<d>:
 //   port<k>.mem   port k's beats in the order its read master delivers them (128-bit hex)
-//   runs.mem      3 x 32-bit hex per run: G, R, pad tuples
-//   act_m.mem     activation mantissa words, 1280-bit hex, all runs concatenated
+//   runs.mem      4 x 32-bit hex per run: G, R, pad tuples, batch (1..NB)
+//   act_m.mem     activation mantissa words, 1280-bit hex, all runs concatenated; within a
+//                 run element 0's G words, then element 1's, ...
 //   act_e.mem     activation exponents (EXW-bit two's complement hex), same order
-//   out.hex       (written) one fp32 per row, "<8 hex> <last>"
+//   out.hex       (written) one line per row, "<8*NB hex> <last>": the whole m_data word,
+//                 batch element b in bits [32b +: 32] (element 0 = the LAST 8 digits)
 // Plusargs: +nbeats= (per port) +nruns= +gap= (% of cycles a port withholds valid)
 //           +bp= (% of cycles m_ready is low) +seed=
 // Each port's valid is randomised independently; data is X while valid is low,
-// and valid/data are held until ready (AXI rule). Prints
+// and valid/data are held until ready (AXI rule). The banks are loaded in ascending or
+// descending element order (by seed) with act_bank / act_group X between writes. Prints
 //   GEMV_TB_RUN run=<i> cycles=<start..!busy> rows=<R> groups=<G>
-//   GEMV_TB_DONE outputs=<n> xout=<n words with X> pops=<tuples the engine popped>
+//   GEMV_TB_DONE outputs=<n> xout=<n rows with X in an element < batch> pops=<tuples the engine popped>
 `timescale 1ns / 1ps
 
 module tb_gemv_stream;
@@ -23,6 +28,7 @@ module tb_gemv_stream;
     parameter integer GMAX   = 96;
     parameter integer EXW    = 9;
     parameter [6:0]   TREE_REGMASK = 7'b1111111;
+    parameter integer NB     = 1;           // max batch of the DUT
     parameter integer MAXB   = 1 << 16;     // beats per port
     parameter integer MAXRUN = 512;
     parameter integer MAXACT = 1 << 15;
@@ -31,16 +37,18 @@ module tb_gemv_stream;
     always #1.5 clk = ~clk;
 
     reg [127:0]   pmem [0:NPORTS*MAXB-1];
-    reg [31:0]    runs [0:3*MAXRUN-1];
+    reg [31:0]    runs [0:4*MAXRUN-1];
     reg [1279:0]  actm [0:MAXACT-1];
     reg [EXW-1:0] acte [0:MAXACT-1];
 
-    integer nbeats, nruns, gap, bp, seed, fout, k, r, g, abase, timeout, nout, xout;
+    integer nbeats, nruns, gap, bp, seed, fout, k, r, g, b, bb, desc, abase, timeout, nout, xout, cur_batch;
     reg [1023:0] dir;
 
     reg                   start = 0;
     reg [7:0]             cfg_groups = 0;
     reg [31:0]            cfg_rows = 0, cfg_pad = 0;
+    reg [2:0]             cfg_batch = 0;
+    reg [1:0]             act_bank = 0;
     wire                  busy;
     reg                   act_we = 0;
     reg [7:0]             act_group = 0;
@@ -50,11 +58,12 @@ module tb_gemv_stream;
     wire [NPORTS*128-1:0] s_data;
     wire                  m_valid, m_last;
     reg                   m_ready = 0;
-    wire [31:0]           m_data;
+    wire [NB*32-1:0]      m_data;
 
-    gemv_stream #(.NPORTS(NPORTS), .GMAX(GMAX), .EXW(EXW), .TREE_REGMASK(TREE_REGMASK)) dut (
+    gemv_stream #(.NPORTS(NPORTS), .GMAX(GMAX), .EXW(EXW), .TREE_REGMASK(TREE_REGMASK), .NB(NB)) dut (
         .clk(clk), .rst(rst), .start(start), .cfg_groups(cfg_groups), .cfg_rows(cfg_rows),
-        .cfg_pad(cfg_pad), .busy(busy), .act_we(act_we), .act_group(act_group),
+        .cfg_pad(cfg_pad), .cfg_batch(cfg_batch), .busy(busy), .act_we(act_we), .act_bank(act_bank),
+        .act_group(act_group),
         .act_mant(act_mant), .act_exp(act_exp), .s_valid(s_valid), .s_ready(s_ready),
         .s_data(s_data), .m_valid(m_valid), .m_ready(m_ready), .m_data(m_data), .m_last(m_last));
 
@@ -82,14 +91,18 @@ module tb_gemv_stream;
     end endgenerate
 
     // ---- result sink with random back-pressure
-    integer sdo;
+    integer sdo, xb;
+    reg     xrow;
     always @(posedge clk) begin
         if (rst) m_ready <= 1'b0;
         else     m_ready <= (({$random(sdo)} % 100) >= bp);
         if (!rst && m_valid && m_ready) begin
-            $fdisplay(fout, "%08x %0d", m_data, m_last);
+            $fdisplay(fout, "%x %0d", m_data, m_last);
             nout = nout + 1;
-            if (^m_data === 1'bx) xout = xout + 1;
+            xrow = 1'b0;                    // elements >= batch are not part of the contract
+            for (xb = 0; xb < NB; xb = xb + 1)
+                if (xb < cur_batch && ^m_data[xb*32 +: 32] === 1'bx) xrow = 1'b1;
+            if (xrow) xout = xout + 1;
         end
     end
 
@@ -116,12 +129,12 @@ module tb_gemv_stream;
         if (!$value$plusargs("bp=%d", bp))         bp = 0;
         if (!$value$plusargs("seed=%d", seed))     seed = 1;
         if (!$value$plusargs("timeout=%d", timeout)) timeout = 20000000;
-        nout = 0; xout = 0; sdo = seed + 99991;
+        nout = 0; xout = 0; sdo = seed + 99991; cur_batch = 0;
         if (nbeats > MAXB)   begin $display("GEMV_TB_ERR nbeats > MAXB"); $finish; end
         if (nruns > MAXRUN)  begin $display("GEMV_TB_ERR nruns > MAXRUN"); $finish; end
         for (k = 0; k < NPORTS; k = k + 1)
             $readmemh($sformatf("%0s/port%0d.mem", dir, k), pmem, k*MAXB, k*MAXB + nbeats - 1);
-        $readmemh($sformatf("%0s/runs.mem", dir), runs, 0, 3*nruns - 1);
+        $readmemh($sformatf("%0s/runs.mem", dir), runs, 0, 4*nruns - 1);
         $readmemh($sformatf("%0s/act_m.mem", dir), actm);
         $readmemh($sformatf("%0s/act_e.mem", dir), acte);
         fout = $fopen($sformatf("%0s/out.hex", dir), "w");
@@ -130,23 +143,32 @@ module tb_gemv_stream;
         repeat (4) @(posedge clk);
         abase = 0;
         for (r = 0; r < nruns; r = r + 1) begin
-            // activation load
-            for (g = 0; g < runs[3*r]; g = g + 1) begin
-                act_we <= 1'b1; act_group <= g[7:0];
-                act_mant <= actm[abase + g]; act_exp <= acte[abase + g];
-                @(posedge clk);
+            if (runs[4*r + 3] < 1 || runs[4*r + 3] > NB) begin $display("GEMV_TB_ERR batch > NB"); $finish; end
+            // activation load: every batch element in use, one bank after the other
+            desc = (seed + r) & 1;          // (seed moves with every $random below)
+            for (bb = 0; bb < runs[4*r + 3]; bb = bb + 1) begin
+                b = desc ? runs[4*r + 3] - 1 - bb : bb;
+                for (g = 0; g < runs[4*r]; g = g + 1) begin
+                    act_we <= 1'b1; act_group <= g[7:0]; act_bank <= b[1:0];
+                    act_mant <= actm[abase + b*runs[4*r] + g]; act_exp <= acte[abase + b*runs[4*r] + g];
+                    @(posedge clk);
+                end
+                act_we <= 1'b0; act_mant <= {1280{1'bx}}; act_exp <= {EXW{1'bx}};
+                act_group <= 8'hxx; act_bank <= 2'bxx;
+                repeat (({$random(seed)} % 3)) @(posedge clk);
             end
-            act_we <= 1'b0; act_mant <= {1280{1'bx}}; act_exp <= {EXW{1'bx}};
-            abase = abase + runs[3*r];
+            abase = abase + runs[4*r]*runs[4*r + 3];
             repeat (3) @(posedge clk);
-            cfg_groups <= runs[3*r][7:0]; cfg_rows <= runs[3*r + 1]; cfg_pad <= runs[3*r + 2];
+            cfg_groups <= runs[4*r][7:0]; cfg_rows <= runs[4*r + 1]; cfg_pad <= runs[4*r + 2];
+            cfg_batch <= runs[4*r + 3][2:0]; cur_batch = runs[4*r + 3];
             start <= 1'b1;
             @(posedge clk);
             start <= 1'b0; t0 = cyc;
+            cfg_groups <= 8'hxx; cfg_rows <= 32'hxxxxxxxx; cfg_pad <= 32'hxxxxxxxx; cfg_batch <= 3'bxxx;
             @(posedge clk);
             while (busy) @(posedge clk);
-            $display("GEMV_TB_RUN run=%0d cycles=%0d rows=%0d groups=%0d", r, cyc - t0,
-                     runs[3*r + 1], runs[3*r]);
+            $display("GEMV_TB_RUN run=%0d cycles=%0d rows=%0d groups=%0d batch=%0d", r, cyc - t0,
+                     runs[4*r + 1], runs[4*r], runs[4*r + 3]);
             repeat (({$random(seed)} % 4)) @(posedge clk);
         end
         repeat (60) @(posedge clk);         // anything still dribbling out is an error

@@ -37,9 +37,11 @@
 // Details the register map leaves open:
 //   * every RW register stores and reads back all 32 bits as written; only the
 //     documented low bits are used (GROUPS[7:0], CHUNK[8:0], BASE_HI[16:0],
-//     ACT_GROUP[7:0], ACT_EXP[EXW-1:0]; MAXOUT is clamped to 1..255).
+//     ACT_GROUP[9:0], ACT_EXP[EXW-1:0]; MAXOUT is clamped to 1..255).
 //   * the run configuration is snapshotted at GO: later writes cannot disturb a
-//     run. ACT_COMMIT is ignored while a run is active or ACT_GROUP >= GMAX.
+//     run. ACT_COMMIT is ignored while a run is active or ACT_GROUP >= GMAX
+//     (version 3: group = ACT_GROUP[7:0] >= GMAX, bank = ACT_GROUP[9:8] >= NB, or
+//     any higher bit set).
 //   * SOFT_RST is a pulse on the write of bit 1 (the "then 0" write is a no-op).
 //     It aborts a run, clears STATUS and the counters, keeps the RW registers and
 //     the loaded activation. AXI bursts in flight are drained and discarded;
@@ -76,6 +78,32 @@
 //   * the result window RAM is 2^(RES_LG-10) separate 1024-word RAMs, each with
 //     its own output register, and a registered bank mux (the v1 build's only
 //     failing paths were the cascade through one inferred 16384-word RAM).
+//
+// VERSION 3 = BATCH (parameter NB = 1 / 2 / 4 -> PARAMS[7:4]; register BATCH). One
+// pass over the weight stream serves BATCH activation vectors; batch element b
+// produces the words a BATCH = 1 run on activation b alone produces. With NB = 1,
+// and with NB > 1 as long as BATCH stays at its reset value 1, every version-2
+// script behaves as on version 2 (same registers, same cycle counts; the core is
+// one pipeline stage longer when NB > 1). What the map leaves open:
+//   * BATCH reads back as written; the run uses it clamped to 1..NB (0 -> 1),
+//     snapshotted at GO like the rest of the configuration.
+//   * activation banks: gemv_stream keeps NB banks. MODE.ACT_DMA fetches BATCH *
+//     GROUPS records (element b / group g at ACT_ADDR + 256*(b*GROUPS + g)) into
+//     banks 0..BATCH-1; banks >= BATCH and, without ACT_DMA, all banks keep their
+//     contents. The ACT_* register path reaches every bank: ACT_GROUP[9:8] is the
+//     bank (a commit to a bank >= NB is ignored).
+//   * the core hands over a row as one NB*32-bit word. Element 0 takes the
+//     version-2 path unchanged: AXI-Lite window (RES_START, RES_NOCAP), ROWS_DONE,
+//     SUM / XOR, ARGMAX_IDX / VAL. Every element b has its own gemv_argmax and
+//     checksum (ARGMAX_B + 8*b, CHK_B + 16*b; an element >= BATCH reads 0).
+//   * MODE.RES_DMA with BATCH > 1: the elements of a row go to the DDR writer one
+//     per cycle, element 0 first (row r / element b at RES_ADDR + 4*(r*BATCH + b)),
+//     so the core's m_ready is held low for BATCH - 1 cycles after every row. A
+//     real matrix produces a row every 6+ cycles and never notices; a matrix of
+//     one or two groups is slowed down and the wait is counted in STALL_OUT.
+//     Without RES_DMA nothing is held.
+//   * CYC_ACT / CYC_RES / DONE keep their definitions (the fetch is BATCH times as
+//     long; the last write response is that of the last element of the last row).
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 `default_nettype none
@@ -88,7 +116,8 @@ module gemv_axi #(
     parameter integer RES_LG  = 14,              // log2 rows of the result window (<= 14)
     parameter integer C_S_AXI_ADDR_WIDTH = 17,   // must be 17 (gemv_axi_regs.ADDR_BITS)
     parameter integer AW      = 49,
-    parameter integer IDW     = 6
+    parameter integer IDW     = 6,
+    parameter integer NB      = 1                // max batch: activation vectors per weight pass (1, 2, 4)
 ) (
     (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF S_AXI:m0_axi:m1_axi:m2_axi:m3_axi:aux_axi, ASSOCIATED_RESET S_AXI_ARESETN" *)
     input  wire                          S_AXI_ACLK,
@@ -302,7 +331,7 @@ module gemv_axi #(
     localparam integer MP        = 4;                    // master port groups in the port list
     localparam integer RES_WORDS = 1 << RES_LG;
     localparam [31:0]  IDCODE_V  = 32'h47454D56;         // "GEMV"
-    localparam [7:0]   VERSION_V = 8'd2;
+    localparam [7:0]   VERSION_V = 8'd3;
 
     wire clk = S_AXI_ACLK;
     (* max_fanout = 200 *) reg rst_h;                    // hard reset, registered
@@ -383,6 +412,7 @@ module gemv_axi #(
     reg [31:0]          r_rows, r_groups, r_pad, r_bursts, r_chunk, r_step, r_maxout, r_res_start;
     reg [31:0]          r_base_lo, r_base_hi, r_act_group, r_act_exp;
     reg [31:0]          r_mode, r_act_addr_lo, r_act_addr_hi, r_res_addr_lo, r_res_addr_hi;
+    reg [31:0]          r_batch;
     reg [NPORTS*32-1:0] r_port_off;
     reg [1279:0]        r_act_mant;
 
@@ -400,6 +430,7 @@ module gemv_axi #(
             r_port_off <= {(NPORTS*32){1'b0}};
             r_mode <= 32'd0; r_act_addr_lo <= 32'd0; r_act_addr_hi <= 32'd0;
             r_res_addr_lo <= 32'd0; r_res_addr_hi <= 32'd0;
+            r_batch <= 32'd1;
         end else begin
             if (wr_lo) begin
                 case (wsub)
@@ -414,6 +445,7 @@ module gemv_axi #(
                     6'd12: r_base_lo   <= wr_data;
                     6'd13: r_base_hi   <= wr_data;
                     6'd14: r_mode      <= wr_data;
+                    6'd15: r_batch     <= wr_data;
                     6'd24: r_act_group <= wr_data;
                     6'd25: r_act_exp   <= wr_data;
                     6'd28: r_act_addr_lo <= wr_data;
@@ -453,8 +485,8 @@ module gemv_axi #(
                                                          // cycle still wins: the reset branches below)
     wire busy_now = run_busy | go_pend | (|srst_sr) | ~all_idle_r;
 
-    reg  c_v, c_l;                                       // registered result stream
-    reg [31:0] c_d;
+    reg  c_v, c_l;                                       // registered result stream (one row per c_v)
+    reg [NB*32-1:0] c_d;                                 // element 0 = c_d[31:0]: the version-2 stream
 
     always @(posedge clk) begin
         cb_r       <= core_busy;
@@ -488,6 +520,19 @@ module gemv_axi #(
         end
     end
 
+    // BATCH clamped to 1..NB (registered: the register is written cycles before GO). NB = 1:
+    // a constant, so everything batch-specific below folds away.
+    wire [2:0] batch_w;
+    generate
+        if (NB == 1) begin : bw1
+            assign batch_w = 3'd1;
+        end else begin : bwn
+            assign batch_w = (r_batch == 32'd0) ? 3'd1 : ((r_batch > NB) ? NB[2:0] : r_batch[2:0]);
+        end
+    endgenerate
+    reg [2:0] batch_c;
+    always @(posedge clk) batch_c <= batch_w;
+
     // registered control fan-out
     // start: 8 cycles after go_acc (flush over), or -- MODE.ACT_DMA -- when the activation
     // fetch that is started at that point has committed its last record
@@ -502,7 +547,8 @@ module gemv_axi #(
         if (rst_h || srst_any || start_r) act_sel <= 1'b0;
         else if (seq[6] && q_mode[0])     act_sel <= 1'b1;
         clr_q    <= rst_h | srst_any | go_acc;
-        act_we_r <= wr_commit & ~run_busy & ~go_pend & ~srst_any & ~rst_h & (r_act_group < GMAX);
+        act_we_r <= wr_commit & ~run_busy & ~go_pend & ~srst_any & ~rst_h & (r_act_group[31:10] == 22'd0)
+                    & (r_act_group[9:8] < NB) & (r_act_group[7:0] < GMAX);
     end
 
     // configuration snapshot (what the core and the masters see)
@@ -511,8 +557,12 @@ module gemv_axi #(
     reg [8:0]           q_chunk;
     reg [NPORTS*AW-1:0] q_base;
     reg [AW-1:0]        q_act_addr, q_res_addr;
+    reg [2:0]           q_batch;                         // batch elements of this run, 1..NB
+    reg [1:0]           q_bm1;                           // q_batch - 1
+    reg [NB-1:0]        q_ben;                           // element b is part of this run
+    reg                 ser_on;                          // RES_DMA with BATCH > 1: rows are serialised
     wire [AW-1:0]       base_w = {r_base_hi[AW-33:0], r_base_lo};
-    integer             qk;
+    integer             qk, qb;
     always @(posedge clk) begin
         if (go_acc) begin
             q_rows   <= r_rows;
@@ -525,6 +575,10 @@ module gemv_axi #(
             q_mode     <= r_mode[2:0];
             q_act_addr <= {r_act_addr_hi[AW-33:0], r_act_addr_lo};
             q_res_addr <= {r_res_addr_hi[AW-33:0], r_res_addr_lo};
+            q_batch    <= batch_c;
+            q_bm1      <= batch_c[1:0] - 2'd1;
+            ser_on     <= r_mode[1] & (batch_c != 3'd1);
+            for (qb = 0; qb < NB; qb = qb + 1) q_ben[qb] <= (batch_c > qb);
             for (qk = 0; qk < NPORTS; qk = qk + 1)
                 q_base[qk*AW +: AW] <= base_w + {{(AW-32){1'b0}}, r_port_off[qk*32 +: 32]};
         end
@@ -574,26 +628,31 @@ module gemv_axi #(
 
     // ------------------------------------------------------------ the engine
     wire              c_mv, c_ml;
-    wire [31:0]       c_md;
+    wire [NB*32-1:0]  c_md;                              // batch element b in bits [32b +: 32]
     wire              dbg_pop, dbg_stall_in, dbg_stall_out;
     wire [NPORTS-1:0] dbg_empty;
     // activation write port: the ACT_* registers, or the aux DMA while it fetches
     wire                  aux_act_we;
+    wire [1:0]            aux_act_bank;
     wire [7:0]            aux_act_group;
     wire [1279:0]         aux_act_mant;
     wire signed [EXW-1:0] aux_act_exp;
     wire                  core_act_we    = act_we_r | aux_act_we;       // never both: act_we_r needs !run_busy
+    wire [1:0]            core_act_bank  = act_sel ? aux_act_bank  : r_act_group[9:8];
     wire [7:0]            core_act_group = act_sel ? aux_act_group : r_act_group[7:0];
     wire [1279:0]         core_act_mant  = act_sel ? aux_act_mant  : r_act_mant;
     wire [EXW-1:0]        core_act_exp   = act_sel ? aux_act_exp   : r_act_exp[EXW-1:0];
     // result stream: always taken, except when the DDR write FIFO is nearly full (RES_DMA only)
-    wire                  core_m_rdy = aux_res_room;
+    // or (RES_DMA, BATCH > 1) while the elements of the previous row are being serialised
+    wire                  m_hold_w;
+    wire                  core_m_rdy = aux_res_room & ~m_hold_w;
 
-    gemv_stream #(.NPORTS(NPORTS), .GMAX(GMAX), .EXW(EXW)) u_core (
+    gemv_stream #(.NPORTS(NPORTS), .GMAX(GMAX), .EXW(EXW), .NB(NB)) u_core (
         .clk(clk), .rst(core_rst),
-        .start(start_r), .cfg_groups(q_groups), .cfg_rows(q_rows), .cfg_pad(q_pad), .busy(core_busy),
-        .act_we(core_act_we), .act_group(core_act_group), .act_mant(core_act_mant),
-        .act_exp(core_act_exp),
+        .start(start_r), .cfg_groups(q_groups), .cfg_rows(q_rows), .cfg_pad(q_pad), .cfg_batch(q_batch),
+        .busy(core_busy),
+        .act_we(core_act_we), .act_bank(core_act_bank), .act_group(core_act_group),
+        .act_mant(core_act_mant), .act_exp(core_act_exp),
         .s_valid(st_valid), .s_ready(st_ready), .s_data(st_data),
         .m_valid(c_mv), .m_ready(core_m_rdy), .m_data(c_md), .m_last(c_ml),
         .dbg_pop(dbg_pop), .dbg_stall_in(dbg_stall_in), .dbg_stall_out(dbg_stall_out),
@@ -606,13 +665,46 @@ module gemv_axi #(
         c_d <= c_md;
     end
 
+    // ------------------------------------------------------------ row serialiser (version 3)
+    // The DDR writer takes one 32-bit word per cycle. Element 0 of a row goes to it in the
+    // c_v cycle (exactly the version-2 stream); with RES_DMA and BATCH > 1 (ser_on) elements
+    // 1..BATCH-1 follow in the next BATCH-1 cycles, and the core is not asked for another row
+    // meanwhile (m_hold: low for BATCH-1 cycles after every row handshake). res_last marks the
+    // last element of the last row.
+    reg             m_hold, ser_v, ser_l;
+    reg [1:0]       m_hcnt, ser_left;
+    reg [NB*32-1:0] ser_sh;
+    wire            row_take = c_mv & core_m_rdy;
+    always @(posedge clk) begin
+        if (core_rst) begin
+            m_hold <= 1'b0; ser_v <= 1'b0;
+        end else begin
+            if (row_take && ser_on) begin m_hold <= 1'b1; m_hcnt <= q_bm1; end
+            else if (m_hold)        begin m_hold <= (m_hcnt != 2'd1); m_hcnt <= m_hcnt - 2'd1; end
+            if (c_v && ser_on)      begin ser_v <= 1'b1; ser_left <= q_bm1; end
+            else if (ser_v)         begin ser_v <= (ser_left != 2'd1); ser_left <= ser_left - 2'd1; end
+        end
+        if (c_v) begin
+            ser_sh <= c_d >> 32; ser_l <= c_l;
+        end else if (ser_v) begin
+            ser_sh <= ser_sh >> 32;
+        end
+    end
+    assign m_hold_w = (NB > 1) ? m_hold : 1'b0;
+    wire        res_v_w    = c_v | ser_v;
+    wire [31:0] res_d_w    = c_v ? c_d[31:0] : ser_sh[31:0];
+    wire        res_last_w = c_v ? (c_l & ~ser_on) : (ser_l & (ser_left == 2'd1));
+
     // ------------------------------------------------------------ aux DMA (version 2)
     axi_aux_dma #(.AW(AW), .IDW(IDW), .EXW(EXW), .GMAX(GMAX)) u_aux (
         .clk(clk), .rst(rst_h), .flush(flush_p),
-        .act_go(act_go_r), .act_groups(q_groups), .act_addr(q_act_addr), .act_done(aux_act_done),
-        .act_we(aux_act_we), .act_group(aux_act_group), .act_mant(aux_act_mant), .act_exp(aux_act_exp),
+        .act_go(act_go_r), .act_groups(q_groups), .act_batch(q_batch), .act_addr(q_act_addr),
+        .act_done(aux_act_done),
+        .act_we(aux_act_we), .act_bank(aux_act_bank), .act_group(aux_act_group), .act_mant(aux_act_mant),
+        .act_exp(aux_act_exp),
         .res_en(res_en_r), .res_start(start_r), .res_addr(q_res_addr),
-        .res_v(c_v), .res_d(c_d), .res_last(c_l), .res_room(aux_res_room), .res_done(aux_res_done),
+        .res_v(res_v_w), .res_d(res_d_w), .res_last(res_last_w),
+        .res_room(aux_res_room), .res_done(aux_res_done),
         .idle(aux_idle), .err_evt(aux_err_evt),
         .awid(aux_axi_awid), .awaddr(aux_axi_awaddr), .awlen(aux_axi_awlen), .awsize(aux_axi_awsize),
         .awburst(aux_axi_awburst), .awlock(aux_axi_awlock), .awcache(aux_axi_awcache),
@@ -632,7 +724,7 @@ module gemv_axi #(
     // 2^(RES_LG - 10) separate RAMs of 1024 x 32 (one RAMB36 each), every one with its own
     // output register; the bank mux is registered again (cq3). Nothing is cascaded.
     localparam integer BANK_LG = (RES_LG > 10) ? 10 : RES_LG;
-    localparam integer NB      = 1 << (RES_LG - BANK_LG);
+    localparam integer NWB     = 1 << (RES_LG - BANK_LG);
     reg [31:0]       skip_left;
     reg              skip_z;
     reg [RES_LG:0]   wptr;
@@ -641,7 +733,8 @@ module gemv_axi #(
     reg [31:0]       cw_data;
     reg [31:0]       rows_done, x_or, sum_lo, sum_hi;
     reg              sum_c;
-    wire [32:0]      sum33 = {1'b0, sum_lo} + {1'b0, c_d};
+    wire [31:0]      c_d0  = c_d[31:0];                  // batch element 0: window, SUM / XOR
+    wire [32:0]      sum33 = {1'b0, sum_lo} + {1'b0, c_d0};
     always @(posedge clk) begin
         if (go_acc) begin
             skip_left <= r_res_start; skip_z <= (r_res_start == 32'd0); wptr <= {(RES_LG+1){1'b0}};
@@ -654,14 +747,14 @@ module gemv_axi #(
         end
         cw_we   <= c_v & skip_z & ~wptr[RES_LG] & ~clr_q & ~q_mode[2];
         cw_addr <= wptr[RES_LG-1:0];
-        cw_data <= c_d;
+        cw_data <= c_d0;
 
         if (clr_q) begin
             rows_done <= 32'd0; x_or <= 32'd0; sum_lo <= 32'd0; sum_hi <= 32'd0; sum_c <= 1'b0;
         end else begin
             if (c_v) begin
                 rows_done <= rows_done + 32'd1;
-                x_or      <= x_or ^ c_d;
+                x_or      <= x_or ^ c_d0;
                 sum_lo    <= sum33[31:0];
             end
             sum_c <= c_v & sum33[32];
@@ -672,10 +765,10 @@ module gemv_axi #(
     reg  [14:0]       rd_idx;                            // AXI-Lite read address [16:2]
     wire [RES_LG:0]   cw_bank_w = {1'b0, cw_addr} >> BANK_LG;
     wire [RES_LG:0]   rd_bank_w = {1'b0, rd_idx[RES_LG-1:0]} >> BANK_LG;
-    reg  [NB*32-1:0]  cq2_all;
+    reg  [NWB*32-1:0] cq2_all;
     genvar gb;
     generate
-        for (gb = 0; gb < NB; gb = gb + 1) begin : bank
+        for (gb = 0; gb < NWB; gb = gb + 1) begin : bank
             (* ram_style = "block" *) reg [31:0] mem [0:(1<<BANK_LG)-1];
             reg [31:0] q1;
             always @(posedge clk) begin
@@ -689,8 +782,49 @@ module gemv_axi #(
     always @(posedge clk) cq3 <= cq2_all[rd_bank_w*32 +: 32];
 
     // ------------------------------------------------------------ argmax (version 2)
-    wire [31:0] amax_idx, amax_val;
-    gemv_argmax u_argmax (.clk(clk), .clr(clr_q), .v(c_v), .d(c_d), .idx(amax_idx), .val(amax_val));
+    // one per batch element (version 3); element 0 is the version-2 ARGMAX_IDX / ARGMAX_VAL.
+    // An element that is not part of the run sees no rows and reads 0 / 0.
+    wire [NB*32-1:0] amax_idx_all, amax_val_all;
+    genvar ge;
+    generate
+        for (ge = 0; ge < NB; ge = ge + 1) begin : amax
+            wire en = (ge == 0) ? 1'b1 : q_ben[ge];
+            gemv_argmax u (.clk(clk), .clr(clr_q), .v(c_v & en), .d(c_d[ge*32 +: 32]),
+                           .idx(amax_idx_all[ge*32 +: 32]), .val(amax_val_all[ge*32 +: 32]));
+        end
+    endgenerate
+    wire [31:0] amax_idx = amax_idx_all[31:0];
+    wire [31:0] amax_val = amax_val_all[31:0];
+
+    // ------------------------------------------------------------ per-element checksums (version 3)
+    // CHK_B + 16*b: SUM / XOR over element b's result words. Element 0 = the SUM / XOR above.
+    wire [NB*32-1:0] bsum_lo, bsum_hi, bx_or;
+    assign bsum_lo[31:0] = sum_lo;
+    assign bsum_hi[31:0] = sum_hi;
+    assign bx_or[31:0]   = x_or;
+    generate
+        for (ge = 1; ge < NB; ge = ge + 1) begin : chk
+            reg  [31:0] sl, sh, xo;
+            reg         sc;
+            wire [31:0] d   = c_d[ge*32 +: 32];
+            wire [32:0] s33 = {1'b0, sl} + {1'b0, d};
+            always @(posedge clk) begin
+                if (clr_q) begin
+                    sl <= 32'd0; sh <= 32'd0; xo <= 32'd0; sc <= 1'b0;
+                end else begin
+                    if (c_v && q_ben[ge]) begin
+                        xo <= xo ^ d;
+                        sl <= s33[31:0];
+                    end
+                    sc <= c_v & q_ben[ge] & s33[32];
+                    if (sc) sh <= sh + 32'd1;
+                end
+            end
+            assign bsum_lo[ge*32 +: 32] = sl;
+            assign bsum_hi[ge*32 +: 32] = sh;
+            assign bx_or[ge*32 +: 32]   = xo;
+        end
+    endgenerate
 
     // ------------------------------------------------------------ counters
     reg        act_on, res_on;
@@ -774,11 +908,11 @@ module gemv_axi #(
         end
     endgenerate
     wire [31:0] status_w = {27'd0, aux_err_st, ovf_st, axi_err_st, done, busy_now};
-    wire [31:0] params_w = {VERSION_V, RES_LG[7:0], GMAX[7:0], 4'd0, NPORTS[3:0]};
+    wire [31:0] params_w = {VERSION_V, RES_LG[7:0], GMAX[7:0], NB[3:0], NPORTS[3:0]};
 
     reg [3:0]  rd_sr;
     reg        rd_busy;
-    reg [31:0] g_cfg, g_act, g_cnt, g_port, g_all;
+    reg [31:0] g_cfg, g_act, g_cnt, g_port, g_bat, g_all;
     assign S_AXI_RRESP = 2'b00;
     always @(posedge clk) begin
         if (rst_h) begin
@@ -798,7 +932,7 @@ module gemv_axi #(
         end
 
         // stage 1: one registered mux per register group (zero when not addressed)
-        g_cfg <= 32'd0; g_act <= 32'd0; g_cnt <= 32'd0; g_port <= 32'd0;
+        g_cfg <= 32'd0; g_act <= 32'd0; g_cnt <= 32'd0; g_port <= 32'd0; g_bat <= 32'd0;
         if (rd_idx[14:6] == 9'd0) begin
             case (rd_idx[5:0])
                 6'd1:  g_cfg <= status_w;
@@ -815,6 +949,7 @@ module gemv_axi #(
                 6'd12: g_cfg <= r_base_lo;
                 6'd13: g_cfg <= r_base_hi;
                 6'd14: g_cfg <= r_mode;
+                6'd15: g_cfg <= r_batch;
                 6'd24: g_cfg <= r_act_group;
                 6'd25: g_cfg <= r_act_exp;
                 6'd28: g_cfg <= r_act_addr_lo;
@@ -851,9 +986,23 @@ module gemv_axi #(
         end
         if (rd_idx[14:6] == 9'd3 && rd_idx[5:0] < NPORTS*8)
             g_port <= pregs[rd_idx[5:0]*32 +: 32];
+        // (version 3) per batch element: 0x280 + 8*b = argmax index, value; 0x2C0 + 16*b = SUM, XOR
+        if (rd_idx[14:6] == 9'd2 && rd_idx[5]) begin
+            if (!rd_idx[4]) begin
+                if (rd_idx[3:1] < NB)
+                    g_bat <= rd_idx[0] ? amax_val_all[rd_idx[3:1]*32 +: 32] : amax_idx_all[rd_idx[3:1]*32 +: 32];
+            end else if (rd_idx[3:2] < NB) begin
+                case (rd_idx[1:0])
+                    2'd0: g_bat <= bsum_lo[rd_idx[3:2]*32 +: 32];
+                    2'd1: g_bat <= bsum_hi[rd_idx[3:2]*32 +: 32];
+                    2'd2: g_bat <= bx_or[rd_idx[3:2]*32 +: 32];
+                    default: ;
+                endcase
+            end
+        end
 
         // stage 2 (the window RAMs' output registers sit in the bank generate above)
-        g_all <= g_cfg | g_act | g_cnt | g_port;
+        g_all <= g_cfg | g_act | g_cnt | g_port | g_bat;
 
         // stage 4 (stage 3 = cq3, the registered window bank mux; rd_idx is stable throughout)
         if (rd_sr[3]) S_AXI_RDATA <= rd_idx[14] ? cq3 : g_all;

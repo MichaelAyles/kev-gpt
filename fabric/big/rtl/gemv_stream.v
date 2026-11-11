@@ -4,8 +4,8 @@
 // Consumes the weight stream written by fabric/big/pack_weights.py (its module
 // docstring is the normative stream format) from NPORTS 128-bit valid/ready
 // inputs — the AXI R channels of the port-interleaved read masters — and emits
-// one IEEE fp32 per output row, in row order. Arithmetic is exactly
-// fabric/big/ref/fabric_ref.py: ExactBfpGemv.mm:
+// one IEEE fp32 per output row AND PER BATCH ELEMENT, in row order. Arithmetic is
+// exactly fabric/big/ref/fabric_ref.py: ExactBfpGemv.mm:
 //
 //   per 128-group:  inner = sum_j sign_j * q_j           (17-bit signed, exact)
 //                   term  = inner * m_d                  (fp16 scale = m_d * 2^e_d,
@@ -27,9 +27,10 @@
 // consecutive groups, so every lane sees at most one group per cycle and each
 // lane's activation bank is read by address, never muxed):
 //
-//   port skid buffers -> tuple pop + beat classify (S0) -> sign/scale steer +
-//   activation read (S1) -> 7-level add/sub sign tree (one LUT + carry per bit,
-//   registered per TREE_REGMASK) || fp16 decode + shift count -> 17x12 multiply
+//   port skid buffers -> tuple pop + beat classify (S0) [-> S0R, NB > 1: one
+//   registered copy per batch element] -> sign/scale steer + activation read
+//   (S1) -> 7-level add/sub sign tree (one LUT + carry per bit, registered per
+//   TREE_REGMASK) || fp16 decode + shift count -> 17x12 multiply
 //   (3 regs: DSP48E2 A/B, M, P) -> 2-stage 64-bit shifter -> lane sum
 //   (ceil(log2 NPORTS) stages) -> 64-bit row accumulator -> 7-stage
 //   int64 -> fp32 RNE -> output FIFO.
@@ -38,29 +39,76 @@
 // a +/- b, and the root's pending sign is folded into the sign of the scale
 // mantissa, so "sum of +-q" costs exactly a plain adder tree.
 //
+// BATCH (parameter NB = 1, 2 or 4; run-time cfg_batch = 1..NB). The weight stream
+// is the bottleneck (DDR bandwidth), so ONE pass over it can serve up to NB
+// activation vectors -- NB token positions: speculative decoding (R4), prompt
+// prefill. Everything that depends only on the weights is built once: skids,
+// tuple pop, beat classify, scale beat hold / pick, fp16 decode, the shift-count
+// base e_d + 69. Everything that depends on the activation exists NB times: the
+// activation banks (mantissas AND e_x: the shift count is e_d + e_x + 40 and e_x
+// is per element), the sign trees, the multipliers, the shifters, the lane sums,
+// the row accumulators and the fp32 converters. Element b of a row is, bit for
+// bit, the word the single-vector engine produces for activation b alone; it is
+// in m_data[32b +: 32], all elements of a row in the same m_valid cycle.
+// Elements >= cfg_batch are NOT part of the contract and may read anything (as
+// built, their group valids are gated off, so they convert a zero accumulator
+// and read +0.0 whatever their banks hold; do not rely on it). Element 0 is
+// always on. NB = 1 is the single-vector engine: same pipeline, same latency
+// (cfg_batch is ignored, act_bank must be 0).
+//   Fan-out (NB > 1): every batch element has its own REGISTERED copy of the
+// popped tuple, of the sign-beat steering select and of the bank read addresses
+// (stage S0R, one extra pipeline stage; `keep`, so synthesis cannot merge the
+// copies), its own registered copy of the activation write port, and its own
+// accumulator enable / clear. No stage of the single-vector pipeline gained a
+// logic level; copy 0 of S0R carries the load stage 0 carried before.
+//
 // Back-pressure: the datapath never stalls. A tuple is popped only when every
 // port has a beat and an output credit is free (one credit per output-FIFO
 // slot, taken when a row's last tuple is popped, returned when its result
 // leaves), so the FIFO cannot overflow whatever m_ready does.
 //
-// Latency: tuple pop -> m_valid is 16 + TL + LS cycles (TL = registered tree
-// levels, LS = ceil(log2 NPORTS)) = 25 at the defaults, plus one cycle through
-// the input skid. MEASURED in sim: start -> !busy = tuples + 26 with no stalls.
+// Latency: tuple pop -> m_valid is 16 + TL + LS + REP cycles (TL = registered
+// tree levels, LS = ceil(log2 NPORTS), REP = 1 if NB > 1 else 0: stage S0R) = 25
+// at the defaults (26 with NB > 1), plus one cycle through the input skid.
+// MEASURED in sim: start -> !busy = tuples + 26 with no stalls (NB = 1), + 27
+// (NB = 2, 4).
 //
-// Intended resources at NPORTS = 3, GMAX = 96 (DERIVED by counting; NOT yet
-// synthesised -- tcl/ooc_gemv_stream.tcl is the run that turns this into a
-// PROJECTED number): 3 DSP48E2 (one 17x12 per lane); sign trees 3 x ~1.5k LUT
-// (1,517 add/sub bits each, one LUT + carry per bit); activation banks as
-// distributed RAM, 3 x 1280 b x 32 words ~ 2.2k LUT; steering, shifters, lane
-// sum, accumulator, fp32 convert ~ 2k LUT. About 9k LUT / 12k FF / 3 DSP /
-// 0 BRAM, i.e. ~8% of the K26's LUTs.
+// Resources at NPORTS = 3, GMAX = 96.
+//   NB = 1, PROJECTED (OOC place + route at 3.0 ns, results/ooc_gemv_stream.txt):
+//     9,318 LUT (7,015 logic + 2,303 LUT RAM) / 13,297 FF / 823 CARRY8 / 6 DSP48E2
+//     (two per 17x12 multiply as inferred) / 0 BRAM, WNS +0.197 ns.
+//   NB = 2 and 4, DERIVED by counting from that run (NOT synthesised):
+//     per batch element: 3 sign trees (1,517 add/sub bits each) ~ 4.6k LUT,
+//       3 x 128 sign-beat mux LUTs, 3 shifters ~ 0.75k, lane sum + accumulator +
+//       fp32 convert ~ 0.7k, i.e. ~6.5k logic LUT; 3 banks x 1280 b x 32 words =
+//       2.3k LUT RAM; ~10.7k FF (trees 4.9k, bank read registers 3.8k, sign beats,
+//       multiply / shift / sum / convert) + (NB > 1) the S0R copy 0.4k FF and the
+//       write-port copy 1.3k FF = ~12.4k FF; 6 DSP48E2.
+//     shared: skids, front end, scale side, write port, output FIFO ~ 0.5k LUT,
+//       ~2.6k FF.
+//     NB = 2: ~18k LUT (13.5k logic + 4.6k LUT RAM, 15% of the K26) / ~27k FF
+//             (12%) / 12 DSP48E2 / 0 BRAM.
+//     NB = 4: ~36k LUT (26.5k logic + 9.2k LUT RAM = 16% of the LUT-RAM-capable
+//             LUTs; 30% of the K26) / ~52k FF (22%) / 24 DSP48E2 / 0 BRAM.
+//   The banks cannot move to block RAM (1280 b x 12 banks = 216 RAMB36 > 144).
+//   Timing at 3.0 ns is NOT known for NB > 1: per copy the paths are the
+//   single-vector ones (the two that set the single-vector slack, both > 90%
+//   routing: steering select -> 128 sign mux LUTs, OOC +0.197 ns; bank read
+//   address -> 1280 b of LUT RAM -> read register, the worst path of the board
+//   build, results/impl_gemv_axi_v2.txt), but 4 copies are 30% of the device and
+//   must all sit close to the three skid outputs; expect the S0 -> S0R nets
+//   (fan-out NB) and the routing of each copy's steering / read address to its
+//   own lanes to be the tight ones.
 //
 // Host contract:
 //   * load the activation (act_we: one 1280-bit word of 128 10-bit two's
 //     complement mantissas, weight j in bits [10j +: 10], plus the group's signed
-//     BFP exponent) for groups 0..G-1 while !busy;
+//     BFP exponent) for groups 0..G-1 OF EVERY BATCH ELEMENT 0..cfg_batch-1
+//     (act_bank = element) while !busy. A bank keeps its contents until it is
+//     written again, across runs and across cfg_batch changes;
 //   * pulse start with cfg_groups = G (1..GMAX), cfg_rows = R (>= 1), cfg_pad =
-//     pad tuples to discard after the matrix (stripe alignment; usually 0);
+//     pad tuples to discard after the matrix (stripe alignment; usually 0),
+//     cfg_batch = elements in use (1..NB);
 //   * busy falls once the last row has left m_* and the pad is consumed. The
 //     input streams are untouched outside a run, so matrices follow each other
 //     on the same streams with no gap.
@@ -389,7 +437,8 @@ module gemv_stream #(
     parameter integer EXW           = 9,                // activation exponent width (signed)
     parameter [6:0]   TREE_REGMASK  = 7'b1111111,       // sign-tree levels that are registered
     parameter integer OFIFO_LG      = 4,                // log2 output FIFO depth (= credits)
-    parameter         ACT_RAM_STYLE = "distributed"
+    parameter         ACT_RAM_STYLE = "distributed",
+    parameter integer NB            = 1                 // max batch (activation vectors per weight pass): 1, 2, 4
 ) (
     input  wire                  clk,
     input  wire                  rst,
@@ -398,9 +447,12 @@ module gemv_stream #(
     input  wire [7:0]            cfg_groups,            // G, 1..GMAX
     input  wire [31:0]           cfg_rows,              // R >= 1
     input  wire [31:0]           cfg_pad,               // pad tuples to discard after the matrix
+    input  wire [2:0]            cfg_batch,             // batch elements in use, 1..NB (latched at start;
+                                                        // element 0 is always on, so NB = 1 ignores it)
     output wire                  busy,
     // activation load (while !busy)
     input  wire                  act_we,
+    input  wire [1:0]            act_bank,              // batch element 0..NB-1 (>= NB: the write is ignored)
     input  wire [7:0]            act_group,
     input  wire [1279:0]         act_mant,
     input  wire signed [EXW-1:0] act_exp,
@@ -408,10 +460,10 @@ module gemv_stream #(
     input  wire [NPORTS-1:0]     s_valid,
     output wire [NPORTS-1:0]     s_ready,
     input  wire [NPORTS*128-1:0] s_data,
-    // result stream: one fp32 per row, row order
+    // result stream: one word per row, row order; batch element b in bits [32b +: 32]
     output wire                  m_valid,
     input  wire                  m_ready,
-    output wire [31:0]           m_data,
+    output wire [NB*32-1:0]      m_data,
     output wire                  m_last,                // last row of the matrix
     // telemetry taps for the board wrapper (gemv_axi): registered copies of the tuple
     // handshake state, one cycle late. No functional effect; leave unconnected otherwise.
@@ -429,6 +481,7 @@ module gemv_stream #(
                              + TREE_REGMASK[4] + TREE_REGMASK[5] + TREE_REGMASK[6];
     localparam integer KW    = ((EXW > 8) ? EXW : 8) + 1;            // shift-count adder width
     localparam [3:0]   N9    = NPORTS % 9;
+    localparam integer REP   = (NB > 1) ? 1 : 0;                     // the per-copy fan-out stage S0R exists
 
     // ------------------------------------------------------------ input skid
     wire [NPORTS-1:0]     k_valid;
@@ -457,6 +510,7 @@ module gemv_stream #(
     reg [31:0]          rows_left, pad_left;
     reg [OFIFO_LG:0]    cred;
     reg                 out_pending;
+    reg [NB-1:0]        ben;        // batch element in use this run (latched at start)
 
     reg [NPORTS-1:0]    d_bv;       // lane has a group in this tuple
     reg [NPORTS*BW-1:0] d_bsrc;     // which port carries it
@@ -514,7 +568,7 @@ module gemv_stream #(
     reg [BW-1:0]         s0_sp;
     reg [NPORTS*AW-1:0]  s0_badr;
 
-    integer m_i;
+    integer m_i, b_i;
     always @(posedge clk) begin
         if (rst) begin
             st <= ST_IDLE; pos <= 0; rb <= 0; p9 <= 0; g8 <= 0; gm <= 0; badr <= 0;
@@ -558,6 +612,9 @@ module gemv_stream #(
             s0_badr  <= badr;
             s0_rl    <= row_end; s0_ml <= mat_end;
         end
+        // batch elements of this run: element 0 always, element b iff b < cfg_batch
+        if (st == ST_IDLE && start)
+            for (b_i = 0; b_i < NB; b_i = b_i + 1) ben[b_i] <= (b_i == 0) || (cfg_batch > b_i);
     end
     assign busy = (st != ST_IDLE) | out_pending;
 
@@ -571,6 +628,64 @@ module gemv_stream #(
             dbg_empty     <= (st != ST_IDLE) ? ~k_valid : {NPORTS{1'b0}};
         end
     end
+
+    // ------------------------------------------------------------ stage S0R: one copy per batch element
+    // NB > 1 only (REP = 1; with NB = 1 these are wires and the pipeline is the single-vector one).
+    // The single-vector core's worst path is the fan-out of the sign-beat steering select
+    // (s0_bsrc -> 128 mux LUTs per lane). NB copies of the datapath must not hang on the same
+    // registers, so every batch element gets its OWN registered copy of the tuple, of the
+    // steering select and of the bank read addresses (keep: synthesis must not merge them
+    // back into one), and stage 1 of copy b reads only copy b. The scale side is shared and
+    // taps copy 0, so copy 0 carries exactly the load the single-vector stage 0 carries.
+    // The batch enable is folded into the copy's group valids here (no gate later on).
+    wire [NB*NPORTS*128-1:0] sr_data;
+    wire [NB*NPORTS*BW-1:0]  sr_bsrc;
+    wire [NB*NPORTS*AW-1:0]  sr_badr;
+    wire [NB*NPORTS-1:0]     sr_bv;         // lane has a group AND the batch element is in use
+    wire                     sr_v, sr_rl, sr_ml, sr_hs;
+    wire [NPORTS-1:0]        sr_bnew;
+    wire [NPORTS*3-1:0]      sr_bsidx;
+    wire [BW-1:0]            sr_sp;
+    genvar gb;
+    generate
+        if (REP == 0) begin : rep0
+            assign sr_data = s0_data;  assign sr_bsrc = s0_bsrc;  assign sr_badr = s0_badr;
+            assign sr_bv   = {NPORTS{s0_v}} & s0_bv;
+            assign sr_v    = s0_v;     assign sr_rl = s0_rl;      assign sr_ml = s0_ml;
+            assign sr_hs   = s0_hs;    assign sr_bnew = s0_bnew;  assign sr_bsidx = s0_bsidx;
+            assign sr_sp   = s0_sp;
+        end else begin : rep1
+            for (gb = 0; gb < NB; gb = gb + 1) begin : cp
+                (* keep = "true" *) reg [NPORTS*128-1:0] data;
+                (* keep = "true" *) reg [NPORTS*BW-1:0]  bsrc;
+                (* keep = "true" *) reg [NPORTS*AW-1:0]  badr_c;
+                (* keep = "true" *) reg [NPORTS-1:0]     bv;
+                always @(posedge clk) begin
+                    data   <= s0_data;
+                    bsrc   <= s0_bsrc;
+                    badr_c <= s0_badr;
+                    if (rst) bv <= {NPORTS{1'b0}};
+                    else     bv <= {NPORTS{s0_v & ben[gb]}} & s0_bv;
+                end
+                assign sr_data[gb*NPORTS*128 +: NPORTS*128] = data;
+                assign sr_bsrc[gb*NPORTS*BW +: NPORTS*BW]   = bsrc;
+                assign sr_badr[gb*NPORTS*AW +: NPORTS*AW]   = badr_c;
+                assign sr_bv[gb*NPORTS +: NPORTS]           = bv;
+            end
+            reg                r_v, r_rl, r_ml, r_hs;
+            reg [NPORTS-1:0]   r_bnew;
+            reg [NPORTS*3-1:0] r_bsidx;
+            reg [BW-1:0]       r_sp;
+            always @(posedge clk) begin
+                if (rst) r_v <= 1'b0; else r_v <= s0_v;
+                r_rl <= s0_rl; r_ml <= s0_ml; r_hs <= s0_hs;
+                r_bnew <= s0_bnew; r_bsidx <= s0_bsidx; r_sp <= s0_sp;
+            end
+            assign sr_v = r_v;   assign sr_rl = r_rl;      assign sr_ml = r_ml;
+            assign sr_hs = r_hs; assign sr_bnew = r_bnew;  assign sr_bsidx = r_bsidx;
+            assign sr_sp = r_sp;
+        end
+    endgenerate
 
     // ------------------------------------------------------------ stage 1: steer
     function [15:0] pick16;         // fp16 slot i of a scale beat
@@ -590,167 +705,234 @@ module gemv_stream #(
         end
     endfunction
 
+    wire [NPORTS*128-1:0] sd0 = sr_data[0 +: NPORTS*128];     // copy 0 feeds the (shared) scale side
     reg [127:0] sbeat;              // the scale beat of the stage-0 tuple
     integer     jj;
     always @* begin
         sbeat = 128'd0;
         for (jj = 0; jj < NPORTS; jj = jj + 1)
-            if (s0_sp == jj) sbeat = s0_data[jj*128 +: 128];
+            if (sr_sp == jj) sbeat = sd0[jj*128 +: 128];
     end
     reg [127:0] scur;               // the scale beat held from earlier tuples
-    always @(posedge clk) if (s0_v && s0_hs) scur <= sbeat;
+    always @(posedge clk) if (sr_v && sr_hs) scur <= sbeat;
 
     reg s1_v, s1_rl, s1_ml;
     always @(posedge clk) begin
-        if (rst) s1_v <= 1'b0; else s1_v <= s0_v;
-        s1_rl <= s0_rl; s1_ml <= s0_ml;
+        if (rst) s1_v <= 1'b0; else s1_v <= sr_v;
+        s1_rl <= sr_rl; s1_ml <= sr_ml;
     end
 
     // activation write port (registered; group -> lane = g % NPORTS, word = g / NPORTS)
     reg                  w_we;
-    reg [BW-1:0]         w_bank;
+    reg [1:0]            w_bk;
+    reg [BW-1:0]         w_lane;
     reg [AW-1:0]         w_addr;
     reg [1279:0]         w_mant;
     reg signed [EXW-1:0] w_exp;
     always @(posedge clk) begin
         if (rst) w_we <= 1'b0; else w_we <= act_we;
-        w_bank <= act_group % NPORTS;
+        w_bk   <= act_bank;
+        w_lane <= act_group % NPORTS;
         w_addr <= act_group / NPORTS;
         w_mant <= act_mant;
         w_exp  <= act_exp;
     end
+    // ... and, NB > 1, one more registered copy per batch element (the 1280-bit word would
+    // otherwise fan out to NPORTS * NB banks), with the bank select decoded into its enable
+    wire [NB-1:0]         wb_we;
+    wire [NB*BW-1:0]      wb_lane;
+    wire [NB*AW-1:0]      wb_addr;
+    wire [NB*1280-1:0]    wb_mant;
+    wire [NB*EXW-1:0]     wb_exp;
+    generate
+        if (REP == 0) begin : wrep0
+            assign wb_we = w_we & (w_bk == 2'd0);
+            assign wb_lane = w_lane; assign wb_addr = w_addr; assign wb_mant = w_mant; assign wb_exp = w_exp;
+        end else begin : wrep1
+            for (gb = 0; gb < NB; gb = gb + 1) begin : cp
+                reg                              we;
+                (* keep = "true" *) reg [BW-1:0]   lane_c;
+                (* keep = "true" *) reg [AW-1:0]   addr;
+                (* keep = "true" *) reg [1279:0]   mant;
+                (* keep = "true" *) reg [EXW-1:0]  expo;
+                always @(posedge clk) begin
+                    if (rst) we <= 1'b0; else we <= w_we & (w_bk == gb);
+                    lane_c <= w_lane; addr <= w_addr; mant <= w_mant; expo <= w_exp;
+                end
+                assign wb_we[gb] = we;
+                assign wb_lane[gb*BW +: BW]     = lane_c;
+                assign wb_addr[gb*AW +: AW]     = addr;
+                assign wb_mant[gb*1280 +: 1280] = mant;
+                assign wb_exp[gb*EXW +: EXW]    = expo;
+            end
+        end
+    endgenerate
 
     // ------------------------------------------------------------ lanes
-    wire [NPORTS*64-1:0] terms;
+    // Shared per lane (weight side): the scale pick, the fp16 decode, the shift-count base.
+    // Per batch element: sign beat, activation bank (mantissas + e_x), sign tree, shift
+    // count (e_d + e_x[b] + 40), multiply, shifter, term.
+    wire [NB*NPORTS*64-1:0] terms;
     genvar gm_i;
     generate for (gm_i = 0; gm_i < NPORTS; gm_i = gm_i + 1) begin : lane
-        wire [BW-1:0] src  = s0_bsrc[gm_i*BW +: BW];
-        wire [2:0]    sidx = s0_bsidx[gm_i*3 +: 3];
-        wire [AW-1:0] radr = s0_badr[gm_i*AW +: AW];
-
-        reg [127:0] smux;
-        integer     js;
-        always @* begin
-            smux = 128'd0;
-            for (js = 0; js < NPORTS; js = js + 1)
-                if (src == js) smux = s0_data[js*128 +: 128];
-        end
-        wire [15:0] scsel = s0_bnew[gm_i] ? pick16(sbeat, sidx) : pick16(scur, sidx);
-
-        // activation bank: mantissa word + exponent, synchronous read
-        (* ram_style = ACT_RAM_STYLE *) reg [1279:0]   mem  [0:DEPTH-1];
-        (* ram_style = "distributed" *) reg [EXW-1:0]  emem [0:DEPTH-1];
-        reg [1279:0]         s1_q;
-        reg signed [EXW-1:0] s1_ex;
-        always @(posedge clk) begin
-            if (w_we && w_bank == gm_i) begin
-                mem[w_addr]  <= w_mant;
-                emem[w_addr] <= w_exp;
-            end
-            s1_q  <= mem[radr];
-            s1_ex <= emem[radr];
-        end
-
-        reg         s1_bv;
-        reg [127:0] s1_sign;
+        wire [2:0]  sidx  = sr_bsidx[gm_i*3 +: 3];
+        wire [15:0] scsel = sr_bnew[gm_i] ? pick16(sbeat, sidx) : pick16(scur, sidx);
         reg [15:0]  s1_sc;
-        always @(posedge clk) begin
-            if (rst) s1_bv <= 1'b0; else s1_bv <= s0_v & s0_bv[gm_i];
-            s1_sign <= smux;
-            s1_sc   <= scsel;
-        end
+        always @(posedge clk) s1_sc <= scsel;
 
-        // sign tree: s1 -> root, TL cycles
-        wire [16:0] t_d;
-        wire        t_sg;
-        gs_signtree #(.REGMASK(TREE_REGMASK)) u_tree (
-            .clk(clk), .q(s1_q), .s(s1_sign), .d(t_d), .sg(t_sg));
-
-        // stage 2: fp16 decode + shift count.  k = sh + 29 = e_d + e_x + 69, and
+        // stage 2 (shared part): fp16 decode.  k = sh + 29 = e_d + e_x + 69, and
         // e_d + 69 = (exp5 == 0 ? 45 : exp5 + 44)   (fp16_decompose: e_d = -24 | exp5 - 25)
-        wire [4:0]           ex5   = s1_sc[14:10];
-        wire [6:0]           ebase = (ex5 == 5'd0) ? 7'd45 : ({2'b00, ex5} + 7'd44);
-        wire signed [KW-1:0] ksum  = $signed({1'b0, ebase}) + s1_ex;
-        reg         s2_bv, s2_sgn, s2_zero;
+        wire [4:0]  ex5   = s1_sc[14:10];
+        wire [6:0]  ebase = (ex5 == 5'd0) ? 7'd45 : ({2'b00, ex5} + 7'd44);
+        reg         s2_sgn;
         reg [10:0]  s2_mag;
-        reg [6:0]   s2_k;
         always @(posedge clk) begin
-            if (rst) s2_bv <= 1'b0; else s2_bv <= s1_bv;
-            s2_sgn  <= s1_sc[15];
-            s2_mag  <= {ex5 != 5'd0, s1_sc[9:0]};
-            s2_zero <= (ksum > 92);                         // sh >= 64: nothing lands in 64 bits
-            s2_k    <= (ksum < 0) ? 7'd0 : ksum[6:0];       // sh <= -29: pure sign fill (floor)
+            s2_sgn <= s1_sc[15];
+            s2_mag <= {ex5 != 5'd0, s1_sc[9:0]};
         end
-
-        // align with the tree root
-        wire        r_bv, r_sgn, r_zero;
+        wire        r_sgn;          // aligned with the tree roots
         wire [10:0] r_mag;
-        wire [6:0]  r_k;
-        gs_delay #(.W(1), .D(TL-1), .RST(1)) u_dv (.clk(clk), .rst(rst), .d(s2_bv), .q(r_bv));
-        gs_delay #(.W(20), .D(TL-1)) u_dd (.clk(clk), .rst(rst),
-            .d({s2_sgn, s2_zero, s2_mag, s2_k}), .q({r_sgn, r_zero, r_mag, r_k}));
+        gs_delay #(.W(12), .D(TL-1)) u_ds (.clk(clk), .rst(rst), .d({s2_sgn, s2_mag}), .q({r_sgn, r_mag}));
 
-        // multiply: term = d * (pending sign * m_d); the root's pending sign is
-        // folded into the sign of the scale mantissa (no 17-bit negate)
-        wire               negm = r_sgn ^ ~t_sg;
-        wire signed [11:0] mb   = negm ? -$signed({1'b0, r_mag}) : $signed({1'b0, r_mag});
-        wire signed [28:0] p;
-        gs_mul u_mul (.clk(clk), .a($signed(t_d)), .b(mb), .p(p));
+        for (gb = 0; gb < NB; gb = gb + 1) begin : bat
+            wire [NPORTS*128-1:0] sd   = sr_data[gb*NPORTS*128 +: NPORTS*128];
+            wire [BW-1:0]         src  = sr_bsrc[(gb*NPORTS + gm_i)*BW +: BW];
+            wire [AW-1:0]         radr = sr_badr[(gb*NPORTS + gm_i)*AW +: AW];
 
-        wire       p_bv, p_zero;
-        wire [6:0] p_k;
-        gs_delay #(.W(1), .D(3), .RST(1)) u_pv (.clk(clk), .rst(rst), .d(r_bv), .q(p_bv));
-        gs_delay #(.W(8), .D(3)) u_pd (.clk(clk), .rst(rst), .d({r_zero, r_k}), .q({p_zero, p_k}));
+            reg [127:0] smux;
+            integer     js;
+            always @* begin
+                smux = 128'd0;
+                for (js = 0; js < NPORTS; js = js + 1)
+                    if (src == js) smux = sd[js*128 +: 128];
+            end
 
-        // shifter: out = bits [92:29] of (sext(p) << k), k = 16*ka + kb
-        reg signed [43:0] h_u;
-        reg [2:0]         h_ka;
-        reg               h_gate;
-        always @(posedge clk) begin
-            h_u  <= $signed(p) <<< p_k[3:0];
-            h_ka <= p_k[6:4];
-            if (rst) h_gate <= 1'b0; else h_gate <= p_bv & ~p_zero;
+            // activation bank of (lane, batch element): mantissa word + exponent, synchronous read
+            (* ram_style = ACT_RAM_STYLE *) reg [1279:0]   mem  [0:DEPTH-1];
+            (* ram_style = "distributed" *) reg [EXW-1:0]  emem [0:DEPTH-1];
+            wire [AW-1:0]        wadr = wb_addr[gb*AW +: AW];
+            reg [1279:0]         s1_q;
+            reg signed [EXW-1:0] s1_ex;
+            always @(posedge clk) begin
+                if (wb_we[gb] && wb_lane[gb*BW +: BW] == gm_i) begin
+                    mem[wadr]  <= wb_mant[gb*1280 +: 1280];
+                    emem[wadr] <= wb_exp[gb*EXW +: EXW];
+                end
+                s1_q  <= mem[radr];
+                s1_ex <= emem[radr];
+            end
+
+            reg         s1_bv;
+            reg [127:0] s1_sign;
+            always @(posedge clk) begin
+                if (rst) s1_bv <= 1'b0; else s1_bv <= sr_bv[gb*NPORTS + gm_i];
+                s1_sign <= smux;
+            end
+
+            // sign tree: s1 -> root, TL cycles
+            wire [16:0] t_d;
+            wire        t_sg;
+            gs_signtree #(.REGMASK(TREE_REGMASK)) u_tree (
+                .clk(clk), .q(s1_q), .s(s1_sign), .d(t_d), .sg(t_sg));
+
+            // stage 2 (per element): the shift count with this element's exponent
+            wire signed [KW-1:0] ksum = $signed({1'b0, ebase}) + s1_ex;
+            reg         s2_bv, s2_zero;
+            reg [6:0]   s2_k;
+            always @(posedge clk) begin
+                if (rst) s2_bv <= 1'b0; else s2_bv <= s1_bv;
+                s2_zero <= (ksum > 92);                         // sh >= 64: nothing lands in 64 bits
+                s2_k    <= (ksum < 0) ? 7'd0 : ksum[6:0];       // sh <= -29: pure sign fill (floor)
+            end
+
+            // align with the tree root
+            wire        r_bv, r_zero;
+            wire [6:0]  r_k;
+            gs_delay #(.W(1), .D(TL-1), .RST(1)) u_dv (.clk(clk), .rst(rst), .d(s2_bv), .q(r_bv));
+            gs_delay #(.W(8), .D(TL-1)) u_dd (.clk(clk), .rst(rst), .d({s2_zero, s2_k}), .q({r_zero, r_k}));
+
+            // multiply: term = d * (pending sign * m_d); the root's pending sign is
+            // folded into the sign of the scale mantissa (no 17-bit negate)
+            wire               negm = r_sgn ^ ~t_sg;
+            wire signed [11:0] mb   = negm ? -$signed({1'b0, r_mag}) : $signed({1'b0, r_mag});
+            wire signed [28:0] p;
+            gs_mul u_mul (.clk(clk), .a($signed(t_d)), .b(mb), .p(p));
+
+            wire       p_bv, p_zero;
+            wire [6:0] p_k;
+            gs_delay #(.W(1), .D(3), .RST(1)) u_pv (.clk(clk), .rst(rst), .d(r_bv), .q(p_bv));
+            gs_delay #(.W(8), .D(3)) u_pd (.clk(clk), .rst(rst), .d({r_zero, r_k}), .q({p_zero, p_k}));
+
+            // shifter: out = bits [92:29] of (sext(p) << k), k = 16*ka + kb
+            reg signed [43:0] h_u;
+            reg [2:0]         h_ka;
+            reg               h_gate;
+            always @(posedge clk) begin
+                h_u  <= $signed(p) <<< p_k[3:0];
+                h_ka <= p_k[6:4];
+                if (rst) h_gate <= 1'b0; else h_gate <= p_bv & ~p_zero;
+            end
+            wire signed [92:0] h_ext = h_u;
+            wire [92:0]        h_sh  = h_ext << {h_ka, 4'b0000};
+            reg [63:0]         term;
+            always @(posedge clk) term <= h_gate ? h_sh[92:29] : 64'd0;
+            assign terms[(gb*NPORTS + gm_i)*64 +: 64] = term;
         end
-        wire signed [92:0] h_ext = h_u;
-        wire [92:0]        h_sh  = h_ext << {h_ka, 4'b0000};
-        reg [63:0]         term;
-        always @(posedge clk) term <= h_gate ? h_sh[92:29] : 64'd0;
-        assign terms[gm_i*64 +: 64] = term;
     end endgenerate
 
     // ------------------------------------------------------------ lane sum + row accumulator
-    wire [63:0] lsum;
-    gs_lanesum #(.N(NPORTS), .W(64)) u_ls (.clk(clk), .d(terms), .s(lsum));
+    // slot flags aligned with the lane sums: S1 + TL + 5 + LS. The last stage is one register
+    // per batch element (keep), so no accumulator shares its enable / clear with another.
+    wire a_v0, a_rl0, a_ml0;
+    gs_delay #(.W(1), .D(TL + 4 + LS), .RST(1)) u_av (.clk(clk), .rst(rst), .d(s1_v), .q(a_v0));
+    gs_delay #(.W(2), .D(TL + 4 + LS)) u_ad (.clk(clk), .rst(rst), .d({s1_rl, s1_ml}), .q({a_rl0, a_ml0}));
 
-    wire a_v, a_rl, a_ml;           // slot flags aligned with lsum: S1 + TL + 5 + LS
-    gs_delay #(.W(1), .D(TL + 5 + LS), .RST(1)) u_av (.clk(clk), .rst(rst), .d(s1_v), .q(a_v));
-    gs_delay #(.W(2), .D(TL + 5 + LS)) u_ad (.clk(clk), .rst(rst), .d({s1_rl, s1_ml}), .q({a_rl, a_ml}));
+    wire [NB*64-1:0] res_all;
+    wire [NB-1:0]    a_v_all, a_rl_all, a_ml_all;
+    generate for (gb = 0; gb < NB; gb = gb + 1) begin : accu
+        wire [63:0] lsum;
+        gs_lanesum #(.N(NPORTS), .W(64)) u_ls (.clk(clk), .d(terms[gb*NPORTS*64 +: NPORTS*64]), .s(lsum));
 
-    reg [63:0] acc, res;
-    reg        res_v, res_ml;
-    wire [63:0] acc_nx = acc + lsum;
-    always @(posedge clk) begin
-        if (rst) begin
-            acc <= 64'd0; res_v <= 1'b0;
-        end else begin
-            res_v <= a_v & a_rl;
-            if (a_v) acc <= a_rl ? 64'd0 : acc_nx;
+        (* keep = "true" *) reg a_v, a_rl;
+        reg                     a_ml;
+        always @(posedge clk) begin
+            if (rst) a_v <= 1'b0; else a_v <= a_v0;
+            a_rl <= a_rl0; a_ml <= a_ml0;
         end
-        res    <= acc_nx;
-        res_ml <= a_ml;
+
+        reg [63:0]  acc, res;
+        wire [63:0] acc_nx = acc + lsum;
+        always @(posedge clk) begin
+            if (rst)      acc <= 64'd0;
+            else if (a_v) acc <= a_rl ? 64'd0 : acc_nx;
+            res <= acc_nx;
+        end
+        assign res_all[gb*64 +: 64] = res;
+        assign a_v_all[gb] = a_v; assign a_rl_all[gb] = a_rl; assign a_ml_all[gb] = a_ml;
+    end endgenerate
+
+    reg res_v, res_ml;
+    always @(posedge clk) begin
+        if (rst) res_v <= 1'b0; else res_v <= a_v_all[0] & a_rl_all[0];
+        res_ml <= a_ml_all[0];
     end
 
     // ------------------------------------------------------------ int64 -> fp32, output FIFO
-    wire        f_v, f_l;
-    wire [31:0] f_d;
-    gs_i64_to_f32 u_cv (.clk(clk), .rst(rst), .in_valid(res_v), .in_last(res_ml), .in_data(res),
-                        .out_valid(f_v), .out_last(f_l), .out_data(f_d));
+    wire [NB-1:0]    f_v, f_l;
+    wire [NB*32-1:0] f_d;
+    generate for (gb = 0; gb < NB; gb = gb + 1) begin : conv
+        wire [31:0] cd;
+        gs_i64_to_f32 u_cv (.clk(clk), .rst(rst), .in_valid(res_v), .in_last(res_ml),
+                            .in_data(res_all[gb*64 +: 64]),
+                            .out_valid(f_v[gb]), .out_last(f_l[gb]), .out_data(cd));
+        assign f_d[gb*32 +: 32] = cd;
+    end endgenerate
 
-    wire [32:0] fo;
-    gs_fifo #(.W(33), .LG(OFIFO_LG)) u_of (.clk(clk), .rst(rst), .wr(f_v), .din({f_l, f_d}),
-                                           .m_valid(m_valid), .m_ready(m_ready), .m_data(fo));
-    assign m_data   = fo[31:0];
-    assign m_last   = fo[32];
+    wire [NB*32:0] fo;
+    gs_fifo #(.W(NB*32 + 1), .LG(OFIFO_LG)) u_of (.clk(clk), .rst(rst), .wr(f_v[0]), .din({f_l[0], f_d}),
+                                                  .m_valid(m_valid), .m_ready(m_ready), .m_data(fo));
+    assign m_data   = fo[NB*32-1:0];
+    assign m_last   = fo[NB*32];
     assign fifo_pop = m_valid & m_ready;
 endmodule
 

@@ -2,9 +2,13 @@
 // axi_aux_dma — the aux AXI4 master of gemv_axi (register map version 2): the
 // small host <-> fabric data that used to cross AXI-Lite word by word.
 //
-//   ACTIVATION FETCH (AR/R).  act_go: read act_groups 256-byte records starting
-//   at act_addr (4 KB aligned) and write each into the core's activation RAM
-//   through its act_* port. Record g at act_addr + 256*g, 16 beats:
+//   ACTIVATION FETCH (AR/R).  act_go: read act_batch * act_groups 256-byte
+//   records starting at act_addr (4 KB aligned) and write each into the core's
+//   activation RAM through its act_* port. The records are one contiguous run:
+//   group g of batch element b at act_addr + 256*(b*act_groups + g) (register map
+//   version 3; act_batch = 1 is version 2: record g at act_addr + 256*g), so the
+//   element (= bank) advances every act_groups records, wherever the 4 KB bursts
+//   fall. One record = 16 beats:
 //       beats 0..9   the 1280-bit mantissa word, least significant beat first
 //       beat  10     byte 0 = the group's exponent (int8, sign-extended to EXW)
 //       beats 11..15 ignored
@@ -19,6 +23,10 @@
 //   from res_addr (4 KB aligned), so no burst crosses 4 KB. STORE AND FORWARD: AW
 //   is only issued for beats that are already in the FIFO, so a burst never waits
 //   for the engine. One burst outstanding at a time, BREADY = 1 for ever.
+//   (Version 3: the wrapper hands the BATCH elements of a row over as BATCH
+//   consecutive res_v words, element 0 first, res_last on the final element of
+//   the final row -- so "row" here means "word" and word n lands at res_addr +
+//   4*n, i.e. row r / element b at res_addr + 4*(r*BATCH + b).)
 //   res_room is the back-pressure for the row source (registered; it drops when
 //   fewer than 4 beats are free, which covers the rows already in flight).
 //   res_done = every row of the run has been written AND acknowledged.
@@ -52,10 +60,12 @@ module axi_aux_dma #(
     input  wire                  flush,
     // activation fetch
     input  wire                  act_go,         // 1-cycle pulse, only while idle
-    input  wire [7:0]            act_groups,     // records to fetch (0: act_done at once)
+    input  wire [7:0]            act_groups,     // records per batch element (0: act_done at once)
+    input  wire [2:0]            act_batch,      // batch elements to fetch, 1..4 (static from GO on)
     input  wire [AW-1:0]         act_addr,
     output reg                   act_done,       // 1-cycle pulse
     output reg                   act_we,         // to the core's activation write port
+    output reg  [1:0]            act_bank,       // batch element the record belongs to
     output reg  [7:0]            act_group,
     output reg  [1279:0]         act_mant,
     output reg  signed [EXW-1:0] act_exp,
@@ -141,7 +151,10 @@ module axi_aux_dma #(
     // ============================================================ activation fetch
     localparam [1:0] F_IDLE = 2'd0, F_SETUP = 2'd1, F_BURST = 2'd2, F_FIN = 2'd3;
     reg [1:0]    fs;
-    reg [7:0]    recs_left;                      // records not yet received
+    reg [9:0]    recs_left;                      // records not yet received
+    reg [9:0]    recs_tot;                       // act_batch * act_groups, registered ahead of act_go
+    reg [7:0]    g_last;                         // act_groups - 1: the last record of a batch element
+    reg [1:0]    bk, bank_p;                     // batch element of the record being received
     reg [4:0]    brecs;                          // records in the burst in flight (1..16)
     reg [AW-1:0] f_addr;
     reg          f_drop;                         // flushed: finish the bus transaction, commit nothing
@@ -173,8 +186,8 @@ module axi_aux_dma #(
                 F_IDLE: begin
                     f_drop <= 1'b0;
                     if (act_go && !fl_q) begin
-                        recs_left <= act_groups; f_addr <= act_addr; gcnt <= 8'd0; bcnt <= 4'd0;
-                        fs <= (act_groups == 8'd0) ? F_FIN : F_SETUP;
+                        recs_left <= recs_tot; f_addr <= act_addr; gcnt <= 8'd0; bcnt <= 4'd0; bk <= 2'd0;
+                        fs <= (recs_tot == 10'd0) ? F_FIN : F_SETUP;
                         fin_cnt <= 2'd0;
                     end
                 end
@@ -183,8 +196,8 @@ module axi_aux_dma #(
                     else begin
                         arvalid <= 1'b1;
                         araddr  <= f_addr;
-                        arlen   <= (recs_left >= 8'd16) ? 8'hFF : {recs_left[3:0] - 4'd1, 4'hF};
-                        brecs   <= (recs_left >= 8'd16) ? 5'd16 : {1'b0, recs_left[3:0]};
+                        arlen   <= (recs_left >= 10'd16) ? 8'hFF : {recs_left[3:0] - 4'd1, 4'hF};
+                        brecs   <= (recs_left >= 10'd16) ? 5'd16 : {1'b0, recs_left[3:0]};
                         fs      <= F_BURST;
                     end
                 end
@@ -192,17 +205,19 @@ module axi_aux_dma #(
                     if (r1_v) begin
                         bcnt <= bcnt + 4'd1;
                         if (!f_drop && bcnt == 4'd10) begin
-                            we_p  <= (gcnt < GMAX);
-                            grp_p <= gcnt;
-                            exp_p <= e8;
-                            gcnt  <= gcnt + 8'd1;
+                            we_p   <= (gcnt < GMAX);
+                            grp_p  <= gcnt;
+                            bank_p <= bk;
+                            exp_p  <= e8;
+                            if (gcnt == g_last) begin gcnt <= 8'd0; bk <= bk + 2'd1; end     // next batch element
+                            else                gcnt <= gcnt + 8'd1;
                         end
                         if (r1_last) begin
-                            recs_left <= recs_left - {3'd0, brecs};
+                            recs_left <= recs_left - {5'd0, brecs};
                             f_addr    <= f_addr + 4096;
                             fin_cnt   <= 2'd0;
                             if (f_drop || fl_q)                    fs <= F_IDLE;
-                            else if (recs_left == {3'd0, brecs})   fs <= F_FIN;
+                            else if (recs_left == {5'd0, brecs})   fs <= F_FIN;
                             else                                   fs <= F_SETUP;
                         end
                     end
@@ -220,7 +235,16 @@ module axi_aux_dma #(
         r2_d <= r1_d;
         if (sh_en) act_mant <= {r2_d, act_mant[1279:128]};       // least significant beat first
         act_group <= grp_p;
+        act_bank  <= bank_p;
         act_exp   <= exp_p;
+        // act_groups / act_batch are the wrapper's snapshot of GO: stable long before act_go
+        case (act_batch)
+            3'd2:    recs_tot <= {1'b0, act_groups, 1'b0};
+            3'd3:    recs_tot <= {2'b00, act_groups} + {1'b0, act_groups, 1'b0};
+            3'd4:    recs_tot <= {act_groups, 2'b00};
+            default: recs_tot <= {2'b00, act_groups};
+        endcase
+        g_last <= act_groups - 8'd1;
     end
 
     // ============================================================ result write

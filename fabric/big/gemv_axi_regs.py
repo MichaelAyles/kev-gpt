@@ -11,6 +11,20 @@ into one `gemv_stream` port, + a result capture RAM + counters. One run = one ma
     write ROWS / GROUPS / PAD / BURSTS / CHUNK / STEP / MAXOUT / BASE / PORT_OFF[k] / RES_START
     write CTRL.GO, poll STATUS.DONE, read the result window + counters
 
+VERSION 3 = BATCH: one pass over the weight stream multiplies the matrix with up to NB activation
+vectors (rtl parameter NB = 1 / 2 / 4, PARAMS[7:4]; run-time register BATCH = 1..NB). Batch element
+b of a run produces exactly the fp32 words a BATCH = 1 run on activation b alone produces. A
+version-2 script (BATCH never written) behaves exactly as on version 2; what BATCH > 1 adds:
+  * activation: NB banks. ACT_DMA fetches BATCH * GROUPS records, element b / group g at
+    ACT_ADDR + 256 * (b * GROUPS + g) (`act_rec_addr`); the register load reaches bank b through
+    ACT_GROUP[9:8]. A run without ACT_DMA re-uses whatever the banks hold.
+  * results in DDR (RES_DMA): row r / element b = the fp32 at RES_ADDR + 4 * (r * BATCH + b)
+    (`res_word_addr`): row-major, the elements of a row adjacent.
+  * per element b: ARGMAX_B + 8*b (index, value) and CHK_B + 16*b (SUM, XOR of its words).
+  * element 0 only, exactly as before: the AXI-Lite result window, SUM / XOR, ARGMAX_IDX / VAL.
+  * ROWS_DONE counts rows (not rows * BATCH); TUPLES / P_BEATS / P_XSUM do not depend on BATCH
+    (the weights are streamed once: that is the point).
+
 Port k issues BURSTS INCR bursts of CHUNK beats, burst n at
     BASE + PORT_OFF[k] + n * STEP
 (single ARID, so data returns in order). With the packer's layout (`pack_weights.py` §4,
@@ -22,7 +36,8 @@ PAD = BURSTS*CHUNK - R*TPR.
 BASE_ADDR = 0xA000_0000          # where the block design maps the slave
 ADDR_BITS = 17                   # 128 KB: registers in [0, 0x10000), result window above
 IDCODE_VALUE = 0x47454D56        # "GEMV"
-VERSION = 2                      # 2: aux DMA (activation from DDR, results to DDR) + argmax
+VERSION = 3                      # 2: aux DMA (activation from DDR, results to DDR) + argmax
+                                 # 3: batch (NB activation vectors per weight pass)
 
 # ---- control / status
 CTRL = 0x000          # W  bit0 GO (pulse; ignored while busy)   bit1 SOFT_RST (write 1, then 0)
@@ -30,7 +45,8 @@ STATUS = 0x004        # R  bit0 busy  bit1 done (sticky until GO / reset)  bit2 
                       #    bit3 fifo_overflow (sticky; must never happen)
                       #    bit4 aux_err (sticky): RRESP/BRESP != OKAY on the aux master
 IDCODE = 0x008        # R  IDCODE_VALUE
-PARAMS = 0x00C        # R  [3:0] NPORTS  [15:8] GMAX  [23:16] log2(RES_WORDS)  [31:24] VERSION
+PARAMS = 0x00C        # R  [3:0] NPORTS  [7:4] NB (v3: max batch; 0 on a version < 3 bitstream = 1)
+                      #    [15:8] GMAX  [23:16] log2(RES_WORDS)  [31:24] VERSION
 
 # ---- run configuration (static while busy)
 ROWS = 0x010          # RW output rows R of the matrix
@@ -49,20 +65,26 @@ MODE = 0x038          # RW bit0 ACT_DMA: before the run, fetch the activation of
                       #    bit2 RES_NOCAP: do not capture into the AXI-Lite result window (the
                       #       window keeps its old contents); counters, SUM/XOR, argmax still run
                       #    MODE = 0 is exactly the version-1 behaviour.
+BATCH = 0x03C         # RW (v3) activation vectors in this run, 1..NB. Reset 1. Stored as written;
+                      #    used clamped: 0 runs as 1, anything above NB as NB. Snapshotted at GO.
 PORT_OFF = 0x040      # RW PORT_OFF + 4*k, k = 0..7: byte offset of port k's first burst from BASE
 
 # ---- aux DMA (version 2): one extra AXI4 master (aux_axi, 128-bit, read + write) for the small
 # host<->fabric data, separate from the weight-stream read masters m0..m{NPORTS-1}.
 # The host owns cache coherency: it must flush what it wrote (ACT) before GO and invalidate
 # what the PL wrote (RES) before reading it.
-#   Activation image at ACT_ADDR: group g is a 256-byte record (16 beats) at ACT_ADDR + 256*g:
+#   Activation image at ACT_ADDR: group g of batch element b is a 256-byte record (16 beats) at
+#   ACT_ADDR + 256*(b*GROUPS + g), b = 0..BATCH-1 (version 2 / BATCH = 1: ACT_ADDR + 256*g):
 #     beats 0..9  = the 1280-bit mantissa word, least significant beat first
 #                   (element j = bits [10j+9 : 10j], two's complement; same word as ACT_MANT)
 #     beat  10    = byte 0: the group's exponent (int8, sign-extended to EXW bits); rest ignored
 #     beats 11..15  ignored
-#   Result image at RES_ADDR: row r is the little-endian raw fp32 word at RES_ADDR + 4*r
-#     (4 rows per beat). The last beat is zero-padded. All ROWS rows are written (RES_START
-#     only applies to the AXI-Lite window).
+#   Result image at RES_ADDR: row r, batch element b is the little-endian raw fp32 word at
+#     RES_ADDR + 4*(r*BATCH + b) (version 2 / BATCH = 1: RES_ADDR + 4*r; 4 words per beat). The
+#     last beat is zero-padded. All ROWS rows are written (RES_START only applies to the
+#     AXI-Lite window). With BATCH > 1 the engine hands over at most one row per BATCH cycles
+#     while RES_DMA is on (the words go to the writer one per cycle); a real matrix produces a
+#     row every 6+ cycles, so this only shows (as STALL_OUT) on matrices of one or two groups.
 #   Both addresses are 4 KB aligned; bursts are INCR, <= 256 beats, never crossing 4 KB.
 #   DONE rises only after the last write response.
 ACT_ADDR_LO = 0x070   # RW
@@ -72,7 +94,9 @@ RES_ADDR_HI = 0x07C   # RW bits [48:32]
 ACT_REC_BYTES = 256
 
 # ---- activation load (only while !busy)
-ACT_GROUP = 0x060     # RW group index
+ACT_GROUP = 0x060     # RW [7:0] group index  [9:8] (v3) batch element = the bank the commit writes
+                      #    (0 = the only bank of versions 1 / 2). A commit with bank >= NB, group >=
+                      #    GMAX or any of bits [31:10] set is ignored.
 ACT_EXP = 0x064       # RW signed exponent of that group (low EXW bits used)
 ACT_COMMIT = 0x068    # W  any write commits {ACT_MANT[0..39], ACT_EXP} to group ACT_GROUP
 ACT_MANT = 0x100      # RW ACT_MANT + 4*w, w = 0..39: bits [32w+31 : 32w] of the 1280-bit word;
@@ -94,9 +118,18 @@ ERRCNT = 0x22C        # R  R beats with RRESP != OKAY
 ARGMAX_IDX = 0x230    # R  (v2) the LOWEST row index holding the maximum result of this run
 ARGMAX_VAL = 0x234    # R  (v2) that maximum, raw fp32 bits. Ordering = IEEE comparison of finite
                       #    values (so -0 == +0 and the lower index wins the tie); NaN never occurs
+                      #    (v3) both are batch element 0's; element b: ARGMAX_B below
 CYC_ACT = 0x238       # R  (v2) cycles spent fetching the activation (ACT_DMA), included in CYC
 CYC_RES = 0x23C       # R  (v2) cycles from the last result row to the last write response
                       #    (RES_DMA), NOT included in CYC; DONE rises after it
+
+# ---- per batch element b (version 3; 0..NB-1, cleared by GO). Element 0 mirrors the version-2
+# registers; an element >= BATCH of the run reads 0; b >= NB is unmapped (reads 0).
+ARGMAX_B = 0x280      # R  ARGMAX_B + 8*b: ARGMAX_IDX of element b;  + 4: its ARGMAX_VAL (same rules)
+ARGMAX_B_STRIDE = 8
+CHK_B = 0x2C0         # R  CHK_B + 16*b: SUM_LO of element b's result words; + 4: SUM_HI; + 8: XOR
+CHK_B_STRIDE = 16     #    (+ 12 reads 0)
+NB_MAX = 4
 
 # ---- per port k (0..7): PORT_BASE + PORT_STRIDE*k + ...
 PORT_BASE = 0x300
@@ -113,3 +146,28 @@ RES_WORDS = 16384     #    rows captured per run
 
 def port_reg(k: int, off: int) -> int:
     return PORT_BASE + PORT_STRIDE * k + off
+
+
+def argmax_reg(b: int, val: bool = False) -> int:
+    """ARGMAX_IDX (val: ARGMAX_VAL) of batch element b."""
+    return ARGMAX_B + ARGMAX_B_STRIDE * b + (4 if val else 0)
+
+
+def chk_reg(b: int, word: int) -> int:
+    """checksum register of batch element b: word 0 SUM_LO, 1 SUM_HI, 2 XOR."""
+    return CHK_B + CHK_B_STRIDE * b + 4 * word
+
+
+def act_group_word(g: int, b: int = 0) -> int:
+    """what to write to ACT_GROUP to address group g of batch element b."""
+    return (b << 8) | g
+
+
+def act_rec_addr(act_addr: int, groups: int, b: int, g: int) -> int:
+    """byte address of the activation record of batch element b, group g (MODE.ACT_DMA)."""
+    return act_addr + ACT_REC_BYTES * (b * groups + g)
+
+
+def res_word_addr(res_addr: int, batch: int, r: int, b: int) -> int:
+    """byte address of the fp32 result of row r, batch element b (MODE.RES_DMA)."""
+    return res_addr + 4 * (r * batch + b)

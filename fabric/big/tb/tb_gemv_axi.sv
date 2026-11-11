@@ -1,7 +1,8 @@
 // tb_gemv_axi — drives rtl/gemv_axi.v exactly as the board driver does: an AXI-Lite BFM
 // replays a register script written by run_gemv_axi.py, one axi_rd_mem_slave per read
 // master serves the packed weight image, and one axi_rw_mem_slave on aux_axi holds the
-// activation records and receives the result rows (register map version 2).
+// activation records and receives the result rows (register map version 2; version 3 adds
+// the NB parameter -- everything batch-specific is in the register script and the images).
 //
 // Script (+script=<file>, +nops=<n>): $readmemh, 4 x 32-bit hex words per op
 //   0 a d -      write register a <- d
@@ -39,6 +40,7 @@ module tb_gemv_axi;
     parameter integer RES_LG  = 14;
     parameter integer MEM_LG  = 18;
     parameter integer AUX_LG  = 15;
+    parameter integer NB      = 1;          // max batch of the DUT (register map version 3)
     parameter integer MAXOPS  = 1 << 18;
     localparam integer MP = 4, AW = 49, IDW = 6;
 
@@ -88,7 +90,7 @@ module tb_gemv_axi;
     wire [63:0]    x_first_ar, x_last_r, x_last_b;
     wire           x_seen_ar, x_seen_b;
 
-    gemv_axi #(.NPORTS(NPORTS), .GMAX(GMAX), .FIFO_LG(FIFO_LG), .RES_LG(RES_LG)) dut (
+    gemv_axi #(.NPORTS(NPORTS), .GMAX(GMAX), .FIFO_LG(FIFO_LG), .RES_LG(RES_LG), .NB(NB)) dut (
         .S_AXI_ACLK(clk), .S_AXI_ARESETN(aresetn),
         .S_AXI_AWADDR(s_awaddr), .S_AXI_AWPROT(3'b0), .S_AXI_AWVALID(s_awvalid),
         .S_AXI_AWREADY(s_awready), .S_AXI_WDATA(s_wdata), .S_AXI_WSTRB(4'hF),
