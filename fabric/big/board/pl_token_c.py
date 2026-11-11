@@ -185,7 +185,7 @@ def main():
                             act_ms=g.t_act * 1e3, run_ms=g.t_run * 1e3, read_ms=g.t_read * 1e3,
                             ctx=len(ids) + len(gen) - 1, ns=st["ns"]))
         print()
-        r = dict(n_prompt=len(ids), gen=gen, prefill_s=tp, per_token=per)
+        r = dict(n_prompt=len(ids), ids=ids, gen=gen, prefill_s=tp, per_token=per)
         if tk:
             r["text"] = tk.decode(gen, skip_special_tokens=False)
         if per:

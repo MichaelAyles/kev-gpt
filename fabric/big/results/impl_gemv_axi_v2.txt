@@ -1,0 +1,31 @@
+gemv_axi VERSION 2 (aux DMA master on HP2, fabric argmax, banked result window) NPORTS=3 GMAX=96, full BD build (PS + SmartConnect + gemv_axi), xck26-sfvc784-2LV-c, Vivado 2026.1, 333 MHz requested, constrained at 3.333 ns (300.03 MHz: what the PS clock generator gives for that request). Run on silicon at 333.33 MHz, where this slack is -0.10 ns on paper (DERIVED), strategy Performance_ExplorePostRoutePhysOpt
+      0.229        0.000                      0                71944        0.011        0.000                      0                71944        0.166        0.000                       0                 27312  
+    -------      -------  ---------------------  -------------------      -------      -------  ---------------------  -------------------     --------     --------  ----------------------  --------------------  
+| Block RAM Tile    | 38.5 |     0 |          0 |       144 | 26.74 |
+| CARRY8                     |  1020 |     0 |          0 |     14640 |  6.97 |
+| CARRY8   |  1020 |                 CLB |
+| CLB LUTs                   | 14235 |     0 |          0 |    117120 | 12.15 |
+| CLB Registers                              | 22510 |     0 |          0 |    234240 |  9.61 |
+| CLB Registers              | 22510 |     0 |          0 |    234240 |  9.61 |
+| DSPs           |    6 |     0 |          0 |      1248 |  0.48 |
+|   LUT as Logic             | 11783 |     0 |          0 |    117120 | 10.06 |
+| LUT as Logic                               | 11783 |     0 |          0 |    117120 | 10.06 |
+|   LUT as Memory            |  2452 |     0 |          0 |     57600 |  4.26 |
+| LUT as Memory                              |  2452 |     0 |          0 |     57600 |  4.26 |
+* Note: Each Block RAM Tile only has one FIFO logic available and therefore can accommodate only one FIFO36E2 or one FIFO18E2. However, if a FIFO18E2 occupies a Block RAM Tile, that tile can still accommodate a RAMB18E2
+|   RAMB18          |    3 |     0 |          0 |       288 |  1.04 |
+|   RAMB36/FIFO*    |   37 |     0 |          0 |       144 | 25.69 |
+| URAM              |    0 |     0 |          0 |        64 |  0.00 |
+Slack (MET) :             0.229ns  (required time - arrival time)
+  Source:                 design_1_i/eng/inst/u_core/s0_badr_reg[8]_rep__1/C
+                            (rising edge-triggered cell FDRE clocked by clk_pl_0  {rise@0.000ns fall@1.666ns period=3.333ns})
+  Destination:            design_1_i/eng/inst/u_core/lane[1].s1_q_reg[537]/D
+                            (rising edge-triggered cell FDRE clocked by clk_pl_0  {rise@0.000ns fall@1.666ns period=3.333ns})
+  Path Group:             clk_pl_0
+  Path Type:              Setup (Max at Slow Process Corner)
+  Requirement:            3.333ns  (clk_pl_0 rise@3.333ns - clk_pl_0 rise@0.000ns)
+  Data Path Delay:        2.779ns  (logic 0.252ns (9.069%)  route 2.527ns (90.931%))
+  Logic Levels:           1  (RAMD32=1)
+  Clock Path Skew:        -0.265ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    2.603ns = ( 5.936 - 3.333 ) 
+    Source Clock Delay      (SCD):    3.083ns

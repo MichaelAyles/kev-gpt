@@ -1,4 +1,4 @@
-gemv_axi NPORTS=3 GMAX=96, full BD build (PS + SmartConnect + gemv_axi), xck26-sfvc784-2LV-c, Vivado 2026.1, target 3.0 ns (333 MHz), strategy Performance_ExplorePostRoutePhysOpt
+gemv_axi NPORTS=3 GMAX=96, full BD build (PS + SmartConnect + gemv_axi), xck26-sfvc784-2LV-c, Vivado 2026.1, 333 MHz requested, constrained at 3.333 ns (300.03 MHz: what the PS clock generator gives for that request; found 2026-11-11 with the v2 build, the earlier '3.0 ns' label was wrong), strategy Performance_ExplorePostRoutePhysOpt
     WNS(ns)      TNS(ns)  TNS Failing Endpoints  TNS Total Endpoints      WHS(ns)      THS(ns)  THS Failing Endpoints  THS Total Endpoints     WPWS(ns)     TPWS(ns)  TPWS Failing Endpoints  TPWS Total Endpoints  
      -0.096       -0.115                      3                64217        0.011        0.000                      0                64217        0.166        0.000                       0                 24382  
 | CLB LUTs                   | 13192 |     0 |          0 |    117120 | 11.26 |

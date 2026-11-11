@@ -1,6 +1,9 @@
 # R2a on silicon — PS + gemv_axi (AXI-Lite slave + NPORTS 128-bit read masters straight into
 # the PS HP ports), then synth + impl + bitstream in one go.
-#   vivado -mode batch -source fabric/big/tcl/build_gemv_axi.tcl -tclargs <NPORTS> <FREQMHZ> <BDIR> [GMAX]
+#   vivado -mode batch -source fabric/big/tcl/build_gemv_axi.tcl -tclargs <NPORTS> <FREQMHZ> <BDIR> [GMAX] [PERIOD_NS]
+# NOTE the PS clock generator rounds the request: FREQMHZ 333 comes out as 300.03 MHz and THAT
+# (3.333 ns) is what the design is constrained to, although the board driver then forces
+# 333.33 MHz. Pass PERIOD_NS (e.g. 3.000) to constrain implementation at the clock really used.
 # Master -> port map (R0's best sets): 3 ports = HP0, HP1, HP3 (aux on HP2); 4 ports = HP0..HP3
 # (aux on HPC0).
 set nports [lindex $argv 0]
@@ -11,6 +14,7 @@ if {$nports eq ""} { set nports 3 }
 if {$freq eq ""}   { set freq 333 }
 if {$bdir eq ""}   { set bdir "/tmp/kevbuild/big_r2a_bit" }
 if {$gmax eq ""}   { set gmax 96 }
+set per    [lindex $argv 4]
 
 set part  "xck26-sfvc784-2LV-c"
 set board "xilinx.com:kv260_som:part0:1.4"
@@ -86,6 +90,17 @@ set_property top design_1_wrapper [current_fileset]
 generate_target all [get_files design_1.bd]
 puts "BD_BUILD_GEMV_AXI_OK nports=$nports freq=$freq gmax=$gmax"
 
+if {$per ne ""} {
+    # same name on the same pin, read last: replaces the PS IP's own create_clock
+    set x "$bdir/clk_override.xdc"
+    set fh [open $x w]
+    puts $fh "create_clock -period $per -name clk_pl_0 \[get_pins -hier -filter {NAME =~ */PS8_i/PLCLK\[0\]}\]"
+    close $fh
+    add_files -fileset constrs_1 -norecurse $x
+    set_property PROCESSING_ORDER LATE [get_files $x]
+    set_property USED_IN {implementation} [get_files $x]
+    puts "CLOCK_OVERRIDE period=$per"
+}
 set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1]
 launch_runs synth_1 -jobs 8
 wait_on_run synth_1
